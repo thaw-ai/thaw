@@ -165,7 +165,7 @@ This is why thaw's value proposition gets stronger with larger models — exactl
 
 ```bash
 # On any CUDA 12+ machine with enough VRAM for the model:
-git clone https://github.com/thaw-ai/thaw.git && cd thaw
+git clone https://github.com/matteso1/thaw.git && cd thaw
 pip install "maturin[patchelf]" vllm
 cd crates/thaw-py && maturin develop --release --features cuda && cd ../..
 python python/vllm_demo.py --model meta-llama/Meta-Llama-3-8B --snapshot /tmp/snapshot.thaw

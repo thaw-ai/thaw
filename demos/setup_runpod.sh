@@ -20,7 +20,7 @@ pip install vllm
 
 echo "[2/5] Cloning thaw..."
 cd /root
-[ -d thaw ] && cd thaw && git pull || (git clone https://github.com/thaw-ai/thaw.git && cd thaw)
+[ -d thaw ] && cd thaw && git pull || (git clone https://github.com/matteso1/thaw.git && cd thaw)
 cd /root/thaw
 pip install -e .
 

@@ -10,7 +10,7 @@
   <meta property="og:type" content="website">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -26,9 +26,9 @@
       --accent: #2dd4bf;
       --accent-fg: #0a0a0a;
       --green: #4ade80;
-      --font-display: 'Outfit', sans-serif;
-      --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
-      --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --font-display: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'IBM Plex Mono', 'SF Mono', Menlo, monospace;
+      --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
       --max-w: 1100px;
     }
 
@@ -613,24 +613,6 @@
     .btn-outline:hover { border-color: var(--border-hover); }
     .btn-outline svg { width: 16px; height: 16px; fill: currentColor; }
 
-    /* ── Footer ── */
-
-    footer {
-      padding: 24px;
-      text-align: center;
-      font-size: 13px;
-      color: var(--text-muted);
-      border-top: 1px solid var(--border);
-    }
-
-    footer a {
-      color: var(--text-3);
-      text-decoration: none;
-      transition: color 0.15s;
-    }
-
-    footer a:hover { color: var(--text-1); }
-
     /* ── About ── */
 
     .about-grid {
@@ -688,7 +670,17 @@
     footer {
       border-top: 1px solid var(--border);
       padding: 64px 24px 32px;
+      font-size: 14px;
+      color: var(--text-muted);
     }
+
+    footer a {
+      color: var(--text-3);
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+
+    footer a:hover { color: var(--text-1); }
 
     .footer-inner {
       max-width: var(--max-w);
@@ -737,16 +729,8 @@
 
     .footer-col a:hover { color: var(--text-1); }
 
-    .footer-note {
-      font-size: 13px;
-      color: var(--text-muted);
-      margin-bottom: 14px;
-    }
-
-    .footer-hiring {
-      font-size: 13px;
-      color: var(--accent);
-      line-height: 1.55;
+    .footer-col a[href^="mailto:"] {
+      color: var(--text-3);
     }
 
     .footer-bottom {
@@ -1056,9 +1040,9 @@ llm = LLM(
       </div>
       <div class="footer-col">
         <h4>Connect</h4>
-        <a href="https://github.com/matteso1" target="_blank" rel="noopener">Nils Matteson</a>
-        <p class="footer-note">University of Wisconsin&ndash;Madison</p>
-        <p class="footer-hiring">Looking for engineers interested in GPU systems and inference infrastructure. Reach out on GitHub.</p>
+        <a href="https://github.com/thaw-ai" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://pypi.org/project/thaw-vllm/" target="_blank" rel="noopener">PyPI</a>
+        <a href="https://github.com/matteso1" target="_blank" rel="noopener">Contact</a>
       </div>
     </div>
     <div class="footer-bottom">MIT License</div>

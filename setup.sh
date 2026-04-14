@@ -2,15 +2,17 @@
 # thaw RunPod setup — one command to benchmark
 # Usage: bash setup.sh
 #
-# Set HF_TOKEN as a RunPod environment variable in the pod config UI,
-# or export it before running this script:
+# Set these as RunPod environment variables in the pod config UI,
+# or export them before running this script:
+#   export GITHUB_PAT=ghp_xxxxx
 #   export HF_TOKEN=hf_xxxxx
 
 set -euo pipefail
 
 # ── Check tokens ──────────────────────────────────────────────
-if [ -z "${HF_TOKEN:-}" ]; then
-    echo "ERROR: Set HF_TOKEN as an environment variable."
+if [ -z "${GITHUB_PAT:-}" ] || [ -z "${HF_TOKEN:-}" ]; then
+    echo "ERROR: Set GITHUB_PAT and HF_TOKEN as environment variables."
+    echo "  export GITHUB_PAT=ghp_xxxxx"
     echo "  export HF_TOKEN=hf_xxxxx"
     exit 1
 fi
@@ -32,7 +34,7 @@ echo "=== [3/7] Clone/update repo ==="
 if [ -d /workspace/thaw ]; then
     cd /workspace/thaw && git pull
 else
-    git clone https://github.com/thaw-ai/thaw.git /workspace/thaw
+    git clone "https://${GITHUB_PAT}@github.com/matteso1/thaw.git" /workspace/thaw
 fi
 cd /workspace/thaw
 

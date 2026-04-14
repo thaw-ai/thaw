@@ -156,7 +156,7 @@ thaw info   weights.thaw
 <summary>Building with Rust+CUDA backend (optional, higher throughput)</summary>
 
 ```bash
-git clone https://github.com/thaw-ai/thaw.git && cd thaw
+git clone https://github.com/matteso1/thaw.git && cd thaw
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 pip install "maturin[patchelf]" vllm
@@ -165,6 +165,27 @@ pip install -e ".[serve]"
 ```
 
 </details>
+
+## Competitive landscape
+
+The model loading space is active. Here's how thaw compares:
+
+| Project | Approach | Throughput | Limitations |
+|---------|----------|-----------|-------------|
+| **thaw** | Pipelined DMA, pinned memory, O_DIRECT + KV cache snapshot | 6.7-14.8 GB/s per GPU | — |
+| fastsafetensors (IBM) | GDS + 4x NVMe RAID0 | 26.4 GB/s | Requires GDS setup + RAID hardware |
+| NVIDIA Model Streamer | Multi-threaded concurrent streaming | ~2 GB/s (single SSD) | NVIDIA-maintained, less flexible |
+| CoreWeave Tensorizer | HTTP/S3 streaming + deserialization | ~4.6 GB/s local | Tied to CoreWeave ecosystem |
+| vLLM Sleep Mode | Offload to CPU RAM, reload | 0.26-3s | Not a cold start — requires prior warm load |
+| Modal GPU Snapshots | CUDA checkpoint/restore API | ~10x reduction | Alpha. Doesn't help with large model weight loading |
+| InferX | GPU runtime snapshotting | Claims 2s for 70B | No public code or benchmarks |
+
+**thaw's differentiation:**
+1. **KV cache snapshot/restore** — nobody else does this. Preserves prefix cache across cold starts, eliminates prefill. Enables agent forking, session migration, warm handoff.
+2. **Single NVMe performance** — most deployments don't have RAID0. thaw already matches or beats multi-threaded alternatives on one drive.
+3. **No special hardware** — no GDS, no RAID, no driver patches. Works on any CUDA 12+ GPU.
+
+See [docs/LANDSCAPE.md](./docs/LANDSCAPE.md) for detailed analysis.
 
 ## Roadmap
 
