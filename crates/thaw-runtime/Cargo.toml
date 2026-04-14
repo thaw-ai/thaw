@@ -1,0 +1,73 @@
+# thaw-runtime
+#
+# Orchestration layer. Knows about the file format (via thaw-core) and
+# knows how to drive a `CudaBackend` — but does NOT know whether that
+# backend is real CUDA or a mock. That separation is load-bearing:
+# it's what lets us test the entire freeze/restore pipeline on a Mac.
+#
+# What this crate holds:
+#   - The `CudaBackend` trait (the minimal GPU surface area we need)
+#   - `MockCuda`: a HashMap-backed fake GPU for tier-2 mock tests
+#   - Types that describe the shape of GPU memory without committing
+#     to a specific implementation: `DevicePtr`, `DeviceRegion`,
+#     `PinnedBuffer`
+#   - Orchestration code: "given a backend, freeze these regions to a
+#     .thaw file" / "given a .thaw file and a backend, restore it"
+#
+# What this crate does NOT hold:
+#   - Any direct call into CUDA (that's `RealCuda` in a later crate
+#     that depends on `thaw-cuda-sys`)
+#   - File format internals (delegated to thaw-core)
+#   - CLI parsing or benchmark harness logic (separate crates)
+#
+# The discipline from docs/TESTING.md section 3.3: the ONLY module in
+# this crate that may import thaw-cuda-sys is `real`, and it is gated
+# behind the `cuda` feature. Every other module — backend, freeze,
+# mock, restore — must compile on a Mac with no CUDA toolkit, and the
+# only way to enforce that at the compiler level is to keep the dep
+# optional and the module cfg'd. The orchestration code itself always
+# sees a generic `B: CudaBackend` bound, so it never knows whether it
+# is talking to the mock or to RealCuda.
+
+[package]
+name = "thaw-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Orchestration layer for thaw: freeze/restore over a CudaBackend trait."
+
+[features]
+# Default: Mac-compile-safe. No CUDA dep, no `real` module, and every
+# test in this crate runs against `MockCuda`.
+default = []
+
+# Opt-in: pull in thaw-cuda-sys with its own `cuda` feature enabled,
+# and compile the `real` module that implements `CudaBackend` against
+# the FFI. Enabled on machines with the CUDA toolkit installed.
+cuda = ["dep:thaw-cuda-sys", "thaw-cuda-sys/cuda"]
+
+[dependencies]
+# The file format and region types live in thaw-core. Depending on
+# it here (rather than duplicating the types) is how we keep the
+# "each crate has one job" rule honest.
+thaw-core = { path = "../thaw-core" }
+
+# The CUDA FFI seam. Optional: only compiled and linked when the
+# `cuda` feature is on. `dep:` form is required to suppress the
+# implicit feature flag that `optional = true` would otherwise create,
+# so the only way to pull this dep in is via our own `cuda` feature.
+thaw-cuda-sys = { path = "../thaw-cuda-sys", optional = true }
+
+# Ergonomic error types. Same choice as thaw-core.
+thiserror = "1.0"
+
+# pread and O_DIRECT support for the pipelined restore path.
+libc = "0.2"
+
+[dev-dependencies]
+# tempfile for any future integration tests that want a real
+# filesystem. Parity with thaw-core's dev-dep set.
+tempfile = "3"

@@ -1,0 +1,113 @@
+# ============================================================================
+# Rust
+# ============================================================================
+# Cargo's build output. Huge (gigabytes), fully reproducible from source.
+target/
+# Emacs/rustfmt backup files.
+**/*.rs.bk
+# We DO commit Cargo.lock for binary crates (reproducible builds).
+# If this were a library-only workspace we'd ignore it. It's not.
+# ============================================================================
+# C++ / CUDA
+# ============================================================================
+# CMake and nvcc build artifacts (when cpp/thaw-cuda starts building).
+cpp/**/build/
+cpp/**/cmake-build-*/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+# nvcc intermediate files.
+*.cubin
+*.fatbin
+*.ptx
+*.sass
+# ============================================================================
+# Python
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+# ============================================================================
+# Reading material — copyrighted papers and PDFs
+# ============================================================================
+# We keep PDFs locally for Phase 0 reading but don't commit them.
+# They're linked to in docs/READING.md and can be downloaded from arxiv
+# or NVIDIA. Copyrights belong to the authors.
+readings/*.pdf
+
+# ============================================================================
+# thaw runtime artifacts
+# ============================================================================
+# Actual snapshot files — potentially gigabytes, never commit.
+*.thaw
+# Benchmark output directories.
+snapshots/
+benchmarks/results/
+bench_results/
+# Any downloaded model weights (these live outside the repo normally,
+# but in case someone pulls Llama weights into a subfolder by mistake).
+models/
+weights/
+*.safetensors
+*.bin
+*.gguf
+# ============================================================================
+# Editors and OS
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+# ============================================================================
+# Secrets and local config
+# ============================================================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+# ============================================================================
+# Logs and profiling
+# ============================================================================
+*.log
+*.nvprof
+*.nsys-rep
+*.qdrep
+perf.data
+perf.data.old
+# ============================================================================
+# Don't ignore
+# ============================================================================
+# Explicitly keep empty-directory markers if we need them.
+!.gitkeep
+# Golden-file test fixtures. These are committed on purpose so that
+# format drift shows up as a diff in CI. The `*.bin` rule above is
+# for model weights; our own test goldens are the exception.
+!crates/**/tests/goldens/**dist/
+claudes_corner/
+
+dist/

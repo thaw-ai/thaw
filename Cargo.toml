@@ -1,0 +1,60 @@
+# thaw — workspace root
+#
+# This is the Cargo workspace manifest. It lists every Rust crate in the
+# project and sets shared metadata (edition, rust version, license, etc.)
+# so the individual crates don't have to repeat themselves.
+#
+# Why a workspace instead of one big crate?
+#   - It enforces the architectural split from DESIGN.md §3.8 at the
+#     compiler level. If thaw-core accidentally imports CUDA code, the
+#     build breaks. That's the point.
+#   - It lets `thaw-core` compile on a machine with no CUDA toolchain
+#     (your Mac), while `thaw-cuda-sys` only compiles where CUDA exists.
+#
+# If you've never seen a Cargo workspace before: think of it as a
+# "monorepo for a single Rust project." Each `members` entry is an
+# independent crate (library or binary) with its own Cargo.toml, but they
+# share a target/ directory and a Cargo.lock, so building one builds the
+# dependencies of all.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/thaw-cli",
+    "crates/thaw-core",
+    "crates/thaw-cuda-sys",
+    "crates/thaw-py",
+    "crates/thaw-runtime",
+    # Placeholder for now.
+    # "crates/thaw-bench",
+]
+
+# Shared metadata. Individual crates inherit these with `.workspace = true`
+# in their own [package] sections. Saves repeating yourself.
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/thaw-ai/thaw"
+authors = ["Nils Matteson <nilsmatteson@icloud.com>"]
+
+# Release profile tuning. `opt-level = 3` is the Rust default for release,
+# but we also turn on LTO (link-time optimization) and a single codegen
+# unit. These slow builds down but make the final binary faster — worth
+# it for a benchmark-sensitive project.
+#
+# `debug = true` in release is NOT a typo. It embeds debug symbols so that
+# when something crashes or profiles weirdly, we get meaningful stack
+# traces. It does not affect performance, only binary size.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = true
+
+# A separate profile for benchmarks. Same as release but without LTO, so
+# that `cargo bench` iterations don't take forever to compile.
+[profile.bench]
+lto = "thin"
+codegen-units = 16
+debug = true

@@ -1,0 +1,39 @@
+# thaw-core
+#
+# Pure Rust. No CUDA. No unsafe if we can help it. This crate holds:
+#   - The `.thaw` file format (header, region table, payload layout)
+#   - Region metadata types (RegionKind, DeviceRegion, FileRegion)
+#   - I/O primitives (page-aligned buffers, direct-IO wrappers)
+#   - Serialization / deserialization helpers
+#
+# What this crate does NOT hold:
+#   - Anything that talks to a GPU (that's thaw-cuda-sys + cpp/thaw-cuda)
+#   - Anything that talks to vLLM (that's python/thaw_vllm)
+#   - Freeze/restore orchestration (that's thaw-runtime)
+#
+# The rule: if a function in this crate can't be tested with `cargo test`
+# on a Mac with no CUDA, it doesn't belong here. Push it down to
+# thaw-runtime (which uses the CudaBackend trait) or up to thaw-cuda-sys.
+#
+# See docs/STACK.md for the full rationale and docs/TESTING.md for how
+# this crate fits into the testing tiers.
+
+[package]
+name = "thaw-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core types and file format for thaw — pure Rust, no CUDA."
+
+[dependencies]
+# `thiserror` gives us ergonomic error types without the boilerplate of
+# hand-written Display and From impls. Standard choice for library crates.
+thiserror = "1.0"
+
+[dev-dependencies]
+# `tempfile` creates temp directories that clean themselves up. Used in
+# integration tests so we don't leave junk around on disk.
+tempfile = "3"

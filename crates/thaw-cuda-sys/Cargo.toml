@@ -1,0 +1,79 @@
+# crates/thaw-cuda-sys/Cargo.toml
+#
+# =============================================================================
+# THE CUDA FFI SEAM
+# =============================================================================
+#
+# This crate holds every unsafe `extern "C"` block in the thaw project. If
+# you see `cudaMalloc` or `cudaMemcpy` referenced anywhere else in the
+# workspace, it is a bug — those functions belong here and here alone.
+#
+# The one-seam rule exists so that:
+#
+#   1. `thaw-core` and `thaw-runtime` compile on a Mac with no CUDA
+#      toolchain. Only `thaw-cuda-sys` needs `libcudart` on the link line.
+#
+#   2. The unsafe surface area is auditable. Every time a reviewer asks
+#      "where does this project touch CUDA?", the answer is "one file,
+#      which is under 200 lines."
+#
+#   3. The mock/real split at the `CudaBackend` trait level stays clean.
+#      The real impl (which will live in `thaw-runtime` behind a feature
+#      flag) calls into this crate; the mock impl never depends on it.
+#
+# =============================================================================
+#
+# ## The `cuda` feature flag
+#
+# By default this crate compiles *without* linking `libcudart`. That path
+# exposes the Rust-level types (`CudaStatus`, `CudaMemcpyKind`) and a
+# compile-time `CUDA_AVAILABLE: bool = false` constant, but no actual FFI
+# symbols. Mac developers can build and test everything at this level.
+#
+# Pass `--features cuda` (or let a sibling crate pull it in via
+# `thaw-cuda-sys = { version = ..., features = ["cuda"] }`) on a machine
+# with the CUDA toolkit installed, and the `extern "C"` block lights up
+# plus `CUDA_AVAILABLE` flips to `true`.
+#
+# This split is the same trick `openssl-sys` and `sdl2-sys` use to let
+# downstream crates compile in environments where the native library is
+# missing, without polluting the source tree with `#[cfg(target_os)]`
+# noise.
+#
+# =============================================================================
+
+[package]
+name = "thaw-cuda-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Unsafe FFI bindings to the minimum CUDA runtime surface thaw needs."
+# Note: we deliberately do NOT set `links = "cudart"` here. Cargo's
+# `links` key requires a build script to go with it, and using it as
+# pure documentation would force us to carry a `build.rs` that does
+# nothing on Mac and something trivial on Linux. Since there is exactly
+# one crate in this workspace that references cudart — this one — the
+# duplicate-detection invariant that `links` enforces is not actually
+# buying us anything right now. If a future crate also needs to link
+# cudart directly (unlikely; anything that needs it should depend on
+# us), we will add `links` + a build.rs at that point. Until then, the
+# `#[link(name = "cudart")]` attribute inside `src/lib.rs` is enough.
+
+[features]
+# Default: no CUDA. The crate compiles on a Mac and exposes only the
+# Rust-level helper types.
+default = []
+
+# Opt-in: link against the system libcudart and enable the real FFI
+# surface. Downstream crates on machines with the CUDA toolkit installed
+# enable this feature to get the actual bindings.
+cuda = []
+
+[dependencies]
+# Intentionally empty. A `-sys` crate should have zero Rust dependencies
+# — it is supposed to be the thinnest possible wrapper over the native
+# library. Any higher-level helpers belong one layer up, in whatever
+# crate wraps this one.

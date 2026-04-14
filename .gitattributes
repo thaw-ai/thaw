@@ -1,0 +1,59 @@
+# Normalize line endings across Mac/Windows/Linux.
+# Without this file, Windows machines convert LF to CRLF on checkout,
+# which causes phantom diffs when the same file is edited on different
+# platforms. Every file type we care about is listed explicitly below.
+#
+# `text=auto eol=lf` means: detect text files automatically, and when
+# storing them in the repo use LF line endings regardless of platform.
+# Individual rules below override this for specific extensions and
+# mark binary files so Git doesn't try to convert them.
+
+* text=auto eol=lf
+
+# Source code — always LF. Every toolchain (rustc, nvcc, python, gcc)
+# prefers LF. CRLF in source files breaks some linters and can cause
+# subtle diff noise.
+*.rs        text eol=lf
+*.toml      text eol=lf
+*.md        text eol=lf
+*.py        text eol=lf
+*.pyi       text eol=lf
+*.c         text eol=lf
+*.h         text eol=lf
+*.cc        text eol=lf
+*.cpp       text eol=lf
+*.hpp       text eol=lf
+*.cu        text eol=lf
+*.cuh       text eol=lf
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.json      text eol=lf
+*.lock      text eol=lf
+*.txt       text eol=lf
+Cargo.lock  text eol=lf
+
+# Binary — never touch these. If Git tries to "normalize" them it
+# corrupts the file.
+*.thaw         binary
+*.safetensors  binary
+*.bin          binary
+*.gguf         binary
+*.so           binary
+*.so.*         binary
+*.dylib        binary
+*.dll          binary
+*.exe          binary
+*.o            binary
+*.obj          binary
+*.a            binary
+*.lib          binary
+*.pdb          binary
+*.png          binary
+*.jpg          binary
+*.jpeg         binary
+*.gif          binary
+*.pdf          binary
+*.zip          binary
+*.tar          binary
+*.gz           binary

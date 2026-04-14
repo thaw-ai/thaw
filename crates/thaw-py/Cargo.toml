@@ -1,0 +1,96 @@
+# crates/thaw-py/Cargo.toml
+#
+# =============================================================================
+# THE PYTHON BINDINGS
+# =============================================================================
+#
+# This crate produces `thaw.so` / `thaw.pyd` — the native Python extension
+# module that vLLM's integration layer imports. It is the outermost layer
+# of thaw: everything above it is Python (the vLLM patches), everything
+# below it is Rust (thaw-runtime + thaw-core + thaw-cuda-sys).
+#
+# The whole crate is a thin adapter. It does not implement freeze or
+# restore itself — it translates Python arguments into the types
+# thaw-runtime already expects, calls into the orchestrator, and
+# translates the Result back into a Python exception or return value.
+# If you find yourself writing non-trivial logic here, it probably
+# belongs one layer down in thaw-runtime where the Rust tests can
+# exercise it without a Python interpreter in the loop.
+#
+# ## Why a separate crate instead of a feature on thaw-runtime
+#
+# PyO3 is a heavy-ish dependency (proc macros, cpython glue, a build
+# script that sniffs out the Python interpreter). Keeping it in its
+# own crate means:
+#
+#   - thaw-runtime builds fast in the normal Rust development loop.
+#     The test suite we already have runs with no PyO3 in the
+#     dependency graph.
+#
+#   - `cargo check -p thaw-runtime` on a machine with no Python dev
+#     headers still works. Only building this crate triggers
+#     PyO3's Python-version probing.
+#
+#   - Swapping out the binding framework (ffi4py, cxx, a future Rust
+#     cpython crate) is a one-crate change rather than a feature-flag
+#     archaeology project.
+#
+# =============================================================================
+
+[package]
+name = "thaw-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Python bindings for thaw: freeze/restore a GPU snapshot from Python."
+
+[features]
+# Default: Mac-compile-safe. The extension module still builds and
+# exports its two functions, but both raise `NotImplementedError` at
+# runtime because RealCuda is not compiled in. This is the
+# development path — it lets `cargo check -p thaw-py` succeed on a
+# Mac, and it means the Python-side integration code can be iterated
+# on against a clearly-failing stub before the GPU box is in the
+# loop.
+default = []
+
+# Opt-in: pull in thaw-runtime's `cuda` feature, which activates
+# RealCuda, which this crate then dispatches to. Enabled on machines
+# with the CUDA toolkit installed and a working Python environment.
+cuda = ["thaw-runtime/cuda"]
+
+[lib]
+# `cdylib` is the crate type PyO3 needs: it produces a shared library
+# (thaw.so / thaw.pyd) that Python's import machinery can dlopen. The
+# `rlib` is kept alongside so our own Rust-side unit tests can still
+# link against the crate — a pure cdylib has no rlib and `cargo test`
+# cannot link the test harness against it, which would stop us from
+# unit-testing any of the adapter logic.
+#
+# The `name` is what Python will call the module after it imports.
+# `import thaw` must resolve to a library named `thaw.{so,pyd}`, so
+# the cdylib name and this field have to match — otherwise PyO3's
+# `#[pymodule]` macro generates a function Python cannot find.
+name = "thaw"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The orchestrator. Every freeze/restore call on this crate is a
+# thin translation layer over one of its entry points.
+thaw-runtime = { path = "../thaw-runtime" }
+
+# Re-exported so we can name RegionKind at the boundary.
+thaw-core = { path = "../thaw-core" }
+
+# PyO3 — the Rust <-> Python FFI bridge. `extension-module` tells it
+# to generate a cdylib intended for dlopen by Python (rather than a
+# Rust program that embeds a Python interpreter). `abi3-py38` lets
+# the resulting .so work against any Python >= 3.8 without having to
+# rebuild per version, which is what vLLM integration will want.
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+
+# Ergonomic error types. Same choice as the rest of the workspace.
+thiserror = "1.0"

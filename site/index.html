@@ -1,0 +1,1089 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>thaw — 17x faster LLM cold starts</title>
+  <meta name="description" content="GPU state management for LLM inference. 17x faster cold starts, multi-GPU tensor parallel, KV cache snapshots. Open source MIT.">
+  <meta property="og:title" content="thaw — 17x faster LLM cold starts">
+  <meta property="og:description" content="GPU state management for LLM inference. Snapshot weights and KV cache, restore in seconds instead of minutes.">
+  <meta property="og:type" content="website">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0a0a0a;
+      --surface: #111;
+      --border: #222;
+      --border-hover: #3a3a3a;
+      --text-1: #ededed;
+      --text-2: #999;
+      --text-3: #666;
+      --text-muted: #444;
+      --accent: #2dd4bf;
+      --accent-fg: #0a0a0a;
+      --green: #4ade80;
+      --font-display: 'Outfit', sans-serif;
+      --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, monospace;
+      --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      --max-w: 1100px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text-1);
+      font-family: var(--font-body);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .wrap {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      padding-left: 24px;
+      padding-right: 24px;
+    }
+
+    /* ── Nav ── */
+
+    nav {
+      position: fixed;
+      top: 0;
+      width: 100%;
+      z-index: 100;
+      background: rgba(10, 10, 10, 0.85);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-inner {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      padding: 0 24px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .logo {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 20px;
+      color: var(--text-1);
+      text-decoration: none;
+      letter-spacing: -0.5px;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 32px;
+    }
+
+    .nav-links a {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-3);
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+
+    .nav-links a:hover { color: var(--text-1); }
+
+    .nav-gh {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      transition: border-color 0.15s;
+    }
+
+    .nav-gh:hover { border-color: var(--border-hover); }
+    .nav-gh svg { width: 16px; height: 16px; fill: currentColor; }
+
+    /* ── Hero ── */
+
+    .hero {
+      padding: 160px 24px 80px;
+      max-width: 800px;
+      margin: 0 auto;
+      text-align: center;
+    }
+
+    .badge {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-3);
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      padding: 6px 16px;
+      margin-bottom: 32px;
+    }
+
+    h1 {
+      font-family: var(--font-display);
+      font-size: clamp(44px, 7vw, 72px);
+      font-weight: 700;
+      letter-spacing: -2px;
+      line-height: 1.05;
+      margin-bottom: 24px;
+    }
+
+    .accent { color: var(--accent); }
+
+    .hero-sub {
+      font-size: 17px;
+      color: var(--text-2);
+      max-width: 540px;
+      margin: 0 auto 44px;
+      line-height: 1.7;
+    }
+
+    .hero-cta {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .install {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 18px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-family: var(--font-mono);
+      font-size: 14px;
+      color: var(--text-1);
+      cursor: pointer;
+      transition: border-color 0.15s;
+      user-select: none;
+    }
+
+    .install:hover { border-color: var(--border-hover); }
+    .install .dollar { color: var(--text-muted); }
+    .install .copy-label {
+      font-family: var(--font-body);
+      font-size: 11px;
+      color: var(--text-muted);
+      transition: color 0.15s;
+    }
+    .install:hover .copy-label { color: var(--text-3); }
+    .install.copied .copy-label { color: var(--green); }
+
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 11px 22px;
+      background: var(--accent);
+      color: var(--accent-fg);
+      border-radius: 6px;
+      text-decoration: none;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      transition: opacity 0.15s;
+    }
+
+    .btn-primary:hover { opacity: 0.85; }
+    .btn-primary svg { width: 14px; height: 14px; }
+
+    /* ── Benchmark Viz ── */
+
+    .bench-viz {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 0 24px 100px;
+    }
+
+    .viz-box {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .viz-header {
+      padding: 14px 24px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-3);
+      letter-spacing: 0.02em;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .viz-body {
+      padding: 28px 24px;
+    }
+
+    .bar-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+
+    .bar-row:last-of-type { margin-bottom: 0; }
+
+    .bar-label {
+      width: 110px;
+      flex-shrink: 0;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-3);
+      text-align: right;
+    }
+
+    .bar-track { flex: 1; }
+
+    .bar-fill {
+      height: 28px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding: 0 10px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .bar-slow {
+      background: #1e1e1e;
+      color: var(--text-2);
+      width: 100%;
+      animation: bar-grow 0.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    .bar-fast {
+      background: var(--accent);
+      color: var(--accent-fg);
+      width: 5.8%;
+      min-width: 72px;
+      animation: bar-grow 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
+    }
+
+    @keyframes bar-grow {
+      from { transform: scaleX(0); transform-origin: left; }
+      to { transform: scaleX(1); transform-origin: left; }
+    }
+
+    .viz-result {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      padding-top: 20px;
+      margin-top: 20px;
+      border-top: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 13px;
+    }
+
+    .viz-result strong {
+      font-family: var(--font-display);
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text-1);
+    }
+
+    .viz-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--green);
+    }
+
+    .viz-check svg { width: 15px; height: 15px; }
+
+    /* ── Stats ── */
+
+    .stats {
+      display: flex;
+      max-width: 780px;
+      margin: 0 auto 100px;
+      padding: 0 24px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .stat {
+      flex: 1;
+      padding: 32px 24px;
+      text-align: center;
+    }
+
+    .stat + .stat { border-left: 1px solid var(--border); }
+
+    .stat-num {
+      font-family: var(--font-display);
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -1px;
+      margin-bottom: 4px;
+    }
+
+    .stat-label {
+      font-size: 13px;
+      color: var(--text-3);
+    }
+
+    /* ── Section shared ── */
+
+    .section {
+      border-top: 1px solid var(--border);
+      padding: 100px 24px;
+    }
+
+    .section-inner {
+      max-width: var(--max-w);
+      margin: 0 auto;
+    }
+
+    .section-tag {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+
+    h2 {
+      font-family: var(--font-display);
+      font-size: clamp(28px, 4vw, 40px);
+      font-weight: 700;
+      letter-spacing: -1px;
+      line-height: 1.1;
+      margin-bottom: 20px;
+    }
+
+    .section-sub {
+      font-size: 16px;
+      color: var(--text-2);
+      max-width: 480px;
+      line-height: 1.6;
+    }
+
+    /* ── Features ── */
+
+    .features-head {
+      text-align: center;
+      margin-bottom: 56px;
+    }
+
+    .features-head .section-sub {
+      margin: 0 auto;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .feature {
+      background: var(--bg);
+      padding: 32px 28px;
+    }
+
+    .feature-icon {
+      width: 20px;
+      height: 20px;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+
+    .feature h3 {
+      font-family: var(--font-display);
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      line-height: 1.3;
+    }
+
+    .feature p {
+      font-size: 14px;
+      color: var(--text-2);
+      line-height: 1.65;
+    }
+
+    .feature code {
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      color: var(--text-1);
+      background: var(--surface);
+      padding: 1px 6px;
+      border-radius: 3px;
+    }
+
+    /* ── Code ── */
+
+    .code-section .section-inner { max-width: 780px; }
+    .code-head { text-align: center; margin-bottom: 40px; }
+    .code-head .section-sub { margin: 0 auto; }
+
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tab {
+      padding: 10px 20px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-muted);
+      background: none;
+      border: none;
+      cursor: pointer;
+      position: relative;
+      transition: color 0.15s;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .tab:hover { color: var(--text-2); }
+
+    .tab.active {
+      color: var(--text-1);
+    }
+
+    .tab.active::after {
+      content: '';
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: var(--accent);
+    }
+
+    .code-panel {
+      background: #0c0c0c;
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 8px 8px;
+      padding: 24px;
+      font-family: var(--font-mono);
+      font-size: 14px;
+      line-height: 1.75;
+      overflow-x: auto;
+      display: none;
+    }
+
+    .code-panel.active { display: block; }
+
+    .hl-kw { color: #c9a0ff; }
+    .hl-fn { color: #7ee8d0; }
+    .hl-str { color: #82aaff; }
+    .hl-cmt { color: #555; }
+    .hl-num { color: #deb887; }
+
+    /* ── Benchmark Table ── */
+
+    .bench-section .section-inner { max-width: 780px; }
+
+    .bench-head {
+      margin-bottom: 40px;
+    }
+
+    .bench-wrap {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .bench-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    .bench-table th {
+      text-align: left;
+      padding: 12px 20px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 400;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.01);
+    }
+
+    .bench-table td {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .bench-table tbody tr:last-child td { border-bottom: none; }
+
+    .bench-table .col-model { font-weight: 500; }
+
+    .bench-table .col-mono {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    .bench-table .col-speedup {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 15px;
+      color: var(--accent);
+    }
+
+    /* ── CTA ── */
+
+    .cta {
+      border-top: 1px solid var(--border);
+      text-align: center;
+      padding: 100px 24px 120px;
+    }
+
+    .cta h2 {
+      margin-bottom: 12px;
+    }
+
+    .cta-sub {
+      color: var(--text-2);
+      font-size: 16px;
+      margin-bottom: 40px;
+    }
+
+    .cta-actions {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .btn-outline {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 11px 22px;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-1);
+      text-decoration: none;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      transition: border-color 0.15s;
+    }
+
+    .btn-outline:hover { border-color: var(--border-hover); }
+    .btn-outline svg { width: 16px; height: 16px; fill: currentColor; }
+
+    /* ── Footer ── */
+
+    footer {
+      padding: 24px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+    }
+
+    footer a {
+      color: var(--text-3);
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+
+    footer a:hover { color: var(--text-1); }
+
+    /* ── About ── */
+
+    .about-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 48px;
+      margin-bottom: 48px;
+    }
+
+    .about-label {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+
+    .about-block p {
+      font-size: 16px;
+      color: var(--text-2);
+      line-height: 1.75;
+    }
+
+    .use-cases {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .use-case {
+      background: var(--bg);
+      padding: 28px 24px;
+    }
+
+    .use-case h4 {
+      font-family: var(--font-display);
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .use-case p {
+      font-size: 14px;
+      color: var(--text-2);
+      line-height: 1.6;
+    }
+
+    /* ── Footer ── */
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 64px 24px 32px;
+    }
+
+    .footer-inner {
+      max-width: var(--max-w);
+      margin: 0 auto;
+    }
+
+    .footer-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr 1fr 1.2fr;
+      gap: 40px;
+      margin-bottom: 40px;
+    }
+
+    .footer-logo {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 18px;
+      color: var(--text-1);
+      display: block;
+      margin-bottom: 10px;
+    }
+
+    .footer-brand > p {
+      font-size: 14px;
+      color: var(--text-3);
+      line-height: 1.5;
+    }
+
+    .footer-col h4 {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+
+    .footer-col a {
+      display: block;
+      font-size: 14px;
+      color: var(--text-3);
+      text-decoration: none;
+      margin-bottom: 10px;
+      transition: color 0.15s;
+    }
+
+    .footer-col a:hover { color: var(--text-1); }
+
+    .footer-note {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+
+    .footer-hiring {
+      font-size: 13px;
+      color: var(--accent);
+      line-height: 1.55;
+    }
+
+    .footer-bottom {
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    /* ── Responsive ── */
+
+    @media (max-width: 900px) {
+      .feature-grid { grid-template-columns: repeat(2, 1fr); }
+      .about-grid { grid-template-columns: 1fr; gap: 32px; }
+      .use-cases { grid-template-columns: 1fr; }
+      .footer-grid { grid-template-columns: 1fr 1fr; gap: 32px; }
+    }
+
+    @media (max-width: 640px) {
+      .feature-grid { grid-template-columns: 1fr; }
+      .stats { flex-direction: column; }
+      .stat + .stat { border-left: none; border-top: 1px solid var(--border); }
+      .nav-links a:not(.nav-gh) { display: none; }
+      .hero { padding: 130px 20px 60px; }
+      h1 { letter-spacing: -1px; }
+      .bar-label { width: 80px; font-size: 11px; }
+      .viz-body { padding: 20px 16px; }
+      .bench-table th, .bench-table td { padding: 10px 12px; font-size: 13px; }
+      .footer-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/" class="logo">thaw</a>
+    <div class="nav-links">
+      <a href="#about">About</a>
+      <a href="#features">Features</a>
+      <a href="#benchmarks">Benchmarks</a>
+      <a href="#quickstart">Quick Start</a>
+      <a href="https://github.com/thaw-ai/thaw" class="nav-gh" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <span class="badge">Open Source &middot; MIT License</span>
+  <h1><span class="accent">17&times;</span> faster<br>LLM cold starts</h1>
+  <p class="hero-sub">GPU state management for inference. Snapshot model weights and KV cache, restore in seconds instead of minutes. Multi-GPU tensor parallel. Bit-identical outputs.</p>
+  <div class="hero-cta">
+    <div class="install" onclick="copyCmd(this)">
+      <span class="dollar">$</span> pip install thaw-vllm
+      <span class="copy-label">copy</span>
+    </div>
+    <a href="https://github.com/thaw-ai/thaw" class="btn-primary" target="_blank" rel="noopener">
+      GitHub
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+    </a>
+  </div>
+</section>
+
+<section class="bench-viz">
+  <div class="viz-box">
+    <div class="viz-header">Llama-3-70B-Instruct &middot; 2&times; A100 SXM 80 GB</div>
+    <div class="viz-body">
+      <div class="bar-row">
+        <div class="bar-label">vLLM default</div>
+        <div class="bar-track"><div class="bar-fill bar-slow">546.5s</div></div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label">thaw restore</div>
+        <div class="bar-track"><div class="bar-fill bar-fast">31.8s</div></div>
+      </div>
+      <div class="viz-result">
+        <strong>17.2&times; faster</strong>
+        <span style="color:var(--text-muted)">&middot;</span>
+        <span class="viz-check">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          Bit-identical output
+        </span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="stats">
+  <div class="stat">
+    <div class="stat-num">17.2&times;</div>
+    <div class="stat-label">Faster cold start (70B)</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">14.8 GB/s</div>
+    <div class="stat-label">Peak restore throughput</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">0.135s</div>
+    <div class="stat-label">KV cache restore</div>
+  </div>
+</div>
+
+<section class="section" id="about">
+  <div class="section-inner">
+    <span class="section-tag">// About</span>
+    <h2>Cold starts are the bottleneck</h2>
+    <div class="about-grid">
+      <div class="about-block">
+        <div class="about-label">The problem</div>
+        <p>Before an AI model can respond to a single request, it has to load tens to hundreds of gigabytes of data onto GPU hardware. For Llama-3-70B, one of the most popular open models, this takes over 9 minutes. Every restart, every scale-up, every new server &mdash; the same wait. Expensive GPUs sit idle while data trickles in.</p>
+      </div>
+      <div class="about-block">
+        <div class="about-label">The solution</div>
+        <p>thaw snapshots the fully loaded state of a model and restores it in seconds. Think of it like hibernate on a computer &mdash; instead of booting from scratch every time, you pick up exactly where you left off. The restored model produces bit-identical outputs to the original, verified by automated testing.</p>
+      </div>
+    </div>
+    <div class="use-cases">
+      <div class="use-case">
+        <h4>Serverless inference</h4>
+        <p>GPU endpoints that start in seconds, not minutes. Serve requests on demand without keeping expensive hardware running 24/7.</p>
+      </div>
+      <div class="use-case">
+        <h4>Cost reduction</h4>
+        <p>Every minute of cold start is a minute of wasted GPU time. Faster starts mean more of your compute budget goes to actual inference.</p>
+      </div>
+      <div class="use-case">
+        <h4>Agent infrastructure</h4>
+        <p>Clone a running AI session to explore multiple paths simultaneously. Fork parallel conversations from a shared starting point.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="features">
+  <div class="section-inner">
+    <div class="features-head">
+      <span class="section-tag">// Capabilities</span>
+      <h2>Built for production inference</h2>
+    </div>
+    <div class="feature-grid">
+      <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        <h3>Pipelined DMA</h3>
+        <p>Double-buffered CUDA streams with O_DIRECT. Overlaps disk reads with PCIe transfers. Rust+CUDA hot path hits 14.79 GB/s on PCIe Gen5.</p>
+      </div>
+      <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
+        <h3>Multi-GPU Tensor Parallel</h3>
+        <p>Per-rank snapshots with automatic sharding. Freeze and restore across any number of GPUs. 17.2&times; on 2&times; A100 SXM with Llama-3-70B.</p>
+      </div>
+      <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+        <h3>KV Cache Snapshots</h3>
+        <p>Nobody else does this. Freeze prefix-cached KV blocks, restore with hash mappings intact. New requests skip prefill entirely.</p>
+      </div>
+      <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><path d="M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9"/><path d="M12 12v3"/></svg>
+        <h3>Agent Forking</h3>
+        <p>Clone a running AI session. Snapshot weights + KV cache, restore in a new process, fork parallel completions from shared context.</p>
+      </div>
+      <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        <h3>Native vLLM Integration</h3>
+        <p><code>load_format="thaw"</code> works with vLLM's official ModelLoader plugin system. Two-line API. pip installable.</p>
+      </div>
+      <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+        <h3>Bit-Identical Output</h3>
+        <p>Every benchmark verified by greedy decoding comparison. Restored models produce the exact same tokens. No approximation.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section code-section" id="quickstart">
+  <div class="section-inner">
+    <div class="code-head">
+      <span class="section-tag">// Quick Start</span>
+      <h2>Three lines to 17&times;</h2>
+      <p class="section-sub">Works with any model vLLM supports. Single GPU or multi-GPU.</p>
+    </div>
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab(event, 'tab-freeze')">Freeze</button>
+      <button class="tab" onclick="switchTab(event, 'tab-restore')">Restore</button>
+      <button class="tab" onclick="switchTab(event, 'tab-native')">Native vLLM</button>
+    </div>
+    <div class="code-panel active" id="tab-freeze"><span class="hl-kw">import</span> thaw_vllm
+<span class="hl-kw">from</span> vllm <span class="hl-kw">import</span> LLM
+
+llm = LLM(model=<span class="hl-str">"meta-llama/Meta-Llama-3-70B-Instruct"</span>,
+          tensor_parallel_size=<span class="hl-num">2</span>)
+
+<span class="hl-cmt"># Freeze: each GPU saves its shard</span>
+thaw_vllm.<span class="hl-fn">freeze_model_tp</span>(llm, <span class="hl-str">"/snapshots/llama-70b.thaw"</span>)</div>
+    <div class="code-panel" id="tab-restore"><span class="hl-kw">import</span> thaw_vllm
+
+<span class="hl-cmt"># Restore: 17x faster than normal cold start</span>
+llm = thaw_vllm.<span class="hl-fn">load</span>(
+    <span class="hl-str">"meta-llama/Meta-Llama-3-70B-Instruct"</span>,
+    <span class="hl-str">"/snapshots/llama-70b.thaw"</span>,
+    tensor_parallel_size=<span class="hl-num">2</span>
+)
+
+<span class="hl-cmt"># Ready. Same model, same outputs, 17x faster.</span></div>
+    <div class="code-panel" id="tab-native"><span class="hl-kw">import</span> thaw_vllm  <span class="hl-cmt"># registers the loader</span>
+<span class="hl-kw">from</span> vllm <span class="hl-kw">import</span> LLM
+
+llm = LLM(
+    model=<span class="hl-str">"meta-llama/Meta-Llama-3-70B-Instruct"</span>,
+    load_format=<span class="hl-str">"thaw"</span>,
+    tensor_parallel_size=<span class="hl-num">2</span>,
+    model_loader_extra_config={<span class="hl-str">"snapshot"</span>: <span class="hl-str">"/snapshots/llama-70b.thaw"</span>}
+)</div>
+  </div>
+</section>
+
+<section class="section bench-section" id="benchmarks">
+  <div class="section-inner">
+    <div class="bench-head">
+      <span class="section-tag">// Performance</span>
+      <h2>Benchmarks</h2>
+      <p class="section-sub">All results verified with bit-identical greedy decoding comparison.</p>
+    </div>
+    <div class="bench-wrap">
+      <table class="bench-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>GPU</th>
+            <th>Normal</th>
+            <th>thaw</th>
+            <th>Speedup</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="col-model">Llama-3-70B (TP=2)</td>
+            <td class="col-mono">2&times; A100 SXM</td>
+            <td class="col-mono">546.5s</td>
+            <td class="col-mono">31.8s</td>
+            <td class="col-speedup">17.2&times;</td>
+          </tr>
+          <tr>
+            <td class="col-model">Llama-3-8B</td>
+            <td class="col-mono">H100 SXM</td>
+            <td class="col-mono">20.7s</td>
+            <td class="col-mono">3.5s</td>
+            <td class="col-speedup">5.9&times;</td>
+          </tr>
+          <tr>
+            <td class="col-model">Llama-3-8B</td>
+            <td class="col-mono">RTX PRO 6000</td>
+            <td class="col-mono">28.6s</td>
+            <td class="col-mono">3.2s</td>
+            <td class="col-speedup">8.9&times;</td>
+          </tr>
+          <tr>
+            <td class="col-model">Llama-3-8B</td>
+            <td class="col-mono">RTX A6000</td>
+            <td class="col-mono">73.2s</td>
+            <td class="col-mono">5.8s</td>
+            <td class="col-speedup">12.6&times;</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section class="cta">
+  <h2>Ready to thaw?</h2>
+  <p class="cta-sub">Open source. MIT licensed. Works today.</p>
+  <div class="cta-actions">
+    <div class="install" onclick="copyCmd(this)">
+      <span class="dollar">$</span> pip install thaw-vllm
+      <span class="copy-label">copy</span>
+    </div>
+    <a href="https://github.com/thaw-ai/thaw" class="btn-outline" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+      Star on GitHub
+    </a>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <span class="footer-logo">thaw</span>
+        <p>Fast snapshot/restore<br>for LLM inference.</p>
+      </div>
+      <div class="footer-col">
+        <h4>Product</h4>
+        <a href="#about">About</a>
+        <a href="#features">Features</a>
+        <a href="#benchmarks">Benchmarks</a>
+        <a href="#quickstart">Quick Start</a>
+      </div>
+      <div class="footer-col">
+        <h4>Resources</h4>
+        <a href="https://github.com/thaw-ai/thaw" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/thaw-ai/thaw/blob/main/DESIGN.md" target="_blank" rel="noopener">Design Doc</a>
+        <a href="https://github.com/thaw-ai/thaw/blob/main/docs/BENCHMARKS.md" target="_blank" rel="noopener">Full Benchmarks</a>
+      </div>
+      <div class="footer-col">
+        <h4>Connect</h4>
+        <a href="https://github.com/matteso1" target="_blank" rel="noopener">Nils Matteson</a>
+        <p class="footer-note">University of Wisconsin&ndash;Madison</p>
+        <p class="footer-hiring">Looking for engineers interested in GPU systems and inference infrastructure. Reach out on GitHub.</p>
+      </div>
+    </div>
+    <div class="footer-bottom">MIT License</div>
+  </div>
+</footer>
+
+<script>
+function copyCmd(el) {
+  navigator.clipboard.writeText('pip install thaw-vllm');
+  el.classList.add('copied');
+  var label = el.querySelector('.copy-label');
+  label.textContent = 'copied!';
+  setTimeout(function() {
+    el.classList.remove('copied');
+    label.textContent = 'copy';
+  }, 2000);
+}
+
+function switchTab(e, id) {
+  document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.code-panel').forEach(function(p) { p.classList.remove('active'); });
+  e.target.classList.add('active');
+  document.getElementById(id).classList.add('active');
+}
+</script>
+
+</body>
+</html>

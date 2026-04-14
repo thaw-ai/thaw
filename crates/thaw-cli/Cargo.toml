@@ -1,0 +1,25 @@
+[package]
+name = "thaw-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CLI benchmark: freeze/restore a GPU allocation and print throughput."
+
+[[bin]]
+name = "thaw-bench"
+path = "src/main.rs"
+
+[features]
+# Default: no cuda. The binary prints "needs cuda" and exits.
+# On the GPU box, build with:
+#   cargo run --release -p thaw-cli --features cuda
+default = []
+cuda = ["thaw-runtime/cuda"]
+
+[dependencies]
+thaw-core = { path = "../thaw-core" }
+thaw-runtime = { path = "../thaw-runtime" }
+tempfile = "3"
