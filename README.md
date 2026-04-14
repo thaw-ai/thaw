@@ -156,7 +156,7 @@ thaw info   weights.thaw
 <summary>Building with Rust+CUDA backend (optional, higher throughput)</summary>
 
 ```bash
-git clone https://github.com/matteso1/thaw.git && cd thaw
+git clone https://github.com/thaw-ai/thaw.git && cd thaw
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 pip install "maturin[patchelf]" vllm
