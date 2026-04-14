@@ -41,7 +41,7 @@ fi
 pip install maturin patchelf
 cd /root/thaw/crates/thaw-py
 maturin build --release --features cuda
-pip install /root/thaw/target/wheels/thaw_py-*.whl --force-reinstall
+pip install /root/thaw/target/wheels/thaw_native-*.whl --no-deps --force-reinstall
 
 # 3. Run test
 echo "[5/5] Running multi-GPU test..."

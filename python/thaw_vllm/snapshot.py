@@ -18,6 +18,8 @@ Performance strategy (from DESIGN.md §3.1 and READING_NOTES §2.2-2.3):
     something is wrong with the pinned memory path.
 """
 
+import mmap
+import os
 import struct
 import time
 from pathlib import Path
@@ -337,6 +339,85 @@ def _get_engine_core_from_llm(llm):
     return ec
 
 
+def restore_model_tp(
+    llm,
+    base_path: str,
+    chunk_size_mb: int = 64,
+) -> dict:
+    """Restore model weights to all tensor parallel workers.
+
+    With TP > 1, each worker runs in a separate process. This function
+    uses vLLM's collective_rpc to dispatch restore to each worker.
+    Each worker loads from its per-rank snapshot file:
+      base_path (rank 0), base_path.rank1.thaw (rank 1), etc.
+
+    With TP = 1, falls back to the standard single-GPU restore_model_from_ram.
+    """
+    from thaw_vllm.loader import _rank_snapshot_path
+
+    ec = _get_engine_core_from_llm(llm)
+    tp_size = ec.vllm_config.parallel_config.tensor_parallel_size
+
+    if tp_size == 1:
+        # Single-GPU: find model and restore directly
+        model = ec.model_executor.driver_worker.model_runner.model
+        return restore_model_from_ram(model, base_path, chunk_size_mb)
+
+    # TP > 1: dispatch restore to each worker via collective_rpc.
+    def _worker_restore(worker, base_path, chunk_size_mb):
+        """Runs inside each worker process."""
+        import os
+        from vllm.distributed import get_tensor_model_parallel_rank
+
+        rank = get_tensor_model_parallel_rank()
+
+        # Compute per-rank path (same logic as _rank_snapshot_path)
+        if rank == 0:
+            rank_path = base_path
+        else:
+            stem, ext = os.path.splitext(base_path)
+            rank_path = f"{stem}.rank{rank}{ext}"
+
+        model = worker.model_runner.model
+
+        # Try RAM restore (fastest), then file pipelined, then pure Python
+        from thaw_vllm.snapshot import (
+            restore_model_from_ram,
+            restore_model_pipelined,
+            restore_model,
+        )
+        try:
+            stats = restore_model_from_ram(model, rank_path, chunk_size_mb)
+        except Exception:
+            try:
+                stats = restore_model_pipelined(model, rank_path, chunk_size_mb)
+            except Exception:
+                stats = restore_model(model, rank_path)
+
+        stats['rank'] = rank
+        stats['path'] = rank_path
+        return stats
+
+    results = ec.model_executor.collective_rpc(
+        _worker_restore,
+        args=(base_path, chunk_size_mb),
+    )
+
+    # Aggregate stats from all workers
+    total_bytes = sum(r['total_bytes'] for r in results)
+    total_regions = sum(r['num_regions'] for r in results)
+    total_elapsed = max(r['elapsed_s'] for r in results)
+
+    return {
+        'num_regions': total_regions,
+        'total_bytes': total_bytes,
+        'elapsed_s': total_elapsed,
+        'throughput_gb_s': (total_bytes / 1e9) / total_elapsed if total_elapsed > 0 else 0,
+        'tensor_parallel_size': tp_size,
+        'per_rank': results,
+    }
+
+
 def freeze_model_pipelined(
     model: nn.Module,
     path: str,
@@ -421,18 +502,24 @@ def restore_model_from_ram(
         for i, (name, param) in enumerate(params)
     ]
 
-    # Read the entire snapshot into memory. In production, this
-    # would be a pre-staged buffer (tmpfs, shared memory, mmap).
+    # mmap the snapshot file. On /dev/shm (tmpfs) this is zero-copy:
+    # the kernel maps the same physical RAM pages into our address space.
+    # No allocation, no memcpy, no page cache pressure.
+    # On real filesystems, mmap still avoids the Python bytes allocation
+    # and lets the kernel page in data on demand.
     t_read = time.perf_counter()
-    with open(path, 'rb') as f:
-        snapshot_bytes = f.read()
+    fd = os.open(path, os.O_RDONLY)
+    file_size = os.fstat(fd).st_size
+    mm = mmap.mmap(fd, file_size, access=mmap.ACCESS_READ)
+    os.close(fd)  # mmap holds its own reference
     read_time = time.perf_counter() - t_read
 
     t0 = time.perf_counter()
     result = _thaw.restore_from_bytes_pipelined(
-        snapshot_bytes, mapping, chunk_size_mb=chunk_size_mb,
+        mm, mapping, chunk_size_mb=chunk_size_mb,
     )
     elapsed = time.perf_counter() - t0
+    mm.close()
 
     total_bytes = result['bytes_copied']
     return {
@@ -440,7 +527,7 @@ def restore_model_from_ram(
         "total_bytes": total_bytes,
         "elapsed_s": elapsed,
         "throughput_gb_s": (total_bytes / 1e9) / elapsed if elapsed > 0 else 0,
-        "backend": "rust_pipelined_ram",
+        "backend": "rust_pipelined_mmap",
         "read_time_s": read_time,
     }
 

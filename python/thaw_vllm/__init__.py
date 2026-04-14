@@ -21,6 +21,7 @@ from thaw_vllm.snapshot import (
     restore_model,
     restore_model_from_ram,
     restore_model_pipelined,
+    restore_model_tp,
 )
 from thaw_vllm.kv_snapshot import (
     freeze_kv_cache,
@@ -55,12 +56,23 @@ def load(model: str, snapshot: str, kv_snapshot: str = None, **kwargs):
 
     tp_size = kwargs.get("tensor_parallel_size", 1)
 
-    llm = LLM(
-        model=model,
-        load_format="thaw",
-        model_loader_extra_config={"snapshot": snapshot},
-        **kwargs,
-    )
+    if tp_size > 1:
+        # TP > 1: vLLM spawns worker processes that don't have thaw_vllm
+        # imported, so load_format="thaw" fails. Instead, init with dummy
+        # weights then restore via collective_rpc to each worker.
+        llm = LLM(
+            model=model,
+            load_format="dummy",
+            **kwargs,
+        )
+        restore_model_tp(llm, snapshot)
+    else:
+        llm = LLM(
+            model=model,
+            load_format="thaw",
+            model_loader_extra_config={"snapshot": snapshot},
+            **kwargs,
+        )
 
     if kv_snapshot:
         if tp_size > 1:
@@ -78,6 +90,7 @@ __all__ = [
     "restore_model",
     "restore_model_from_ram",
     "restore_model_pipelined",
+    "restore_model_tp",
     "freeze_kv_cache",
     "freeze_kv_cache_tp",
     "restore_kv_cache",

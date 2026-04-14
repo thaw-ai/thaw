@@ -87,10 +87,9 @@ thaw-core = { path = "../thaw-core" }
 
 # PyO3 — the Rust <-> Python FFI bridge. `extension-module` tells it
 # to generate a cdylib intended for dlopen by Python (rather than a
-# Rust program that embeds a Python interpreter). `abi3-py38` lets
-# the resulting .so work against any Python >= 3.8 without having to
-# rebuild per version, which is what vLLM integration will want.
-pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+# Rust program that embeds a Python interpreter). We build from source
+# via maturin on each target, so no need for abi3 stable ABI.
+pyo3 = { version = "0.22", features = ["extension-module"] }
 
 # Ergonomic error types. Same choice as the rest of the workspace.
 thiserror = "1.0"

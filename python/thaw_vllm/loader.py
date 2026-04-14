@@ -78,7 +78,11 @@ class ThawModelLoader(BaseModelLoader):
         pass
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
-        from thaw_vllm.snapshot import restore_model_pipelined, restore_model
+        from thaw_vllm.snapshot import (
+            restore_model_from_ram,
+            restore_model_pipelined,
+            restore_model,
+        )
 
         tp_rank = _get_tp_rank()
         tp_size = _get_tp_size()
@@ -94,10 +98,16 @@ class ThawModelLoader(BaseModelLoader):
                 f"--tensor-parallel {tp_size}"
             )
 
+        # Try RAM path first (pre-stage file into memory, then DMA — avoids
+        # slow pread-to-pinned-memory kernel path, ~6x faster on most systems).
+        # Fall back to file-based pipelined, then pure Python.
         try:
-            stats = restore_model_pipelined(model, snapshot_path)
+            stats = restore_model_from_ram(model, snapshot_path)
         except Exception:
-            stats = restore_model(model, snapshot_path)
+            try:
+                stats = restore_model_pipelined(model, snapshot_path)
+            except Exception:
+                stats = restore_model(model, snapshot_path)
 
         size_gb = stats['total_bytes'] / 1e9
         rank_info = f" (rank {tp_rank}/{tp_size})" if tp_size > 1 else ""

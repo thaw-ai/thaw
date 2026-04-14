@@ -41,6 +41,7 @@ MODELS = {
         "prompt": "The future of artificial intelligence is",
         "size_gb": 16,
         "arch": "llama",
+        "max_model_len": 8192,  # 128K default needs too much KV cache at 0.40 util
         "tags": ["quick", "single-gpu"],
     },
     "mistral-7b": {
@@ -73,16 +74,20 @@ MODELS = {
         "prompt": "Describe the process of photosynthesis:",
         "size_gb": 18,
         "arch": "gemma2",
-        "tags": ["single-gpu"],
+        "dtype": "bfloat16",  # gemma2 doesn't support float16
+        "tags": ["single-gpu"],  # gated: must accept license at huggingface.co
     },
 
     # --- Multi-GPU (TP=2, needs 2x 80GB) ---
+    # gpu_mem_util must be high enough for weights. 70B fp16 = ~66 GiB/GPU at TP=2.
     "llama-3.1-70b": {
         "hf_id": "meta-llama/Llama-3.1-70B-Instruct",
         "tp": 2,
         "prompt": "Explain quantum computing to a five year old:",
         "size_gb": 141,
         "arch": "llama",
+        "max_model_len": 8192,  # 128K default needs too much KV cache
+        "gpu_mem_util": 0.90,
         "tags": ["multi-gpu"],
     },
     "qwen-72b": {
@@ -91,6 +96,8 @@ MODELS = {
         "prompt": "What are the three laws of thermodynamics?",
         "size_gb": 144,
         "arch": "qwen2",
+        "max_model_len": 4096,   # tight on memory at 72B/GPU
+        "gpu_mem_util": 0.95,
         "tags": ["multi-gpu"],
     },
     "mixtral-8x7b": {
@@ -99,6 +106,7 @@ MODELS = {
         "prompt": "Explain the concept of mixture of experts in neural networks:",
         "size_gb": 87,
         "arch": "mixtral-moe",
+        "gpu_mem_util": 0.70,
         "tags": ["multi-gpu", "moe"],
     },
 }
@@ -122,18 +130,31 @@ def get_storage_info(path):
 
 
 def run_single_model_test(model_key, model_cfg, snapshot_dir, timeout=1800):
-    """Run freeze/restore test for a single model in a subprocess.
+    """Run freeze/restore test for a single model.
 
-    Returns dict with results or error info.
+    For TP=1: single subprocess (GPU memory frees fine with del+gc).
+    For TP>1: two separate subprocesses (vLLM worker processes don't
+    release GPU memory reliably within a single process).
     """
     hf_id = model_cfg["hf_id"]
     tp = model_cfg["tp"]
     prompt = model_cfg["prompt"]
+    max_model_len = model_cfg.get("max_model_len")
+    gpu_mem_util = model_cfg.get("gpu_mem_util", 0.40)
+    dtype = model_cfg.get("dtype", "float16")
     snapshot_path = os.path.join(snapshot_dir, f"{model_key}.thaw")
     result_path = os.path.join(snapshot_dir, f"{model_key}_result.json")
+    phase1_path = os.path.join(snapshot_dir, f"{model_key}_phase1.json")
 
-    # This script runs inside the subprocess
-    test_script = f'''
+    print(f"\n{'='*60}")
+    print(f"  Testing: {model_key} ({hf_id})")
+    print(f"  TP={tp} | ~{model_cfg['size_gb']} GB | arch={model_cfg['arch']}")
+    print(f"{'='*60}")
+
+    env = {**os.environ, "VLLM_ENABLE_V1_MULTIPROCESSING": "0"}
+
+    # ── Phase 1+2: Normal cold start + freeze ──
+    phase1_script = f'''
 import gc, json, os, time, traceback
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
@@ -143,6 +164,85 @@ result = {{
     "tp": {tp},
     "arch": "{model_cfg['arch']}",
 }}
+
+try:
+    import torch
+    from vllm import LLM, SamplingParams
+    import thaw_vllm
+    from thaw_vllm import freeze_model_pipelined
+
+    sampling = SamplingParams(temperature=0, max_tokens=50)
+
+    def find_model(llm):
+        engine = llm.llm_engine
+        for path_fn in [
+            lambda: engine.model_executor.driver_worker.model_runner.model,
+            lambda: engine.engine_core.model_runner.model,
+            lambda: engine.engine_core.model_executor.driver_worker.model_runner.model,
+            lambda: engine.engine_core.model_executor.model_runner.model,
+        ]:
+            try:
+                return path_fn()
+            except (AttributeError, TypeError):
+                continue
+        raise RuntimeError("Could not find nn.Module in vLLM")
+
+    print(f"  [{{'{model_key}'}}] Phase 1: Normal cold start...")
+    t0 = time.perf_counter()
+    llm = LLM(
+        model="{hf_id}",
+        dtype="{dtype}",
+        enforce_eager=True,
+        tensor_parallel_size={tp},
+        gpu_memory_utilization={gpu_mem_util},
+        {f'max_model_len={max_model_len},' if max_model_len else ''}
+    )
+    normal_time = time.perf_counter() - t0
+    result["normal_load_s"] = round(normal_time, 2)
+    print(f"  [{{'{model_key}'}}] Normal load: {{normal_time:.1f}}s")
+
+    out = llm.generate(["""{prompt}"""], sampling)
+    ref_text = out[0].outputs[0].text.strip()
+    result["ref_text_prefix"] = ref_text[:100]
+    result["ref_text"] = ref_text
+    print(f"  [{{'{model_key}'}}] Reference: {{ref_text[:60]}}...")
+
+    print(f"  [{{'{model_key}'}}] Phase 2: Freeze...")
+    if {tp} > 1:
+        fstats = thaw_vllm.freeze_model_tp(llm, "{snapshot_path}")
+    else:
+        model = find_model(llm)
+        fstats = freeze_model_pipelined(model, "{snapshot_path}")
+
+    result["freeze_time_s"] = round(fstats["elapsed_s"], 2)
+    result["freeze_throughput_gbs"] = round(fstats["throughput_gb_s"], 2)
+    result["freeze_regions"] = fstats["num_regions"]
+    result["freeze_bytes"] = fstats["total_bytes"]
+    result["freeze_backend"] = fstats.get("backend", "python")
+    result["status"] = "phase1_done"
+    print(f"  [{{'{model_key}'}}] Frozen: {{fstats['elapsed_s']:.1f}}s "
+          f"({{fstats['throughput_gb_s']:.2f}} GB/s)")
+
+except Exception as e:
+    result["status"] = "error"
+    result["error"] = str(e)
+    result["traceback"] = traceback.format_exc()
+    print(f"  [{{'{model_key}'}}] Phase 1 ERROR: {{e}}")
+
+with open("{phase1_path}", "w") as f:
+    json.dump(result, f, indent=2)
+'''
+
+    # ── Phase 3+4: Restore + verify (separate subprocess for clean GPU) ──
+    phase2_script = f'''
+import gc, json, os, time, traceback
+os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+
+with open("{phase1_path}") as f:
+    result = json.load(f)
+
+ref_text = result.pop("ref_text", "")
+normal_time = result.get("normal_load_s", 0)
 
 try:
     import torch
@@ -166,89 +266,81 @@ try:
                 continue
         raise RuntimeError("Could not find nn.Module in vLLM")
 
-    # ── Phase 1: Normal cold start ──
-    print(f"  [{{'{model_key}'}}] Phase 1: Normal cold start...")
+    print(f"  [{{'{model_key}'}}] Phase 3: Restore...")
     t0 = time.perf_counter()
-    llm = LLM(
+    llm2 = LLM(
         model="{hf_id}",
-        dtype="float16",
+        dtype="{dtype}",
         enforce_eager=True,
         tensor_parallel_size={tp},
-        gpu_memory_utilization=0.40,
+        gpu_memory_utilization={gpu_mem_util},
+        load_format="dummy",
+        {f'max_model_len={max_model_len},' if max_model_len else ''}
     )
-    normal_time = time.perf_counter() - t0
-    result["normal_load_s"] = round(normal_time, 2)
-    print(f"  [{{'{model_key}'}}] Normal load: {{normal_time:.1f}}s")
+    init_time = time.perf_counter() - t0
+    result["dummy_init_s"] = round(init_time, 2)
 
-    out = llm.generate(["""{prompt}"""], sampling)
-    ref_text = out[0].outputs[0].text.strip()
-    result["ref_text_prefix"] = ref_text[:100]
-    print(f"  [{{'{model_key}'}}] Reference: {{ref_text[:60]}}...")
-
-    # ── Phase 2: Freeze ──
-    print(f"  [{{'{model_key}'}}] Phase 2: Freeze...")
     if {tp} > 1:
-        fstats = thaw_vllm.freeze_model_tp(llm, "{snapshot_path}")
+        # TP > 1: use collective_rpc to restore each worker's per-rank snapshot
+        from thaw_vllm.snapshot import restore_model_tp
+        t0 = time.perf_counter()
+        rstats = restore_model_tp(llm2, "{snapshot_path}")
+        dma_time = time.perf_counter() - t0
+        result["restore_dma_s"] = round(dma_time, 2)
+        result["restore_throughput_gbs"] = round(rstats.get("throughput_gb_s", 0), 2)
+        result["restore_backend"] = "collective_rpc_ram"
+        result["restore_tp_size"] = rstats.get("tensor_parallel_size", {tp})
     else:
-        model = find_model(llm)
-        fstats = freeze_model_pipelined(model, "{snapshot_path}")
-
-    result["freeze_time_s"] = round(fstats["elapsed_s"], 2)
-    result["freeze_throughput_gbs"] = round(fstats["throughput_gb_s"], 2)
-    result["freeze_regions"] = fstats["num_regions"]
-    result["freeze_bytes"] = fstats["total_bytes"]
-    result["freeze_backend"] = fstats.get("backend", "python")
-    print(f"  [{{'{model_key}'}}] Frozen: {{fstats['elapsed_s']:.1f}}s "
-          f"({{fstats['throughput_gb_s']:.2f}} GB/s)")
-
-    # Teardown
-    del llm
-    if {tp} == 1:
-        del model
-    gc.collect()
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
-    gc.collect()
-    time.sleep(2)
-
-    # ── Phase 3: Restore ──
-    print(f"  [{{'{model_key}'}}] Phase 3: Restore...")
-    if {tp} > 1:
-        t0 = time.perf_counter()
-        llm2 = thaw_vllm.load(
-            "{hf_id}", "{snapshot_path}",
-            tensor_parallel_size={tp},
-        )
-        restore_total = time.perf_counter() - t0
-        result["restore_total_s"] = round(restore_total, 2)
-        result["restore_backend"] = "thaw_loader"
-    else:
-        t0 = time.perf_counter()
-        llm2 = LLM(
-            model="{hf_id}",
-            dtype="float16",
-            enforce_eager=True,
-            tensor_parallel_size=1,
-            gpu_memory_utilization=0.40,
-            load_format="dummy",
-        )
-        init_time = time.perf_counter() - t0
-        result["dummy_init_s"] = round(init_time, 2)
-
-        t0 = time.perf_counter()
         model2 = find_model(llm2)
-        rstats = restore_model_pipelined(model2, "{snapshot_path}")
-        restore_time = time.perf_counter() - t0
-        restore_total = init_time + restore_time
 
-        result["restore_dma_s"] = round(restore_time, 2)
-        result["restore_throughput_gbs"] = round(rstats["throughput_gb_s"], 2)
-        result["restore_total_s"] = round(restore_total, 2)
-        result["restore_backend"] = rstats.get("backend", "python")
+        import mmap as _mmap
+        t_read = time.perf_counter()
+        _fd = os.open("{snapshot_path}", os.O_RDONLY)
+        _fsize = os.fstat(_fd).st_size
+        snapshot_bytes = _mmap.mmap(_fd, _fsize, access=_mmap.ACCESS_READ)
+        os.close(_fd)
+        read_time = time.perf_counter() - t_read
+        result["staging_read_s"] = round(read_time, 2)
 
-    print(f"  [{{'{model_key}'}}] Restored: {{restore_total:.1f}}s")
+        params = []
+        for name, param in model2.named_parameters():
+            if param.is_cuda:
+                params.append((name, param))
+        mapping = [
+            ("weights", i, param.data.data_ptr(), param.data.nbytes)
+            for i, (name, param) in enumerate(params)
+        ]
 
-    # ── Phase 4: Verify ──
+        try:
+            import thaw as _thaw
+            t0 = time.perf_counter()
+            rresult = _thaw.restore_from_bytes_pipelined(
+                snapshot_bytes, mapping, chunk_size_mb=64,
+            )
+            dma_time = time.perf_counter() - t0
+            total_bytes = rresult["bytes_copied"]
+            result["restore_dma_s"] = round(dma_time, 2)
+            result["restore_throughput_gbs"] = round(
+                (total_bytes / 1e9) / dma_time if dma_time > 0 else 0, 2
+            )
+            result["restore_backend"] = "rust_pipelined_ram"
+        except (ImportError, AttributeError):
+            t0 = time.perf_counter()
+            rstats = restore_model_pipelined(model2, "{snapshot_path}")
+            dma_time = time.perf_counter() - t0
+            result["restore_dma_s"] = round(dma_time, 2)
+            result["restore_throughput_gbs"] = round(
+                rstats.get("throughput_gb_s", 0), 2
+            )
+            result["restore_backend"] = rstats.get("backend", "python")
+
+        snapshot_bytes.close()
+
+    restore_total = init_time + dma_time
+    result["restore_total_s"] = round(restore_total, 2)
+
+    print(f"  [{{'{model_key}'}}] Restored: {{restore_total:.1f}}s (init {{init_time:.1f}}s + DMA {{dma_time:.1f}}s)")
+
     out2 = llm2.generate(["""{prompt}"""], sampling)
     restored_text = out2[0].outputs[0].text.strip()
     result["restored_text_prefix"] = restored_text[:100]
@@ -269,23 +361,34 @@ except Exception as e:
     result["status"] = "error"
     result["error"] = str(e)
     result["traceback"] = traceback.format_exc()
-    print(f"  [{{'{model_key}'}}] ERROR: {{e}}")
+    print(f"  [{{'{model_key}'}}] Phase 3 ERROR: {{e}}")
 
 with open("{result_path}", "w") as f:
     json.dump(result, f, indent=2)
 '''
 
-    print(f"\n{'='*60}")
-    print(f"  Testing: {model_key} ({hf_id})")
-    print(f"  TP={tp} | ~{model_cfg['size_gb']} GB | arch={model_cfg['arch']}")
-    print(f"{'='*60}")
-
     t0 = time.perf_counter()
-    r = subprocess.run(
-        [sys.executable, "-c", test_script],
-        env={**os.environ, "VLLM_ENABLE_V1_MULTIPROCESSING": "0"},
-        timeout=timeout,
+
+    # Phase 1+2: normal load + freeze
+    r1 = subprocess.run(
+        [sys.executable, "-c", phase1_script], env=env, timeout=timeout,
     )
+
+    # Check phase 1 succeeded before running phase 2
+    if os.path.exists(phase1_path):
+        with open(phase1_path) as f:
+            p1 = json.load(f)
+        if p1.get("status") != "phase1_done":
+            # Phase 1 failed — return its error
+            wall_time = time.perf_counter() - t0
+            p1["wall_time_s"] = round(wall_time, 2)
+            return p1
+
+    # Phase 3+4: restore + verify (fresh subprocess = clean GPU)
+    r2 = subprocess.run(
+        [sys.executable, "-c", phase2_script], env=env, timeout=timeout,
+    )
+
     wall_time = time.perf_counter() - t0
 
     if os.path.exists(result_path):
@@ -297,7 +400,7 @@ with open("{result_path}", "w") as f:
             "model": model_key,
             "hf_id": hf_id,
             "status": "crash",
-            "exit_code": r.returncode,
+            "exit_code": r2.returncode,
             "wall_time_s": round(wall_time, 2),
         }
 

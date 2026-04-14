@@ -504,26 +504,36 @@ fn restore_from_file_pipelined(
 ///
 /// ```python
 /// thaw.restore_from_bytes_pipelined(
-///     data: bytes,
+///     data: bytes | mmap | bytearray,  # any buffer-protocol object
 ///     mapping: list[tuple[str, int, int, int]],
 ///     chunk_size_mb: int = 64,
 /// ) -> dict
 /// ```
 ///
 /// Same as `restore_from_file_pipelined`, but the snapshot data is
-/// passed as a Python `bytes` object already in memory. Eliminates
-/// disk I/O entirely — throughput is limited only by PCIe bandwidth.
+/// passed as a Python buffer object already in memory. Accepts `bytes`,
+/// `mmap.mmap`, `bytearray`, or any object implementing the buffer
+/// protocol. With mmap on /dev/shm this is zero-copy: the kernel maps
+/// the same physical RAM pages, no allocation or memcpy needed.
 #[pyfunction]
 #[pyo3(signature = (data, mapping, chunk_size_mb=64))]
 fn restore_from_bytes_pipelined(
     py: Python<'_>,
-    data: &[u8],
+    data: pyo3::buffer::PyBuffer<u8>,
     mapping: Vec<(String, u32, u64, u64)>,
     chunk_size_mb: usize,
 ) -> PyResult<PyObject> {
+    // SAFETY: PyBuffer<u8> guarantees the buffer is valid, contiguous,
+    // and lives as long as the PyBuffer handle. We hold the GIL (py)
+    // and don't release it during restore, so the buffer won't be
+    // invalidated. For mmap this points directly at the mapped pages.
+    let data_slice = unsafe {
+        std::slice::from_raw_parts(data.buf_ptr() as *const u8, data.len_bytes())
+    };
+
     #[cfg(not(feature = "cuda"))]
     {
-        let _ = (py, data, mapping, chunk_size_mb);
+        let _ = (py, data_slice, mapping, chunk_size_mb);
         return Err(PyErr::from(ThawPyError::CudaUnavailable));
     }
 
@@ -539,7 +549,7 @@ fn restore_from_bytes_pipelined(
 
         let stats = restore_pipelined_from_bytes(
             &backend,
-            data,
+            data_slice,
             |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
             &config,
         )
