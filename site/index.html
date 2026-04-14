@@ -8,7 +8,7 @@
   <meta property="og:title" content="thaw — 8x faster LLM weight loading">
   <meta property="og:description" content="Snapshot GPU state and restore via pipelined DMA at 14 GB/s. Multi-GPU tensor parallel. KV cache snapshots. Open source.">
   <meta property="og:type" content="website">
-  <meta name="theme-color" content="#040a10">
+  <meta name="theme-color" content="#000000">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -16,20 +16,20 @@
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
     :root {
-      --bg: #040a10;
-      --bg-raised: #071018;
-      --surface: #0b1824;
-      --surface-2: #0f1f2e;
-      --border: #132236;
-      --border-light: #1a3050;
-      --text: #e2eef6;
-      --text-2: #8aa3b8;
-      --text-3: #516a7e;
-      --text-dim: #2a4258;
-      --cyan: #00d4ff;
-      --cyan-soft: #7df9ff;
-      --cyan-deep: #0099bb;
-      --cyan-glow: rgba(0, 180, 255, 0.08);
+      --bg: #000000;
+      --bg-raised: #0a0a0a;
+      --surface: #111111;
+      --surface-2: #161616;
+      --border: #1c1c1c;
+      --border-light: #2a2a2a;
+      --text: #f0f0f0;
+      --text-2: #999999;
+      --text-3: #666666;
+      --text-dim: #444444;
+      --cyan: #3b82f6;
+      --cyan-soft: #60a5fa;
+      --cyan-deep: #2563eb;
+      --cyan-glow: rgba(59, 130, 246, 0.08);
       --green: #34d399;
       --green-dim: #065f46;
       --font-display: 'Sora', -apple-system, BlinkMacSystemFont, sans-serif;
@@ -100,7 +100,7 @@
       top: 0;
       width: 100%;
       z-index: 100;
-      background: rgba(4, 10, 16, 0.8);
+      background: rgba(0, 0, 0, 0.85);
       backdrop-filter: blur(20px) saturate(1.2);
       -webkit-backdrop-filter: blur(20px) saturate(1.2);
       border-bottom: 1px solid var(--border);
@@ -178,7 +178,7 @@
       transform: translateX(-50%);
       width: 900px;
       height: 600px;
-      background: radial-gradient(ellipse 50% 60%, rgba(0, 180, 255, 0.10) 0%, rgba(0, 120, 200, 0.04) 40%, transparent 70%);
+      background: radial-gradient(ellipse 50% 60%, rgba(59, 130, 246, 0.08) 0%, rgba(37, 99, 235, 0.03) 40%, transparent 70%);
       pointer-events: none;
       animation: glow-pulse 8s ease-in-out infinite alternate;
     }
@@ -191,7 +191,7 @@
     .hero-grid {
       position: absolute;
       inset: 0;
-      background-image: radial-gradient(circle, rgba(0, 180, 255, 0.06) 1px, transparent 1px);
+      background-image: radial-gradient(circle, rgba(59, 130, 246, 0.05) 1px, transparent 1px);
       background-size: 40px 40px;
       -webkit-mask-image: radial-gradient(ellipse 55% 55% at 50% 35%, black 10%, transparent 65%);
       mask-image: radial-gradient(ellipse 55% 55% at 50% 35%, black 10%, transparent 65%);
@@ -217,7 +217,7 @@
       border-radius: 100px;
       padding: 7px 18px;
       margin-bottom: 40px;
-      background: rgba(11, 24, 36, 0.5);
+      background: rgba(17, 17, 17, 0.6);
     }
 
     .badge-dot {
@@ -240,22 +240,16 @@
     .hero-num {
       position: relative;
       display: inline-block;
-      background: linear-gradient(135deg, var(--cyan) 0%, var(--cyan-soft) 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      color: var(--cyan);
     }
 
     .hero-num::after {
       content: attr(data-text);
       position: absolute;
       inset: 0;
-      background: linear-gradient(135deg, var(--cyan) 0%, var(--cyan-soft) 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      color: var(--cyan);
       filter: blur(32px);
-      opacity: 0.35;
+      opacity: 0.4;
       z-index: -1;
     }
 
@@ -323,7 +317,7 @@
       font-weight: 600;
       letter-spacing: -0.2px;
       transition: opacity 0.2s, transform 0.15s;
-      box-shadow: 0 0 24px rgba(0, 212, 255, 0.2);
+      box-shadow: 0 0 24px rgba(59, 130, 246, 0.2);
     }
 
     .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
@@ -399,7 +393,7 @@
     }
 
     .bar-slow {
-      background: linear-gradient(90deg, #101c28 0%, #152535 100%);
+      background: linear-gradient(90deg, #141414 0%, #1a1a1a 100%);
       color: var(--text-2);
       width: 100%;
       justify-content: flex-end;
@@ -410,7 +404,7 @@
       color: var(--bg);
       width: 13%;
       min-width: 80px;
-      box-shadow: 0 0 20px rgba(0, 212, 255, 0.15);
+      box-shadow: 0 0 20px rgba(59, 130, 246, 0.15);
     }
 
     .bar-fill.animate {
@@ -439,10 +433,7 @@
       font-family: var(--font-display);
       font-size: 20px;
       font-weight: 700;
-      background: linear-gradient(135deg, var(--cyan) 0%, var(--cyan-soft) 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      color: var(--cyan);
     }
 
     .viz-sep { color: var(--border-light); }
@@ -658,10 +649,10 @@
       font-family: var(--font-mono);
       font-size: 12px;
       color: var(--cyan);
-      background: rgba(0, 212, 255, 0.07);
+      background: rgba(59, 130, 246, 0.12);
       padding: 2px 7px;
       border-radius: 4px;
-      border: 1px solid rgba(0, 212, 255, 0.1);
+      border: 1px solid rgba(59, 130, 246, 0.15);
     }
 
     /* ── Code Section ── */
@@ -682,7 +673,7 @@
       display: flex;
       gap: 0;
       border-bottom: 1px solid var(--border);
-      background: rgba(7, 16, 24, 0.6);
+      background: rgba(10, 10, 10, 0.6);
     }
 
     .tab {
@@ -726,9 +717,9 @@
     .hl-kw { color: #c792ea; }
     .hl-fn { color: var(--cyan); }
     .hl-str { color: #c3e88d; }
-    .hl-cmt { color: #3a5568; }
+    .hl-cmt { color: #555555; }
     .hl-num { color: #f78c6c; }
-    .hl-op { color: #89ddff; }
+    .hl-op { color: #93bbff; }
 
     /* ── Benchmark Table ── */
 
@@ -757,7 +748,7 @@
       letter-spacing: 0.08em;
       color: var(--text-dim);
       border-bottom: 1px solid var(--border);
-      background: rgba(11, 24, 36, 0.4);
+      background: rgba(17, 17, 17, 0.4);
     }
 
     .bench-table td {
@@ -766,7 +757,7 @@
       transition: background 0.2s;
     }
 
-    .bench-table tbody tr:hover td { background: rgba(0, 180, 255, 0.02); }
+    .bench-table tbody tr:hover td { background: rgba(255, 255, 255, 0.02); }
     .bench-table tbody tr:last-child td { border-bottom: none; }
 
     .col-model {
@@ -785,10 +776,7 @@
       font-family: var(--font-display);
       font-weight: 700;
       font-size: 15px;
-      background: linear-gradient(135deg, var(--cyan), var(--cyan-soft));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      color: var(--cyan);
     }
 
     .bench-note {
@@ -823,7 +811,7 @@
       transform: translateX(-50%);
       width: 700px;
       height: 400px;
-      background: radial-gradient(ellipse, rgba(0, 180, 255, 0.06) 0%, transparent 70%);
+      background: radial-gradient(ellipse, rgba(59, 130, 246, 0.05) 0%, transparent 70%);
       pointer-events: none;
     }
 
