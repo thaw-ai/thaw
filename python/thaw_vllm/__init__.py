@@ -29,6 +29,7 @@ from thaw_vllm.kv_snapshot import (
     restore_kv_cache,
     restore_kv_cache_tp,
 )
+from thaw_vllm.pool import EnginePool, create_pool_app
 
 # Register load_format="thaw" with vLLM when available.
 try:
@@ -97,4 +98,6 @@ __all__ = [
     "restore_kv_cache_tp",
     "load",
     "ThawModelLoader",
+    "EnginePool",
+    "create_pool_app",
 ]

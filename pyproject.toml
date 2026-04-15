@@ -25,9 +25,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+native = ["thaw-native>=0.1.1"]
 vllm = ["vllm>=0.18"]
 serve = ["vllm>=0.18", "fastapi", "uvicorn"]
-all = ["vllm>=0.18", "fastapi", "uvicorn"]
+all = ["vllm>=0.18", "fastapi", "uvicorn", "thaw-native>=0.1.1"]
 
 [project.scripts]
 thaw = "thaw_vllm.cli:main"
@@ -41,3 +42,7 @@ where = ["python"]
 
 [tool.setuptools.package-dir]
 "" = "python"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["python"]

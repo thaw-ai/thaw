@@ -21,6 +21,7 @@ Performance strategy (from DESIGN.md §3.1 and READING_NOTES §2.2-2.3):
 import mmap
 import os
 import struct
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -291,7 +292,10 @@ def freeze_model_tp(
 
     if tp_size == 1:
         model = ec.model_executor.driver_worker.model_runner.model
-        return freeze_model(model, base_path, vllm_commit)
+        try:
+            return freeze_model_pipelined(model, base_path, vllm_commit)
+        except Exception:
+            return freeze_model(model, base_path, vllm_commit)
 
     # TP > 1: dispatch freeze to each worker via collective_rpc.
     # Define the function that each worker will execute.
@@ -304,9 +308,12 @@ def freeze_model_tp(
         rank_path = _rank_snapshot_path(base_path, rank)
         model = worker.model_runner.model
 
-        # Use the local freeze_model (available in each worker process)
-        from thaw_vllm.snapshot import freeze_model as _freeze
-        stats = _freeze(model, rank_path, vllm_commit)
+        # Try Rust pipelined first (fast), fall back to pure Python
+        from thaw_vllm.snapshot import freeze_model_pipelined, freeze_model
+        try:
+            stats = freeze_model_pipelined(model, rank_path, vllm_commit)
+        except Exception:
+            stats = freeze_model(model, rank_path, vllm_commit)
         stats['rank'] = rank
         stats['path'] = rank_path
         return stats
@@ -332,11 +339,19 @@ def freeze_model_tp(
 
 
 def _get_engine_core_from_llm(llm):
-    """Navigate to the real EngineCore from a vLLM LLM instance."""
-    ec = llm.llm_engine.engine_core
-    if hasattr(ec, 'engine_core'):
-        ec = ec.engine_core
-    return ec
+    """Navigate to an object with model_executor and vllm_config.
+
+    Works with both V0 (no engine_core) and V1 (nested engine_core).
+    """
+    engine = llm.llm_engine
+    # V1 engine: engine_core wraps the real core
+    if hasattr(engine, 'engine_core'):
+        ec = engine.engine_core
+        if hasattr(ec, 'engine_core'):
+            ec = ec.engine_core
+        return ec
+    # V0 engine: model_executor lives directly on the engine
+    return engine
 
 
 def restore_model_tp(
@@ -484,52 +499,123 @@ def restore_model_from_ram(
     reads from disk for convenience, but the restore itself is
     RAM-speed.
     """
-    try:
-        import thaw as _thaw
-        if not hasattr(_thaw, 'restore_from_bytes_pipelined'):
-            raise ImportError("restore_from_bytes_pipelined not found")
-    except ImportError:
-        # Fall back to pure-Python file-based restore.
-        return restore_model(model, path)
-
     params = []
     for name, param in model.named_parameters():
         if param.is_cuda:
             params.append((name, param))
 
-    mapping = [
-        ("weights", i, param.data.data_ptr(), param.data.nbytes)
-        for i, (name, param) in enumerate(params)
-    ]
+    use_rust = False
+    try:
+        import thaw as _thaw
+        if hasattr(_thaw, 'restore_from_bytes_pipelined'):
+            use_rust = True
+    except ImportError:
+        pass
 
-    # mmap the snapshot file. On /dev/shm (tmpfs) this is zero-copy:
-    # the kernel maps the same physical RAM pages into our address space.
-    # No allocation, no memcpy, no page cache pressure.
-    # On real filesystems, mmap still avoids the Python bytes allocation
-    # and lets the kernel page in data on demand.
-    t_read = time.perf_counter()
-    fd = os.open(path, os.O_RDONLY)
-    file_size = os.fstat(fd).st_size
-    mm = mmap.mmap(fd, file_size, access=mmap.ACCESS_READ)
-    os.close(fd)  # mmap holds its own reference
-    read_time = time.perf_counter() - t_read
+    if use_rust:
+        mapping = [
+            ("weights", i, param.data.data_ptr(), param.data.nbytes)
+            for i, (name, param) in enumerate(params)
+        ]
 
-    t0 = time.perf_counter()
-    result = _thaw.restore_from_bytes_pipelined(
-        mm, mapping, chunk_size_mb=chunk_size_mb,
-    )
-    elapsed = time.perf_counter() - t0
-    mm.close()
+        # mmap the snapshot file. On /dev/shm (tmpfs) this is zero-copy:
+        # the kernel maps the same physical RAM pages into our address space.
+        # No allocation, no memcpy, no page cache pressure.
+        # On real filesystems, mmap still avoids the Python bytes allocation
+        # and lets the kernel page in data on demand.
+        t_read = time.perf_counter()
+        fd = os.open(path, os.O_RDONLY)
+        file_size = os.fstat(fd).st_size
+        if sys.platform == "linux":
+            import ctypes
+            import ctypes.util
+            MAP_POPULATE = 0x08000
+            MADV_HUGEPAGE = 14
+            mm = mmap.mmap(fd, file_size, flags=mmap.MAP_PRIVATE | MAP_POPULATE,
+                            prot=mmap.PROT_READ | mmap.PROT_WRITE)
+            try:
+                libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+                buf = (ctypes.c_char * file_size).from_buffer(mm)
+                libc.madvise(ctypes.addressof(buf), file_size, MADV_HUGEPAGE)
+                del buf
+            except Exception:
+                pass
+        else:
+            mm = mmap.mmap(fd, file_size, access=mmap.ACCESS_READ)
+        os.close(fd)
+        read_time = time.perf_counter() - t_read
 
-    total_bytes = result['bytes_copied']
-    return {
-        "num_regions": result['regions_restored'],
+        t0 = time.perf_counter()
+        result = _thaw.restore_from_bytes_pipelined(
+            mm, mapping, chunk_size_mb=chunk_size_mb,
+        )
+        elapsed = time.perf_counter() - t0
+        mm.close()
+
+        total_bytes = result['bytes_copied']
+    else:
+        # Pure-Python fallback: region-by-region pinned CPU → GPU copy.
+        # Copies directly into existing parameter tensors — no extra GPU
+        # memory allocation needed (unlike restore_model which allocates
+        # a full second copy).
+        t0 = time.perf_counter()
+
+        with open(path, "rb") as f:
+            num_regions, vllm_commit = _read_header(f)
+
+            if num_regions != len(params):
+                raise ValueError(
+                    f"snapshot has {num_regions} regions but model has "
+                    f"{len(params)} CUDA parameters"
+                )
+
+            entries = []
+            for _ in range(num_regions):
+                entries.append(_read_region_entry(f))
+
+            total_bytes = 0
+            for i, (name, param) in enumerate(params):
+                kind, logical_id, size, file_offset = entries[i]
+                if size != param.data.nbytes:
+                    raise ValueError(
+                        f"size mismatch for {name}: snapshot has {size} bytes, "
+                        f"parameter has {param.data.nbytes} bytes"
+                    )
+                total_bytes += size
+
+            # Copy region-by-region: read each parameter's data into a
+            # small pinned buffer, then DMA directly into the existing
+            # GPU parameter tensor. Peak host memory = largest single
+            # parameter (~512 MB for large models) instead of the full
+            # model size.
+            payload_start = entries[0][3] if entries else 0
+            f.seek(payload_start)
+            for i, (name, param) in enumerate(params):
+                nbytes = param.data.nbytes
+                pinned = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+                np_buf = pinned.numpy()
+                bytes_read = f.readinto(np_buf)
+                if bytes_read != nbytes:
+                    raise ValueError(
+                        f"truncated read for {name}: expected {nbytes}, got {bytes_read}"
+                    )
+                param.data.copy_(pinned.view(param.dtype).reshape(param.shape))
+                del pinned
+
+        torch.cuda.synchronize()
+        elapsed = time.perf_counter() - t0
+    num_regions = result['regions_restored'] if use_rust else len(params)
+    backend = "rust_pipelined_mmap" if use_rust else "python_region_copy"
+    stats = {
+        "num_regions": num_regions,
         "total_bytes": total_bytes,
         "elapsed_s": elapsed,
         "throughput_gb_s": (total_bytes / 1e9) / elapsed if elapsed > 0 else 0,
-        "backend": "rust_pipelined_mmap",
-        "read_time_s": read_time,
+        "backend": backend,
     }
+    if use_rust:
+        stats["read_time_s"] = read_time
+    return stats
 
 
 def restore_model_pipelined(

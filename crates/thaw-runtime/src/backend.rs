@@ -386,6 +386,20 @@ pub trait CudaBackend: Send + Sync {
     /// can memcpy into."
     fn alloc_pinned(&self, bytes: usize) -> Result<PinnedBuffer, BackendError>;
 
+    /// Allocate pinned host memory with write-combining (WC) enabled.
+    ///
+    /// WC memory bypasses L1/L2 cache snooping on the PCIe bus,
+    /// improving H2D DMA throughput by up to 40%. Only use for
+    /// buffers the CPU writes and the GPU reads (the restore path).
+    /// CPU reads from WC memory are extremely slow — never use for
+    /// freeze buffers.
+    ///
+    /// Default impl falls back to `alloc_pinned` (mock, or when WC
+    /// is not available).
+    fn alloc_pinned_wc(&self, bytes: usize) -> Result<PinnedBuffer, BackendError> {
+        self.alloc_pinned(bytes)
+    }
+
     /// Copy `region.size` bytes from device memory at `region.ptr`
     /// into `dst`, starting at offset 0. `dst.len()` must equal
     /// `region.size`.

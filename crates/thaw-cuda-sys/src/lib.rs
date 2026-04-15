@@ -99,6 +99,8 @@
 
 use core::ffi::c_int;
 #[cfg(feature = "cuda")]
+use core::ffi::c_uint;
+#[cfg(feature = "cuda")]
 use core::ffi::c_void;
 
 /// Opaque handle for a CUDA stream.
@@ -110,6 +112,17 @@ use core::ffi::c_void;
 /// it explicitly; we always create named streams.
 #[cfg(feature = "cuda")]
 pub type CudaStream = *mut c_void;
+
+/// Flag for `cudaHostAlloc`: use write-combining memory. Bypasses L1/L2
+/// cache snooping on the PCIe bus, improving H2D DMA throughput by up to
+/// 40% for buffers the CPU writes and the GPU reads. CPU reads from WC
+/// memory are extremely slow — only use for the restore hot path.
+#[cfg(feature = "cuda")]
+pub const CUDA_HOST_ALLOC_WRITE_COMBINED: c_uint = 0x04;
+
+/// Flag for `cudaHostAlloc`: default allocation (same as `cudaMallocHost`).
+#[cfg(feature = "cuda")]
+pub const CUDA_HOST_ALLOC_DEFAULT: c_uint = 0x00;
 
 // =============================================================================
 // SAFE RUST-LEVEL HELPERS
@@ -300,12 +313,17 @@ extern "C" {
     /// This is the buffer the GPU can DMA into with no copy through
     /// the kernel's page cache, which is where the freeze hot path's
     /// 24 GB/s comes from.
-    ///
-    /// The CUDA runtime also has `cudaHostAlloc`, which takes
-    /// additional flags (write-combining, mapping into the device
-    /// address space, etc.). thaw only needs the default behavior,
-    /// and `cudaMallocHost` is the simpler one-argument version.
     pub fn cudaMallocHost(ptr: *mut *mut c_void, size: usize) -> c_int;
+
+    /// Allocate `size` bytes of page-locked host memory with flags.
+    ///
+    /// With `cudaHostAllocWriteCombined` (0x04), the allocation uses
+    /// write-combining memory that bypasses L1/L2 cache snooping on
+    /// the PCIe bus. This improves H2D DMA throughput by up to 40%
+    /// for buffers the CPU writes and the GPU reads (the restore
+    /// hot path). CPU reads from WC memory are extremely slow — only
+    /// use this for write-then-DMA buffers.
+    pub fn cudaHostAlloc(ptr: *mut *mut c_void, size: usize, flags: c_uint) -> c_int;
 
     /// Free a previously-allocated pinned host buffer. Same null-is-
     /// no-op semantics as `cudaFree`.

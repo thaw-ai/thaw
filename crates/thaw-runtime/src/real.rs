@@ -194,6 +194,34 @@ impl CudaBackend for RealCuda {
         Ok(unsafe { PinnedBuffer::from_cuda_alloc(raw, bytes) })
     }
 
+    fn alloc_pinned_wc(&self, bytes: usize) -> Result<PinnedBuffer, BackendError> {
+        if bytes == 0 {
+            return Ok(PinnedBuffer::from_vec(Vec::new()));
+        }
+
+        let mut raw: *mut c_void = ptr::null_mut();
+        // SAFETY: same contract as cudaMallocHost but with WC flag.
+        // Write-combining memory bypasses cache snooping on PCIe,
+        // improving H2D DMA throughput for the restore hot path.
+        let status = CudaStatus(unsafe {
+            thaw_cuda_sys::cudaHostAlloc(
+                &mut raw as *mut *mut c_void,
+                bytes,
+                thaw_cuda_sys::CUDA_HOST_ALLOC_WRITE_COMBINED,
+            )
+        });
+        if !status.is_ok() {
+            // Fall back to regular pinned memory if WC fails
+            // (e.g., on platforms that don't support WC).
+            return self.alloc_pinned(bytes);
+        }
+        if raw.is_null() {
+            return self.alloc_pinned(bytes);
+        }
+
+        Ok(unsafe { PinnedBuffer::from_cuda_alloc(raw, bytes) })
+    }
+
     fn memcpy_d2h(
         &self,
         dst: &mut PinnedBuffer,

@@ -358,9 +358,11 @@ where
     }
 
     // Allocate two pinned buffers and two streams.
+    // Use write-combining memory: the CPU writes (from pread/mmap) and the
+    // GPU reads (via DMA). WC bypasses cache snooping → up to 40% faster H2D.
     let mut bufs = [
-        backend.alloc_pinned(chunk_size).map_err(RestoreError::Backend)?,
-        backend.alloc_pinned(chunk_size).map_err(RestoreError::Backend)?,
+        backend.alloc_pinned_wc(chunk_size).map_err(RestoreError::Backend)?,
+        backend.alloc_pinned_wc(chunk_size).map_err(RestoreError::Backend)?,
     ];
     let streams = [
         backend.stream_create().map_err(RestoreError::Backend)?,
@@ -633,10 +635,10 @@ where
 
     let mut bufs = [
         backend
-            .alloc_pinned(chunk_size)
+            .alloc_pinned_wc(chunk_size)
             .map_err(RestoreError::Backend)?,
         backend
-            .alloc_pinned(chunk_size)
+            .alloc_pinned_wc(chunk_size)
             .map_err(RestoreError::Backend)?,
     ];
     let streams = [
