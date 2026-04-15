@@ -609,20 +609,21 @@
     .feature-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 1px;
-      background: var(--border);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      overflow: hidden;
+      gap: 12px;
     }
 
     .feature {
-      background: var(--bg);
-      padding: 36px 32px;
-      transition: background 0.3s;
+      background: var(--bg-raised);
+      padding: 32px 28px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      transition: border-color 0.3s, background 0.3s;
     }
 
-    .feature:hover { background: var(--bg-raised); }
+    .feature:hover {
+      border-color: var(--border-light);
+      background: var(--surface);
+    }
 
     .feature-icon {
       width: 22px;
@@ -704,15 +705,21 @@
     }
 
     .code-panel {
-      padding: 28px;
-      font-family: var(--font-mono);
-      font-size: 13.5px;
-      line-height: 1.8;
-      overflow-x: auto;
       display: none;
     }
 
     .code-panel.active { display: block; }
+
+    .code-panel pre {
+      margin: 0;
+      padding: 28px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.85;
+      overflow-x: auto;
+      white-space: pre;
+      color: var(--text-2);
+    }
 
     .hl-kw { color: #c792ea; }
     .hl-fn { color: var(--cyan); }
@@ -1170,8 +1177,9 @@
         <button class="tab" onclick="switchTab(event, 'tab-freeze')">Freeze</button>
         <button class="tab" onclick="switchTab(event, 'tab-restore')">Restore</button>
         <button class="tab" onclick="switchTab(event, 'tab-native')">Native vLLM</button>
+        <button class="tab" onclick="switchTab(event, 'tab-demo')">Live Demo</button>
       </div>
-      <div class="code-panel active" id="tab-serve"><span class="hl-cmt"># Freeze once, serve forever</span>
+      <div class="code-panel active" id="tab-serve"><pre><span class="hl-cmt"># Freeze once, serve forever</span>
 $ thaw freeze --model meta-llama/Llama-3.1-8B-Instruct \
               --output weights.thaw
 
@@ -1181,16 +1189,16 @@ $ thaw serve --model meta-llama/Llama-3.1-8B-Instruct \
 
 <span class="hl-cmt"># Swap models in ~1s via DMA, not 20s cold start</span>
 $ curl localhost:8000/v1/chat/completions \
-    -d '{"model": "...", "messages": [...]}'</div>
-      <div class="code-panel" id="tab-freeze"><span class="hl-kw">import</span> thaw_vllm
+    -d '{"model": "...", "messages": [...]}'</pre></div>
+      <div class="code-panel" id="tab-freeze"><pre><span class="hl-kw">import</span> thaw_vllm
 <span class="hl-kw">from</span> vllm <span class="hl-kw">import</span> LLM
 
 llm <span class="hl-op">=</span> LLM(model<span class="hl-op">=</span><span class="hl-str">"meta-llama/Llama-3.1-70B-Instruct"</span>,
           tensor_parallel_size<span class="hl-op">=</span><span class="hl-num">2</span>)
 
 <span class="hl-cmt"># Snapshot GPU state to disk (once)</span>
-thaw_vllm.<span class="hl-fn">freeze_model_tp</span>(llm, <span class="hl-str">"/snapshots/llama-70b.thaw"</span>)</div>
-      <div class="code-panel" id="tab-restore"><span class="hl-kw">import</span> thaw_vllm
+thaw_vllm.<span class="hl-fn">freeze_model_tp</span>(llm, <span class="hl-str">"/snapshots/llama-70b.thaw"</span>)</pre></div>
+      <div class="code-panel" id="tab-restore"><pre><span class="hl-kw">import</span> thaw_vllm
 
 <span class="hl-cmt"># Restore: 7.7x faster weight loading</span>
 llm <span class="hl-op">=</span> thaw_vllm.<span class="hl-fn">load</span>(
@@ -1199,8 +1207,8 @@ llm <span class="hl-op">=</span> thaw_vllm.<span class="hl-fn">load</span>(
     tensor_parallel_size<span class="hl-op">=</span><span class="hl-num">2</span>
 )
 
-<span class="hl-cmt"># Same model. Same outputs. 7.7x faster.</span></div>
-      <div class="code-panel" id="tab-native"><span class="hl-kw">import</span> thaw_vllm  <span class="hl-cmt"># registers the loader</span>
+<span class="hl-cmt"># Same model. Same outputs. 7.7x faster.</span></pre></div>
+      <div class="code-panel" id="tab-native"><pre><span class="hl-kw">import</span> thaw_vllm  <span class="hl-cmt"># registers the loader</span>
 <span class="hl-kw">from</span> vllm <span class="hl-kw">import</span> LLM
 
 llm <span class="hl-op">=</span> LLM(
@@ -1208,7 +1216,24 @@ llm <span class="hl-op">=</span> LLM(
     load_format<span class="hl-op">=</span><span class="hl-str">"thaw"</span>,
     tensor_parallel_size<span class="hl-op">=</span><span class="hl-num">2</span>,
     model_loader_extra_config<span class="hl-op">=</span>{<span class="hl-str">"snapshot"</span>: <span class="hl-str">"/snapshots/llama-70b.thaw"</span>}
-)</div>
+)</pre></div>
+      <div class="code-panel" id="tab-demo"><pre><span class="hl-cmt"># Fresh RunPod A40 — zero source builds, just pip</span>
+$ pip install thaw-vllm[all]
+<span class="hl-str">Successfully installed thaw-native-0.1.1 thaw-vllm-0.1.3 vllm-0.19.0</span>
+
+$ thaw freeze --model meta-llama/Llama-3.1-8B-Instruct -o weights.thaw
+<span class="hl-str">[thaw] Weights: 195 regions, 16.06 GB in 35.5s (0.45 GB/s)</span>
+
+$ thaw serve --model meta-llama/Llama-3.1-8B-Instruct --snapshot weights.thaw
+<span class="hl-str">[thaw] Slot 0 ready in 7.9s</span>
+<span class="hl-str">[thaw] Slot 0: loaded in 1.71s (9.4 GB/s, 16.06 GB)</span>
+<span class="hl-str">[thaw] Serving on http://0.0.0.0:8000/v1</span>
+
+$ curl localhost:8000/v1/chat/completions \
+    -d '{"model": "...", "messages": [{"role": "user", "content": "Hello!"}]}'
+<span class="hl-str">{"choices": [{"message": {"content": "Hello! It's nice to meet you.
+Is there something I can help you with?"}}],
+ "thaw_metadata": {"latency_s": 1.624}}</span></pre></div>
     </div>
   </div>
 </section>
