@@ -296,9 +296,12 @@ def create_pool_app(pool: EnginePool) -> "FastAPI":
     def _build_chat_prompt(messages, model_name):
         tokenizer = _get_tokenizer(model_name)
         if tokenizer and hasattr(tokenizer, "apply_chat_template"):
-            return tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            try:
+                return tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+            except (ValueError, KeyError):
+                pass  # base model without chat template — fall through
         return (
             "\n".join(f"{m['role']}: {m['content']}" for m in messages)
             + "\nassistant:"

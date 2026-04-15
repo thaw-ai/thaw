@@ -109,6 +109,9 @@ This installs the Python package, FastAPI server, and pre-built Rust+CUDA native
 **Freeze a model, then serve it:**
 
 ```bash
+# Llama models are gated — authenticate with HuggingFace first
+huggingface-cli login
+
 # Step 1: Freeze model weights to a snapshot
 thaw freeze --model meta-llama/Llama-3.1-8B-Instruct --output weights.thaw
 
