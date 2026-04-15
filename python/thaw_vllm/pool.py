@@ -167,7 +167,13 @@ class EnginePool:
         self._slot_available.set()
 
     def _swap_model(self, slot: EngineSlot, model_name: str):
-        """DMA weights from snapshot into engine slot (blocking)."""
+        """DMA weights from snapshot into engine slot (blocking).
+
+        Tries restore strategies in order of speed:
+          1. Pipelined file restore (Rust, double-buffered DMA + O_DIRECT)
+          2. RAM restore (Rust, mmap + pipelined DMA — fast when file in page cache)
+          3. Pure Python region-by-region (fallback)
+        """
         snapshot_path = self.snapshots[model_name]
         logger.info(
             "Slot %d: swapping '%s' -> '%s'",
@@ -179,18 +185,29 @@ class EnginePool:
             from thaw_vllm.snapshot import restore_model_tp
             stats = restore_model_tp(slot.llm, snapshot_path)
         else:
-            from thaw_vllm.snapshot import restore_model_from_ram
-            stats = restore_model_from_ram(slot.model, snapshot_path)
+            from thaw_vllm.snapshot import (
+                restore_model_pipelined,
+                restore_model_from_ram,
+            )
+            try:
+                stats = restore_model_pipelined(slot.model, snapshot_path)
+            except Exception as e:
+                logger.warning(
+                    "Slot %d: pipelined restore failed (%s), falling back to RAM restore",
+                    slot.id, e,
+                )
+                stats = restore_model_from_ram(slot.model, snapshot_path)
 
         elapsed = time.perf_counter() - t0
         slot.model_name = model_name
         slot.snapshot_path = snapshot_path
 
         logger.info(
-            "Slot %d: loaded '%s' in %.2fs (%.1f GB/s, %.2f GB)",
+            "Slot %d: loaded '%s' in %.2fs (%.1f GB/s, %.2f GB, backend=%s)",
             slot.id, model_name, elapsed,
             stats.get("throughput_gb_s", 0),
             stats.get("total_bytes", 0) / 1e9,
+            stats.get("backend", "unknown"),
         )
         return stats
 
@@ -249,6 +266,17 @@ def create_pool_app(pool: EnginePool) -> "FastAPI":
     from vllm import SamplingParams
 
     app = FastAPI(title="thaw serve")
+
+    # ── Special token filtering ─────────────────────────────────
+
+    def _is_special_token(tokenizer, token_id: int) -> bool:
+        """Check if a token is a special/control token that should be filtered."""
+        if tokenizer is None:
+            return False
+        special_ids = getattr(tokenizer, 'all_special_ids', [])
+        if token_id in special_ids:
+            return True
+        return False
 
     # ── Tokenizer cache ──────────────────────────────────────────
 
@@ -343,6 +371,8 @@ def create_pool_app(pool: EnginePool) -> "FastAPI":
 
                 def gen():
                     for i, tid in enumerate(token_ids):
+                        if _is_special_token(tokenizer, tid):
+                            continue
                         text = (
                             tokenizer.decode([tid])
                             if tokenizer
@@ -467,6 +497,8 @@ def create_pool_app(pool: EnginePool) -> "FastAPI":
 
                     # Content chunks
                     for i, tid in enumerate(token_ids):
+                        if _is_special_token(tokenizer, tid):
+                            continue
                         text = (
                             tokenizer.decode([tid])
                             if tokenizer

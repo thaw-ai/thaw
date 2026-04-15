@@ -549,10 +549,11 @@ def restore_model_from_ram(
         result = _thaw.restore_from_bytes_pipelined(
             mm, mapping, chunk_size_mb=chunk_size_mb,
         )
-        elapsed = time.perf_counter() - t0
+        dma_time = time.perf_counter() - t0
         mm.close()
 
         total_bytes = result['bytes_copied']
+        elapsed = read_time + dma_time
     else:
         # Pure-Python fallback: region-by-region pinned CPU → GPU copy.
         # Copies directly into existing parameter tensors — no extra GPU
@@ -614,7 +615,9 @@ def restore_model_from_ram(
         "backend": backend,
     }
     if use_rust:
-        stats["read_time_s"] = read_time
+        stats["mmap_time_s"] = read_time
+        stats["dma_time_s"] = dma_time
+        stats["dma_throughput_gb_s"] = (total_bytes / 1e9) / dma_time if dma_time > 0 else 0
     return stats
 
 

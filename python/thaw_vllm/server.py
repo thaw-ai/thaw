@@ -20,6 +20,13 @@ def create_app(llm, model_name: str) -> FastAPI:
 
     app = FastAPI(title="thaw")
 
+    # Special token filtering
+    def _is_special_token(tokenizer, token_id: int) -> bool:
+        if tokenizer is None or tokenizer is False:
+            return False
+        special_ids = getattr(tokenizer, 'all_special_ids', [])
+        return token_id in special_ids
+
     # Cache tokenizer for chat template rendering
     _tokenizer = [None]
 
@@ -77,6 +84,8 @@ def create_app(llm, model_name: str) -> FastAPI:
                 tokenizer = _get_tokenizer()
 
                 for i, token_id in enumerate(token_ids):
+                    if _is_special_token(tokenizer, token_id):
+                        continue
                     if tokenizer:
                         text = tokenizer.decode([token_id])
                     else:
@@ -175,6 +184,8 @@ def create_app(llm, model_name: str) -> FastAPI:
 
                 # Content chunks
                 for i, token_id in enumerate(token_ids):
+                    if _is_special_token(tokenizer, token_id):
+                        continue
                     if tokenizer:
                         text = tokenizer.decode([token_id])
                     else:
