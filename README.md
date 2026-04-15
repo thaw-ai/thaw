@@ -4,6 +4,10 @@
 
 vLLM cold-starts Llama-3-70B on 2x A100 in 546 seconds. thaw restores it in **31.8 seconds** — a **17.2x speedup**. Bit-identical outputs, verified by greedy decoding. Multi-GPU tensor parallel, Rust+CUDA pipelined DMA, and KV cache snapshots that no other tool offers.
 
+<p align="center">
+  <img src="site/terminal.gif" alt="thaw demo — pip install, freeze, serve, chat completions on RunPod A40" width="800">
+</p>
+
 ## Benchmarks
 
 **Llama-3-70B-Instruct (141 GB fp16) on 2x A100 SXM 80GB — tensor parallel:**
