@@ -87,7 +87,8 @@ thaw/
       snapshot.py    Freeze/restore weights, Rust backend fallback.
       kv_snapshot.py KV cache freeze/restore.
       loader.py      vLLM ModelLoader: load_format="thaw".
-      server.py      OpenAI-compatible API server.
+      pool.py        Engine pool: pre-warmed slots, model hot-swap, OpenAI API.
+      server.py      Single-engine OpenAI-compatible API server.
       cli.py         CLI: thaw freeze, thaw serve, thaw info.
     vllm_demo.py     End-to-end benchmark: normal vs thaw cold start.
     kv_cache_demo.py KV cache snapshot/restore demo with correctness test.
@@ -100,8 +101,52 @@ thaw/
 ## Quick start
 
 ```bash
-pip install thaw-vllm[serve]
+pip install thaw-vllm[all]
 ```
+
+This installs the Python package, FastAPI server, and pre-built Rust+CUDA native extension. No Rust toolchain needed.
+
+**Freeze a model, then serve it:**
+
+```bash
+# Step 1: Freeze model weights to a snapshot
+thaw freeze --model meta-llama/Llama-3.1-8B-Instruct --output weights.thaw
+
+# Step 2: Serve with pre-warmed engine pool
+thaw serve --model meta-llama/Llama-3.1-8B-Instruct --snapshot weights.thaw
+```
+
+That's it. You now have an OpenAI-compatible API at `http://localhost:8000/v1`:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "meta-llama/Llama-3.1-8B-Instruct",
+       "messages": [{"role": "user", "content": "Hello!"}],
+       "max_tokens": 64}'
+```
+
+### How `thaw serve` works
+
+`thaw serve` is PgBouncer for GPU inference. It keeps vLLM engines pre-initialized with dummy weights, then DMA-swaps real model weights from a snapshot on demand (~1s instead of 20s cold start).
+
+- **OpenAI-compatible API** — `/v1/completions`, `/v1/chat/completions`, streaming via SSE
+- **Model affinity** — requests for an already-loaded model have zero swap cost
+- **Hot model registration** — register new snapshots at runtime via `/admin/snapshots`
+- **Pool status** — monitor slots, loaded models, and utilization via `/admin/pool`
+
+```bash
+# Multi-model pool with 2 warm slots
+thaw serve --model meta-llama/Llama-3.1-8B-Instruct \
+  --snapshot base.thaw \
+  --pool-size 2 \
+  --register finetune-v2=/snapshots/v2.thaw
+
+# The model field in each request selects which snapshot to serve
+curl localhost:8000/v1/completions -d '{"model": "finetune-v2", "prompt": "..."}'
+```
+
+### Python API
 
 ```python
 import thaw_vllm
@@ -144,23 +189,26 @@ python demos/agent_fork.py --snapshot weights.thaw
 python demos/agent_fork.py --snapshot weights.thaw --full-cycle  # destroy + restore
 ```
 
-**CLI:**
+### CLI reference
 
 ```bash
 thaw freeze --model meta-llama/Meta-Llama-3-8B --output weights.thaw
-thaw serve  --model meta-llama/Meta-Llama-3-8B --snapshot weights.thaw
+thaw serve  --model meta-llama/Meta-Llama-3-8B --snapshot weights.thaw [--pool-size N] [--register NAME=PATH]
 thaw info   weights.thaw
 ```
 
 <details>
-<summary>Building with Rust+CUDA backend (optional, higher throughput)</summary>
+<summary>Building from source (alternative to pre-built wheels)</summary>
+
+If you need to build the Rust+CUDA backend yourself (e.g., custom CUDA version):
 
 ```bash
 git clone https://github.com/thaw-ai/thaw.git && cd thaw
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 pip install "maturin[patchelf]" vllm
-cd crates/thaw-py && maturin develop --release --features cuda && cd ../..
+maturin build --release --features cuda -m crates/thaw-py/Cargo.toml -o /tmp/wheels
+pip install /tmp/wheels/*.whl
 pip install -e ".[serve]"
 ```
 
@@ -201,6 +249,8 @@ See [docs/LANDSCAPE.md](./docs/LANDSCAPE.md) for detailed analysis.
 - [x] Streaming support in API server (SSE, OpenAI-compatible)
 - [x] **Agent fork demo** — clone a running AI session, fork parallel completions from shared KV cache (full-cycle: 14.79 GB/s restore, 0.135s KV restore on H100 SXM)
 - [x] **Multi-GPU / tensor parallel** — 17.2x speedup on Llama-3-70B with 2x A100 (TP=2), bit-exact correctness verified
+- [x] **Engine pool (`thaw serve`)** — pre-warmed vLLM engines with hot model swapping, OpenAI-compatible API, multi-model serving
+- [x] **Pre-built native wheels** — `pip install thaw-vllm[all]`, no Rust toolchain needed
 - [ ] SGLang integration
 - [ ] Cloud snapshot storage (S3/GCS)
 - [ ] GPUDirect Storage support

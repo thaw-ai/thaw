@@ -1,61 +1,38 @@
 #!/bin/bash
-# thaw RunPod setup — one command to benchmark
+# thaw RunPod setup — one command to get started
 # Usage: bash setup.sh
 #
-# Set these as RunPod environment variables in the pod config UI,
-# or export them before running this script:
-#   export GITHUB_PAT=ghp_xxxxx
+# Set HF_TOKEN for gated models (e.g., Llama):
 #   export HF_TOKEN=hf_xxxxx
 
 set -euo pipefail
 
-# ── Check tokens ──────────────────────────────────────────────
-if [ -z "${GITHUB_PAT:-}" ] || [ -z "${HF_TOKEN:-}" ]; then
-    echo "ERROR: Set GITHUB_PAT and HF_TOKEN as environment variables."
-    echo "  export GITHUB_PAT=ghp_xxxxx"
-    echo "  export HF_TOKEN=hf_xxxxx"
-    exit 1
-fi
+MODEL="${MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
+SNAPSHOT="${SNAPSHOT:-/workspace/weights.thaw}"
 
-MODEL="meta-llama/Meta-Llama-3-8B"
-SNAPSHOT="/tmp/llama3-8b.thaw"
-
-echo "=== [1/7] GPU info ==="
+echo "=== [1/4] GPU info ==="
 nvidia-smi --query-gpu=name,memory.total,pcie.link.gen.current,pcie.link.width.current --format=csv,noheader
 
-echo "=== [2/7] Install Rust ==="
-if ! command -v rustc &>/dev/null; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable 2>&1 | tail -3
-    source "$HOME/.cargo/env"
-fi
-rustc --version
+echo "=== [2/4] Install thaw ==="
+pip install thaw-vllm[all] -q 2>&1 | tail -3
 
-echo "=== [3/7] Clone/update repo ==="
-if [ -d /workspace/thaw ]; then
-    cd /workspace/thaw && git pull
+echo "=== [3/4] Freeze model ==="
+if [ -n "${HF_TOKEN:-}" ]; then
+    huggingface-cli login --token "$HF_TOKEN" 2>/dev/null
+fi
+
+if [ ! -f "$SNAPSHOT" ]; then
+    echo "Freezing $MODEL to $SNAPSHOT..."
+    thaw freeze --model "$MODEL" --output "$SNAPSHOT"
 else
-    git clone "https://${GITHUB_PAT}@github.com/matteso1/thaw.git" /workspace/thaw
+    echo "Snapshot already exists at $SNAPSHOT"
 fi
-cd /workspace/thaw
 
-echo "=== [4/7] Install Python deps ==="
-pip install uv -q 2>&1 | tail -1
-uv pip install "maturin[patchelf]" vllm hf_transfer --system -q 2>&1 | tail -5
-
-echo "=== [5/7] Build thaw (Rust+CUDA) ==="
-export CUDA_PATH=/usr/local/cuda
-export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
-maturin build --release -m crates/thaw-py/Cargo.toml --features cuda --skip-auditwheel 2>&1 | tail -3
-pip install target/wheels/*.whl --force-reinstall -q
-
-echo "=== [6/7] Download model ==="
-huggingface-cli login --token "$HF_TOKEN"
-HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download "$MODEL" --exclude "original/*"
-
-echo "=== [7/7] Run benchmark ==="
-export VLLM_ENABLE_V1_MULTIPROCESSING=0
-cd /workspace/thaw
-python python/vllm_demo.py --model "$MODEL" --snapshot "$SNAPSHOT"
-
+echo "=== [4/4] Serve ==="
+echo "Starting thaw serve on port 8000..."
 echo ""
-echo "Done. Stop the pod when finished to save money."
+echo "  curl http://localhost:8000/v1/chat/completions \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d '{\"model\": \"$MODEL\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}]}'"
+echo ""
+thaw serve --model "$MODEL" --snapshot "$SNAPSHOT" --port 8000
