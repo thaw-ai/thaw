@@ -201,6 +201,20 @@ thaw info   weights.thaw
 ```
 
 <details>
+<summary>Troubleshooting</summary>
+
+**`hf-xet` download crash** — Some versions of `huggingface_hub` ship with an `hf-xet` backend that can crash during large model downloads. If you see `RuntimeError: Data processing error: File reconstruction error`, set:
+```bash
+export HF_HUB_DISABLE_XET=1
+```
+
+**Disk space** — `pip install thaw-vllm[all]` plus a 8B model snapshot needs ~50 GB. Use at least 100 GB container disk on cloud providers.
+
+**Gated models** — Llama models require HuggingFace authentication. Run `huggingface-cli login` before freeze/serve.
+
+</details>
+
+<details>
 <summary>Building from source (alternative to pre-built wheels)</summary>
 
 If you need to build the Rust+CUDA backend yourself (e.g., custom CUDA version):
