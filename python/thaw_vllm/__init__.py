@@ -14,21 +14,15 @@
 # implementation (via thaw-py/PyO3) replaces this for higher
 # throughput. The file format is identical either way.
 
-# Engine-agnostic functions from thaw_common
-from thaw_common.snapshot import (
+from thaw_vllm.snapshot import (
     freeze_model,
     freeze_model_pipelined,
+    freeze_model_tp,
     restore_model,
     restore_model_from_ram,
     restore_model_pipelined,
-)
-
-# vLLM-specific TP functions
-from thaw_vllm.snapshot import (
-    freeze_model_tp,
     restore_model_tp,
 )
-
 from thaw_vllm.kv_snapshot import (
     freeze_kv_cache,
     freeze_kv_cache_tp,
