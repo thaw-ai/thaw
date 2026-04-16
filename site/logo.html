@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@700&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; display: flex; align-items: center; justify-content: center; height: 100vh; background: #222; }
+  #preload { font-family: 'DM Sans'; font-weight: 700; position: absolute; opacity: 0; }
+</style>
+</head>
+<body>
+<span id="preload">thaw</span>
+<canvas id="c" width="1200" height="1200"></canvas>
+<script>
+function draw() {
+  const c = document.getElementById('c');
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, 1200, 1200);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#f0f0f0';
+  ctx.font = '700 280px "DM Sans", sans-serif';
+  ctx.fillText('thaw', 600, 600);
+}
+// Wait for font, then draw
+document.fonts.load('700 280px "DM Sans"').then(draw);
+</script>
+</body>
+</html>
