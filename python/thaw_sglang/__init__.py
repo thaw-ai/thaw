@@ -22,13 +22,26 @@ from thaw_common.snapshot import (
     restore_model_pipelined,
 )
 
-# SGLang-specific loaders (import conditionally — SGLang may not be installed)
+# SGLang-specific loaders. The import is lazy: if SGLang isn't installed,
+# attribute access raises a clear ImportError instead of silently returning
+# None (which would later crash with a confusing "NoneType is not callable"
+# inside vLLM/SGLang's load_format dispatch).
+_SGLANG_IMPORT_ERROR = None
 try:
     from thaw_sglang.loader import ThawSGLangModelLoader  # noqa: F401
     from thaw_sglang.loader import ThawSGLangFreezeLoader  # noqa: F401
-except ImportError:
-    ThawSGLangModelLoader = None
-    ThawSGLangFreezeLoader = None
+except ImportError as _e:
+    _SGLANG_IMPORT_ERROR = _e
+
+
+def __getattr__(name):
+    if name in ("ThawSGLangModelLoader", "ThawSGLangFreezeLoader"):
+        raise ImportError(
+            f"thaw_sglang.{name} requires the 'sglang' package. "
+            f"Install with: pip install thaw-vllm[sglang]\n"
+            f"Original import error: {_SGLANG_IMPORT_ERROR}"
+        )
+    raise AttributeError(f"module 'thaw_sglang' has no attribute {name!r}")
 
 
 def freeze(model: str, output: str, **kwargs):

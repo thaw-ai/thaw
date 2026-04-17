@@ -27,6 +27,7 @@ worker creates its own loader instance, gets its own tp_rank, loads/saves
 its own rank-specific snapshot. No collective_rpc needed.
 """
 
+import logging
 import os
 import torch.nn as nn
 
@@ -43,6 +44,8 @@ from thaw_common.snapshot import (
     restore_model_pipelined,
     restore_model,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _get_tp_rank() -> int:
@@ -159,9 +162,11 @@ class ThawSGLangModelLoader(BaseModelLoader):
 
         size_gb = stats['total_bytes'] / 1e9
         rank_info = f" (rank {tp_rank}/{tp_size})" if tp_size > 1 else ""
-        print(f"[thaw] Restored {stats['num_regions']} regions, "
-              f"{size_gb:.2f} GB in {stats['elapsed_s']:.1f}s "
-              f"({stats['throughput_gb_s']:.2f} GB/s){rank_info}")
+        logger.info(
+            "Restored %d regions, %.2f GB in %.1fs (%.2f GB/s)%s",
+            stats['num_regions'], size_gb, stats['elapsed_s'],
+            stats['throughput_gb_s'], rank_info,
+        )
 
         return model
 
@@ -225,14 +230,16 @@ class ThawSGLangFreezeLoader(BaseModelLoader):
             stats = freeze_model(model, local_path)
 
         if is_remote(target_uri):
-            print(f"[thaw] Uploading {local_path} -> {target_uri}")
+            logger.info("Uploading %s -> %s", local_path, target_uri)
             upload_snapshot(local_path, target_uri)
             os.unlink(local_path)
 
         size_gb = stats['total_bytes'] / 1e9
         rank_info = f" (rank {tp_rank}/{tp_size})" if tp_size > 1 else ""
-        print(f"[thaw] Frozen {stats['num_regions']} regions, "
-              f"{size_gb:.2f} GB in {stats['elapsed_s']:.1f}s "
-              f"({stats['throughput_gb_s']:.2f} GB/s){rank_info}")
+        logger.info(
+            "Frozen %d regions, %.2f GB in %.1fs (%.2f GB/s)%s",
+            stats['num_regions'], size_gb, stats['elapsed_s'],
+            stats['throughput_gb_s'], rank_info,
+        )
 
         return model

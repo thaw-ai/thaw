@@ -79,10 +79,11 @@ def check_pinned(tensor, name: str = "buffer") -> None:
     a synchronous transfer and throughput drops 2-5x with NO error
     signal. This check surfaces that condition immediately.
     """
-    try:
-        is_pinned = tensor.is_pinned()
-    except Exception:
+    # is_pinned() only exists on torch.Tensor. For anything else, skip the
+    # check rather than mask a genuine error.
+    if not hasattr(tensor, "is_pinned"):
         return
+    is_pinned = tensor.is_pinned()
     if is_pinned:
         return
 
