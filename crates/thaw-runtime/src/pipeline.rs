@@ -833,15 +833,93 @@ where
 pub fn restore_pipelined_from_registered_bytes<B, F>(
     backend: &B,
     data: &[u8],
-    mut resolve: F,
-    _config: &PipelineConfig,
+    resolve: F,
+    config: &PipelineConfig,
 ) -> Result<RestoreStats, RestoreError>
 where
     B: PipelinedBackend,
     F: FnMut(RegionKind, u32) -> Option<DeviceRegion>,
 {
-    // -- Phase 1: Parse header and build copy plan ------------------
+    // Build the copy plan under the `data` borrow.
+    let (plan, total_bytes) = plan_copies_from_bytes(data, resolve)?;
 
+    if plan.is_empty() {
+        return Ok(RestoreStats::default());
+    }
+
+    // Register the whole buffer once for this call. The RAII guard
+    // unpins on the way out regardless of which branch we take.
+    //
+    // SAFETY: `data` is borrowed for the duration of this function so
+    // the pointer is valid for exactly `data.len()` bytes. The guard
+    // drops before we return, so the registration does not outlive
+    // the borrow.
+    let _registration = unsafe {
+        backend
+            .host_register(data.as_ptr() as *mut u8, data.len())
+            .map_err(RestoreError::Backend)?
+    };
+
+    run_pre_registered_plan(backend, data, &plan, config)?;
+
+    Ok(RestoreStats {
+        regions_restored: plan.len(),
+        bytes_copied: total_bytes,
+    })
+}
+
+/// DMA from a buffer the caller has **already** registered via
+/// `cudaHostRegister` (or equivalent). This is the hot path for
+/// `thaw serve`: the slot holds a persistent registration over its
+/// mmap, and every restore into that slot skips the O(pages) cost of
+/// re-registering 16+ GB on each call.
+///
+/// Behavior is otherwise identical to
+/// `restore_pipelined_from_registered_bytes` — same plan construction,
+/// same two-stream round-robin DMA, same stream sync on exit.
+///
+/// # Safety / Requirements
+///
+/// - `data` must point at bytes currently registered for DMA. If the
+///   bytes are pageable, `cudaMemcpyAsync` degrades to synchronous
+///   transfer (slow, not UB).
+/// - `data` must outlive this call. The caller typically holds the
+///   registration and the underlying mmap alive via a `PinnedMmap`
+///   PyO3 handle on the Python side.
+pub fn restore_pipelined_from_pre_registered_bytes<B, F>(
+    backend: &B,
+    data: &[u8],
+    resolve: F,
+    config: &PipelineConfig,
+) -> Result<RestoreStats, RestoreError>
+where
+    B: PipelinedBackend,
+    F: FnMut(RegionKind, u32) -> Option<DeviceRegion>,
+{
+    let (plan, total_bytes) = plan_copies_from_bytes(data, resolve)?;
+
+    if plan.is_empty() {
+        return Ok(RestoreStats::default());
+    }
+
+    run_pre_registered_plan(backend, data, &plan, config)?;
+
+    Ok(RestoreStats {
+        regions_restored: plan.len(),
+        bytes_copied: total_bytes,
+    })
+}
+
+/// Parse the snapshot header, resolve every region through `resolve`,
+/// and return the ordered copy plan plus total bytes to transfer.
+/// Shared by both the self-registering and pre-registered variants.
+fn plan_copies_from_bytes<F>(
+    data: &[u8],
+    mut resolve: F,
+) -> Result<(Vec<CopyEntry>, u64), RestoreError>
+where
+    F: FnMut(RegionKind, u32) -> Option<DeviceRegion>,
+{
     if data.len() < HEADER_SIZE as usize {
         return Err(RestoreError::Snapshot(thaw_core::SnapshotError::Io {
             kind: std::io::ErrorKind::UnexpectedEof,
@@ -884,45 +962,37 @@ where
         });
     }
 
-    if plan.is_empty() {
-        return Ok(RestoreStats::default());
-    }
+    Ok((plan, total_bytes))
+}
 
-    // -- Phase 2: Register the input range, then fire async DMAs ----
-    //
-    // Registering the entire slice rather than one region at a time
-    // avoids per-region ioctl overhead — a single pin covers all the
-    // offsets the copy loop will read from. The RAII guard unpins on
-    // the way out regardless of which arm we take below.
-    //
-    // SAFETY: `data` is a `&[u8]` borrowed for the duration of this
-    // function, so the pointer is valid for exactly `data.len()`
-    // bytes. The guard's Drop runs before this function returns, so
-    // the registration does not outlive the borrow.
-    let _registration = unsafe {
-        backend
-            .host_register(data.as_ptr() as *mut u8, data.len())
-            .map_err(RestoreError::Backend)?
-    };
-
+/// Execute an already-built plan against `data`, assuming `data` is
+/// pinned for DMA. Creates two streams, round-robins regions across
+/// them, syncs, and tears the streams down. Does not touch
+/// registration — the caller owns that lifecycle.
+fn run_pre_registered_plan<B>(
+    backend: &B,
+    data: &[u8],
+    plan: &[CopyEntry],
+    _config: &PipelineConfig,
+) -> Result<(), RestoreError>
+where
+    B: PipelinedBackend,
+{
     let streams = [
         backend.stream_create().map_err(RestoreError::Backend)?,
         backend.stream_create().map_err(RestoreError::Backend)?,
     ];
 
     // Round-robin regions across streams so the GPU's two copy
-    // engines can run concurrently. Each DMA is directly from the
-    // registered mmap pages — no staging copy.
+    // engines can run concurrently. Each DMA goes straight from the
+    // registered pages — no staging copy.
     for (i, entry) in plan.iter().enumerate() {
+        // SAFETY: `src_ptr` points into `data`, which is live for the
+        // call. The caller's registration (or the wrapper's guard)
+        // keeps it pinned through the syncs below.
         let src_ptr = unsafe { data.as_ptr().add(entry.file_offset as usize) };
         let stream = &streams[i % 2];
 
-        // SAFETY: `src_ptr` points into `data`, which remains valid
-        // until we return (borrow holds it alive). The registration
-        // guard above has pinned it for DMA. The stream handle came
-        // from `stream_create` a few lines up. We sync both streams
-        // below before the guard drops, so the DMA completes before
-        // the pages are unpinned.
         unsafe {
             backend
                 .memcpy_h2d_async_raw(
@@ -949,12 +1019,7 @@ where
         .stream_destroy(streams[1])
         .map_err(RestoreError::Backend)?;
 
-    // _registration drops here, unpinning the mmap pages.
-
-    Ok(RestoreStats {
-        regions_restored: plan.len(),
-        bytes_copied: total_bytes,
-    })
+    Ok(())
 }
 
 // =============================================================================
@@ -1583,6 +1648,70 @@ mod tests {
 
         assert_eq!(stats.regions_restored, 0);
         assert_eq!(stats.bytes_copied, 0);
+    }
+
+    /// The pre-registered variant must be call-repeatable against the
+    /// same input buffer: two back-to-back restores produce identical
+    /// bytes and stats. This is the slot-warm-up → N-restores pattern
+    /// that `thaw serve` relies on.
+    #[test]
+    fn from_pre_registered_bytes_reusable() {
+        let src = MockCuda::new();
+        let w_ptr = DevicePtr(0x1000);
+        let weights: Vec<u8> = (0..256).map(|i| ((i * 7) & 0xFF) as u8).collect();
+        src.register_region(w_ptr, weights.clone());
+
+        let requests = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(w_ptr, weights.len() as u64),
+        )];
+        let data = freeze_to_bytes(&src, &requests);
+
+        let dst = MockCuda::new();
+        let w_ptr2 = DevicePtr(0xA000);
+        dst.register_region(w_ptr2, vec![0u8; weights.len()]);
+
+        let config = PipelineConfig::default();
+
+        // First restore: same as the registering variant would do.
+        let stats1 = restore_pipelined_from_pre_registered_bytes(
+            &dst,
+            &data,
+            |kind, _| match kind {
+                RegionKind::Weights => {
+                    Some(DeviceRegion::new(w_ptr2, weights.len() as u64))
+                }
+                _ => None,
+            },
+            &config,
+        )
+        .expect("first restore");
+
+        assert_eq!(stats1.regions_restored, 1);
+        assert_eq!(stats1.bytes_copied, weights.len() as u64);
+        assert_eq!(dst.read_region(w_ptr2).unwrap(), weights);
+
+        // Zero the destination and restore a second time from the same
+        // buffer — no registration cost, same result. This is the
+        // slot-reuse case.
+        dst.register_region(w_ptr2, vec![0u8; weights.len()]);
+        let stats2 = restore_pipelined_from_pre_registered_bytes(
+            &dst,
+            &data,
+            |kind, _| match kind {
+                RegionKind::Weights => {
+                    Some(DeviceRegion::new(w_ptr2, weights.len() as u64))
+                }
+                _ => None,
+            },
+            &config,
+        )
+        .expect("second restore");
+
+        assert_eq!(stats2.regions_restored, 1);
+        assert_eq!(stats2.bytes_copied, weights.len() as u64);
+        assert_eq!(dst.read_region(w_ptr2).unwrap(), weights);
     }
 
     /// Zero-region file restores with zero stats.

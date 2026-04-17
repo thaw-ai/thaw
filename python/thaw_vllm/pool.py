@@ -51,6 +51,12 @@ class EngineSlot:
     snapshot_path: Optional[str] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _model_ref: object = field(default=None, repr=False)
+    # Slot-persistent pinned mmap for the currently loaded snapshot.
+    # Populated on first successful load of `snapshot_path`, reused on
+    # subsequent same-path reloads, dropped + rebuilt when the slot's
+    # snapshot_path changes. `None` on cold slots and when the zero-
+    # copy path is unavailable on this host.
+    _pinned_mmap: object = field(default=None, repr=False)
 
     @property
     def model(self):
@@ -60,6 +66,14 @@ class EngineSlot:
             ec = _get_engine_core_from_llm(self.llm)
             self._model_ref = ec.model_executor.driver_worker.model_runner.model
         return self._model_ref
+
+    def _drop_pinned_mmap(self):
+        """Release any slot-persistent pinned registration.
+
+        Runs `cudaHostUnregister` and frees the mmap. Call before
+        rebuilding for a different snapshot path, or at slot teardown.
+        """
+        self._pinned_mmap = None
 
 
 class EnginePool:
@@ -170,9 +184,10 @@ class EnginePool:
         """DMA weights from snapshot into engine slot (blocking).
 
         Tries restore strategies in order of speed:
-          1. Pipelined file restore (Rust, double-buffered DMA + O_DIRECT)
-          2. RAM restore (Rust, mmap + pipelined DMA — fast when file in page cache)
-          3. Pure Python region-by-region (fallback)
+          1. Slot-pinned mmap (persistent cudaHostRegister, reused across reloads)
+          2. RAM restore (Rust, mmap + pipelined DMA — per-call pin)
+          3. Pipelined file restore (Rust, double-buffered DMA + O_DIRECT)
+          4. Pure Python region-by-region (fallback)
         """
         snapshot_path = self.snapshots[model_name]
         logger.info(
@@ -184,6 +199,7 @@ class EnginePool:
         if self.tp_size > 1:
             from thaw_vllm.snapshot import restore_model_tp
             stats = restore_model_tp(slot.llm, snapshot_path)
+            resolved_path = snapshot_path
         else:
             from thaw_vllm.snapshot import (
                 restore_model_pipelined,
@@ -192,27 +208,73 @@ class EnginePool:
             )
             from thaw_common.cloud import resolve_snapshot_path
             from thaw_common.telemetry import fallback_warning, strict_mode
+            from thaw_common.snapshot import (
+                make_pinned_mmap,
+                restore_model_from_pinned_mmap,
+            )
 
             local_path = resolve_snapshot_path(snapshot_path)
-            try:
-                stats = restore_model_from_ram(slot.model, local_path)
-            except Exception as e_ram:
-                fallback_warning(f"EnginePool.slot{slot.id}.restore_model_from_ram", e_ram,
-                                 dst="restore_model_pipelined")
-                if strict_mode():
-                    raise
+            resolved_path = local_path
+            stats = None
+
+            # Path 1: slot-persistent pinned mmap. Drop any stale
+            # registration (different snapshot) before building a new
+            # one. On the reuse path `_pinned_mmap` is already correct
+            # and we skip straight to restore_from_pinned_mmap.
+            if slot.snapshot_path != local_path and slot._pinned_mmap is not None:
+                slot._drop_pinned_mmap()
+
+            if slot._pinned_mmap is None:
                 try:
-                    stats = restore_model_pipelined(slot.model, local_path)
-                except Exception as e_pipe:
-                    fallback_warning(f"EnginePool.slot{slot.id}.restore_model_pipelined", e_pipe,
-                                     dst="restore_model (pure python)")
+                    slot._pinned_mmap = make_pinned_mmap(local_path)
+                except Exception as e_pin:
+                    fallback_warning(
+                        f"EnginePool.slot{slot.id}.make_pinned_mmap", e_pin,
+                        dst="restore_model_from_ram",
+                    )
                     if strict_mode():
                         raise
-                    stats = restore_model(slot.model, local_path)
+
+            if slot._pinned_mmap is not None:
+                try:
+                    stats = restore_model_from_pinned_mmap(
+                        slot.model, slot._pinned_mmap,
+                    )
+                except Exception as e_reuse:
+                    fallback_warning(
+                        f"EnginePool.slot{slot.id}.restore_model_from_pinned_mmap",
+                        e_reuse,
+                        dst="restore_model_from_ram",
+                    )
+                    slot._drop_pinned_mmap()
+                    if strict_mode():
+                        raise
+
+            if stats is None:
+                try:
+                    stats = restore_model_from_ram(slot.model, local_path)
+                except Exception as e_ram:
+                    fallback_warning(
+                        f"EnginePool.slot{slot.id}.restore_model_from_ram", e_ram,
+                        dst="restore_model_pipelined",
+                    )
+                    if strict_mode():
+                        raise
+                    try:
+                        stats = restore_model_pipelined(slot.model, local_path)
+                    except Exception as e_pipe:
+                        fallback_warning(
+                            f"EnginePool.slot{slot.id}.restore_model_pipelined",
+                            e_pipe,
+                            dst="restore_model (pure python)",
+                        )
+                        if strict_mode():
+                            raise
+                        stats = restore_model(slot.model, local_path)
 
         elapsed = time.perf_counter() - t0
         slot.model_name = model_name
-        slot.snapshot_path = snapshot_path
+        slot.snapshot_path = resolved_path
 
         logger.info(
             "Slot %d: loaded '%s' in %.2fs (%.1f GB/s, %.2f GB, backend=%s)",
