@@ -19,15 +19,110 @@
 //
 // =============================================================================
 
+use std::cell::RefCell;
 use std::io::Write;
 use std::path::Path;
 
 use thaw_core::{ByteRegionWriter, RegionKind, Snapshot, SnapshotError, HEADER_SIZE};
 
 use crate::backend::{DeviceRegion, PipelinedBackend};
-use crate::direct_io::{open_direct, pread_exact};
+use crate::direct_io::{
+    open_direct, open_direct_write, pread_exact, pwrite_exact, truncate,
+};
 use crate::freeze::{FreezeConfig, FreezeError, FreezeRequest};
 use crate::restore::{RestoreError, RestoreStats};
+
+// =============================================================================
+// WRITE-COMBINING PINNED BUFFER CACHE (per-thread, amortized across calls)
+// =============================================================================
+//
+// `alloc_pinned_wc` calls `cudaHostAlloc` / `cudaHostRegister`, which is
+// O(pages) — pinning 128 MiB (two 64 MiB WC chunk buffers) on a cold
+// thread is ~tens of milliseconds; repeat that for every `thaw serve`
+// hot-swap or agent fork and it becomes a visible floor.
+//
+// The fix: cache one pair of WC buffers per thread, keyed on chunk_size.
+// Subsequent calls with the same chunk_size reuse the cached pair and
+// skip allocation entirely. If a later call comes in with a different
+// chunk_size, the old pair is dropped (freed) and a new pair is
+// allocated — no memory leak, worst case is the same as no cache.
+//
+// Thread-local (not Mutex'd global) because:
+//   - PinnedBuffer is Send but not Sync. Two threads can't share one.
+//   - CUDA contexts are typically thread-bound; a pinned buffer
+//     allocated under one context is not guaranteed to be valid under
+//     another.
+//   - No lock contention on the fast path.
+//
+// Disable with `THAW_DISABLE_WC_CACHE=1` for debugging.
+
+thread_local! {
+    static WC_BUF_CACHE: RefCell<Option<WcBufCache>> = const { RefCell::new(None) };
+}
+
+struct WcBufCache {
+    chunk_size: usize,
+    bufs: [crate::backend::PinnedBuffer; 2],
+}
+
+fn wc_cache_disabled() -> bool {
+    std::env::var("THAW_DISABLE_WC_CACHE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Acquire a pair of WC pinned buffers sized `chunk_size`. Returns the
+/// cached pair if one is available, otherwise allocates fresh.
+fn acquire_wc_bufs<B: PipelinedBackend>(
+    backend: &B,
+    chunk_size: usize,
+) -> Result<[crate::backend::PinnedBuffer; 2], crate::backend::BackendError> {
+    if !wc_cache_disabled() {
+        let cached = WC_BUF_CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            match c.take() {
+                Some(cache) if cache.chunk_size == chunk_size => Some(cache.bufs),
+                other => {
+                    // Stale size or empty — drop the cached pair (if any)
+                    // and fall through to a fresh allocation below.
+                    drop(other);
+                    None
+                }
+            }
+        });
+        if let Some(bufs) = cached {
+            return Ok(bufs);
+        }
+    }
+    Ok([
+        backend.alloc_pinned_wc(chunk_size)?,
+        backend.alloc_pinned_wc(chunk_size)?,
+    ])
+}
+
+/// Return a pair of WC pinned buffers to the per-thread cache. If the
+/// cache already holds a pair, the new pair is dropped (freed). This
+/// keeps cached footprint bounded to one pair per thread.
+fn release_wc_bufs(bufs: [crate::backend::PinnedBuffer; 2], chunk_size: usize) {
+    if wc_cache_disabled() {
+        drop(bufs);
+        return;
+    }
+    WC_BUF_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() {
+            *c = Some(WcBufCache { chunk_size, bufs });
+        }
+        // else: existing cache wins; `bufs` drops here = freed.
+    });
+}
+
+/// Drop this thread's cached WC pinned buffer pair (if any). Safe to
+/// call when no pair is cached. Use for explicit shutdown and for
+/// tests that need deterministic allocation.
+pub fn clear_wc_buf_cache() {
+    WC_BUF_CACHE.with(|c| *c.borrow_mut() = None);
+}
 
 /// Configuration for the pipelined restore.
 pub struct PipelineConfig {
@@ -75,24 +170,32 @@ pub struct FreezeStats {
 // chunk (in buffer B) is being written to disk. The bottleneck
 // becomes max(disk, PCIe) instead of disk + PCIe.
 
-/// Pipelined freeze: double-buffered async D2H with overlapped
-/// disk writes.
+/// A single entry in the freeze plan: which device region maps to
+/// which byte range in the output file.
 ///
-/// Same file format as `freeze`, but significantly faster for large
-/// models because D2H DMA and disk I/O run concurrently. Also
-/// avoids the per-region `alloc_pinned` overhead by reusing two
-/// pre-allocated buffers.
-pub fn freeze_pipelined<B, W>(
-    backend: &B,
+/// Mirror of `CopyEntry` (see below), with the same field layout —
+/// the freeze and restore pipelines share the same chunked
+/// algorithm, they just flip the copy direction and the I/O
+/// direction.
+struct FreezePlan {
+    /// Absolute byte offset in the output file where this region's
+    /// payload starts. Determined by the region table layout.
+    file_offset: u64,
+    /// Size of this region in bytes.
+    size: u64,
+    /// Source device region to D2H copy from.
+    device_region: DeviceRegion,
+}
+
+/// Build the freeze plan + serialized prelude bytes.
+///
+/// The prelude (header + region table) is constructed in memory so
+/// the chunked pipeline can carry it as the head of chunk 0 without
+/// a separate write call. Returns `(plan, prelude_bytes, total_file_size)`.
+fn build_freeze_plan(
     requests: &[FreezeRequest],
     config: &FreezeConfig,
-    sink: &mut W,
-) -> Result<FreezeStats, FreezeError>
-where
-    B: PipelinedBackend,
-    W: Write,
-{
-    // Phase 1: Write header + region table.
+) -> Result<(Vec<FreezePlan>, Vec<u8>, u64), FreezeError> {
     let mut writer = ByteRegionWriter::new();
     if let Some(commit) = config.vllm_commit {
         writer.set_vllm_commit(commit);
@@ -105,99 +208,414 @@ where
         );
     }
     let snapshot = writer.build_snapshot();
-    snapshot.write_to(sink)?;
+
+    // Serialize prelude to a Vec<u8>. Small (4 KiB + 24 B/region).
+    let mut prelude_bytes: Vec<u8> = Vec::with_capacity(snapshot.prelude_size() as usize);
+    snapshot.write_to(&mut prelude_bytes)?;
+
+    // Extract file_offsets from the region table.
+    let mut plan: Vec<FreezePlan> = Vec::with_capacity(requests.len());
+    let mut total_bytes: u64 = 0;
+    for (i, request) in requests.iter().enumerate() {
+        let entry = snapshot
+            .table()
+            .get(i)
+            .expect("region_table entry for freeze request");
+        plan.push(FreezePlan {
+            file_offset: entry.file_offset(),
+            size: entry.size(),
+            device_region: request.device_region.clone(),
+        });
+        total_bytes += request.device_region.size;
+    }
+
+    let prelude_size = prelude_bytes.len() as u64;
+    let total_file_size = if requests.is_empty() {
+        prelude_size
+    } else {
+        // Payload ends at the highest (file_offset + size). Region table
+        // packs them sequentially, so this equals prelude_size + total_bytes.
+        prelude_size + total_bytes
+    };
+
+    Ok((plan, prelude_bytes, total_file_size))
+}
+
+/// Determine which plan entries overlap a given chunk and issue
+/// async D2H copies into the buffer. Mirror of `launch_uploads` in
+/// restore.
+fn launch_dumps<B: PipelinedBackend>(
+    backend: &B,
+    buf: &mut crate::backend::PinnedBuffer,
+    stream: &crate::backend::StreamHandle,
+    chunk_start: u64,
+    chunk_end: u64,
+    plan: &[FreezePlan],
+) -> Result<(), FreezeError> {
+    for entry in plan {
+        let region_start = entry.file_offset;
+        let region_end = entry.file_offset + entry.size;
+
+        // Skip entries that don't overlap this chunk.
+        if region_end <= chunk_start || region_start >= chunk_end {
+            continue;
+        }
+
+        // Compute the overlap in file coordinates.
+        let overlap_start = region_start.max(chunk_start);
+        let overlap_end = region_end.min(chunk_end);
+        let overlap_len = overlap_end - overlap_start;
+
+        // Offset within the pinned buffer (where in the chunk to land).
+        let buf_offset = (overlap_start - chunk_start) as usize;
+
+        // Offset within the source device region.
+        let dev_offset = overlap_start - region_start;
+
+        // Sub-region of the device allocation.
+        let sub_region = DeviceRegion::new(
+            crate::backend::DevicePtr(entry.device_region.ptr.0 + dev_offset),
+            overlap_len,
+        );
+
+        backend.memcpy_d2h_async(buf, buf_offset, &sub_region, stream)?;
+    }
+    Ok(())
+}
+
+/// Pipelined freeze: double-buffered async D2H with overlapped
+/// writes (generic writer).
+///
+/// Produces the same `.thaw` file format as `freeze`, but:
+///   - One `memcpy_d2h_async` per region, packed into fixed-size
+///     chunks instead of allocating per-region pinned buffers.
+///   - Two write-combining pinned buffers, reused across the entire
+///     freeze, so allocation cost is O(1) not O(regions).
+///   - D2H of chunk N overlaps the write of chunk N-1.
+///
+/// This is the in-memory / test-friendly entry point. For production
+/// freezes to disk use `freeze_pipelined_to_file`, which adds
+/// O_DIRECT writes via `pwrite`.
+pub fn freeze_pipelined<B, W>(
+    backend: &B,
+    requests: &[FreezeRequest],
+    config: &FreezeConfig,
+    sink: &mut W,
+) -> Result<FreezeStats, FreezeError>
+where
+    B: PipelinedBackend,
+    W: Write,
+{
+    let (plan, prelude_bytes, total_file_size) = build_freeze_plan(requests, config)?;
+
+    // Phase 1: write prelude directly. For the writer-based path we
+    // don't need to carry the prelude in the chunk 0 buffer — we can
+    // just write it and then write payload chunks in order.
+    sink.write_all(&prelude_bytes)
+        .map_err(|e| FreezeError::Snapshot(SnapshotError::from(e)))?;
 
     if requests.is_empty() {
         return Ok(FreezeStats::default());
     }
 
-    // Phase 2: Double-buffered D2H + write pipeline.
-    //
-    // Allocate two pinned buffers sized to the largest region. Each
-    // region gets one D2H async call, and the double-buffering
-    // overlaps the disk write of region N with the D2H of region N+1.
-    let max_region_size = requests
-        .iter()
-        .map(|r| r.device_region.size as usize)
-        .max()
-        .unwrap();
+    // Phase 2: chunked double-buffered D2H + write.
+    let chunk_size = config.chunk_size;
+    assert!(chunk_size > 0, "chunk_size must be > 0");
 
-    let mut buf_a = backend.alloc_pinned(max_region_size)?;
-    let mut buf_b = backend.alloc_pinned(max_region_size)?;
-    let stream_a = backend.stream_create()?;
-    let stream_b = backend.stream_create()?;
+    let payload_start = prelude_bytes.len() as u64;
+    let payload_end = total_file_size;
+    let payload_len = (payload_end - payload_start) as usize;
+    if payload_len == 0 {
+        return Ok(FreezeStats {
+            regions_frozen: requests.len(),
+            bytes_copied: 0,
+        });
+    }
+    let num_chunks = (payload_len + chunk_size - 1) / chunk_size;
 
-    let total_bytes: u64 = requests.iter().map(|r| r.device_region.size).sum();
+    let total_bytes: u64 = plan.iter().map(|p| p.size).sum();
 
-    // Helper to write a region's worth of data from a buffer.
-    let write_region = |buf: &crate::backend::PinnedBuffer,
-                        size: usize,
-                        sink: &mut W|
+    // Two pinned buffers (write-combining for faster D2H) + two streams.
+    // Buffers are acquired from a per-thread cache — subsequent calls
+    // with the same chunk_size skip the `cudaHostAlloc` cost entirely.
+    let mut bufs = acquire_wc_bufs(backend, chunk_size)?;
+    let streams = [backend.stream_create()?, backend.stream_create()?];
+
+    // Helper: compute this chunk's [start, end) in file coordinates.
+    let chunk_range = |idx: usize| -> (u64, u64) {
+        let start = payload_start + (idx as u64) * (chunk_size as u64);
+        let end = (start + chunk_size as u64).min(payload_end);
+        (start, end)
+    };
+
+    // Helper: write `len` bytes from the buffer into the sink.
+    let write_chunk_to_sink = |buf: &crate::backend::PinnedBuffer,
+                               len: usize,
+                               sink: &mut W|
      -> Result<(), FreezeError> {
-        sink.write_all(&buf.as_slice()[..size])
+        sink.write_all(&buf.as_slice()[..len])
             .map_err(|e| FreezeError::Snapshot(SnapshotError::from(e)))?;
         Ok(())
     };
 
-    // Prime: D2H first region into buf_a, sync.
-    backend.memcpy_d2h_async(
-        &mut buf_a,
-        0,
-        &requests[0].device_region,
-        &stream_a,
-    )?;
-    backend.stream_sync(&stream_a)?;
+    // Prime: D2H chunk 0 into bufs[0], sync.
+    {
+        let (c0_start, c0_end) = chunk_range(0);
+        launch_dumps(backend, &mut bufs[0], &streams[0], c0_start, c0_end, &plan)?;
+        backend.stream_sync(&streams[0])?;
+    }
 
-    // Steady-state: overlap D2H(current) with write(previous).
-    let mut prev_in_a = true;
+    if num_chunks == 1 {
+        let (c0_start, c0_end) = chunk_range(0);
+        let len = (c0_end - c0_start) as usize;
+        write_chunk_to_sink(&bufs[0], len, sink)?;
+    } else {
+        // Steady state: D2H(chunk i) overlaps write(chunk i-1).
+        for chunk_idx in 1..num_chunks {
+            let prev = (chunk_idx - 1) % 2;
+            let curr = chunk_idx % 2;
 
-    for i in 1..requests.len() {
-        let prev_size = requests[i - 1].device_region.size as usize;
+            let (prev_start, prev_end) = chunk_range(chunk_idx - 1);
+            let prev_len = (prev_end - prev_start) as usize;
 
-        if prev_in_a {
-            // D2H current region into buf_b (async, returns immediately).
-            backend.memcpy_d2h_async(
-                &mut buf_b,
-                0,
-                &requests[i].device_region,
-                &stream_b,
+            let (curr_start, curr_end) = chunk_range(chunk_idx);
+
+            // Kick off D2H for the current chunk into its buffer.
+            launch_dumps(
+                backend,
+                &mut bufs[curr],
+                &streams[curr],
+                curr_start,
+                curr_end,
+                &plan,
             )?;
-            // Write buf_a to disk (overlaps with D2H into buf_b).
-            write_region(&buf_a, prev_size, sink)?;
-            // Wait for buf_b to be ready.
-            backend.stream_sync(&stream_b)?;
-        } else {
-            // D2H current region into buf_a (async).
-            backend.memcpy_d2h_async(
-                &mut buf_a,
-                0,
-                &requests[i].device_region,
-                &stream_a,
-            )?;
-            // Write buf_b to disk (overlaps with D2H into buf_a).
-            write_region(&buf_b, prev_size, sink)?;
-            // Wait for buf_a to be ready.
-            backend.stream_sync(&stream_a)?;
+
+            // While D2H is in flight on streams[curr], write the
+            // previous chunk to the sink.
+            write_chunk_to_sink(&bufs[prev], prev_len, sink)?;
+
+            // Wait for the current chunk's D2H to complete before
+            // the next iteration reuses its buffer.
+            backend.stream_sync(&streams[curr])?;
         }
 
-        prev_in_a = !prev_in_a;
+        // Write the final chunk.
+        let last = (num_chunks - 1) % 2;
+        let (last_start, last_end) = chunk_range(num_chunks - 1);
+        let last_len = (last_end - last_start) as usize;
+        write_chunk_to_sink(&bufs[last], last_len, sink)?;
     }
 
-    // Write final region.
-    let last_size = requests.last().unwrap().device_region.size as usize;
-    if prev_in_a {
-        write_region(&buf_a, last_size, sink)?;
+    // Cleanup streams.
+    backend
+        .stream_destroy(streams[0])
+        .map_err(FreezeError::Backend)?;
+    backend
+        .stream_destroy(streams[1])
+        .map_err(FreezeError::Backend)?;
+
+    // Return WC buffers to the per-thread cache.
+    release_wc_bufs(bufs, chunk_size);
+
+    let _ = total_file_size; // silence unused on non-file path
+    Ok(FreezeStats {
+        regions_frozen: requests.len(),
+        bytes_copied: total_bytes,
+    })
+}
+
+/// Pipelined freeze to a file path, using O_DIRECT writes when
+/// supported.
+///
+/// Mirror of `restore_pipelined`: fixed-size chunks, write-combining
+/// pinned buffers, double-buffered D2H + I/O overlap, O_DIRECT on
+/// aligned chunks with a buffered fallback for ragged edges.
+///
+/// The prelude (header + region table) is carried as the head of
+/// chunk 0 so the first pwrite can start at offset 0. Final chunk
+/// is padded up to 4 KiB for O_DIRECT and then the file is
+/// truncated down to the exact size afterward.
+pub fn freeze_pipelined_to_file<B>(
+    backend: &B,
+    requests: &[FreezeRequest],
+    config: &FreezeConfig,
+    path: &Path,
+) -> Result<FreezeStats, FreezeError>
+where
+    B: PipelinedBackend,
+{
+    let (plan, prelude_bytes, total_file_size) = build_freeze_plan(requests, config)?;
+
+    // Open both fds: O_DIRECT for aligned middle chunks, buffered
+    // for ragged final chunk or when O_DIRECT isn't supported.
+    let io_err = |e: std::io::Error| {
+        FreezeError::Snapshot(SnapshotError::Io {
+            kind: e.kind(),
+            message: e.to_string(),
+        })
+    };
+    let file_direct = open_direct_write(path, config.try_direct_io).map_err(io_err)?;
+    let file_buffered = open_direct_write(path, false).map_err(io_err)?;
+
+    let chunk_size = config.chunk_size;
+    assert!(chunk_size > 0, "chunk_size must be > 0");
+    assert!(
+        chunk_size % 4096 == 0,
+        "chunk_size must be a multiple of 4096 for O_DIRECT"
+    );
+
+    // In the file-based path we write starting at offset 0 and
+    // the prelude lives at the head of chunk 0. So "chunks" here
+    // span the entire file, not just the payload region.
+    let file_len = total_file_size;
+    if file_len == 0 {
+        // Empty snapshot — just write the prelude (prelude-only file).
+        pwrite_exact(&file_buffered, &prelude_bytes, 0).map_err(io_err)?;
+        return Ok(FreezeStats::default());
+    }
+
+    let num_chunks = ((file_len as usize) + chunk_size - 1) / chunk_size;
+
+    let total_bytes: u64 = plan.iter().map(|p| p.size).sum();
+
+    // Align-up helper for O_DIRECT write sizes.
+    fn align_up_4k(n: usize) -> usize {
+        (n + 4095) & !4095
+    }
+
+    // Two write-combining pinned buffers + two streams. Buffers come
+    // from the per-thread cache, amortizing the allocation cost across
+    // successive freeze calls (e.g. thaw serve hot-swap).
+    let mut bufs = acquire_wc_bufs(backend, chunk_size)?;
+    let streams = [backend.stream_create()?, backend.stream_create()?];
+
+    // Helper: chunk range in absolute file coordinates.
+    let chunk_range = |idx: usize| -> (u64, u64) {
+        let start = (idx as u64) * (chunk_size as u64);
+        let end = (start + chunk_size as u64).min(file_len);
+        (start, end)
+    };
+
+    // Helper: prepare a chunk's buffer — seed any prelude bytes that
+    // land in this chunk's range and kick off D2H for any overlapping
+    // region payloads. The prelude lives at [0, prelude_bytes.len())
+    // in file coordinates; it may span multiple chunks if the region
+    // table is large relative to chunk_size.
+    let prepare_chunk =
+        |backend: &B,
+         buf: &mut crate::backend::PinnedBuffer,
+         stream: &crate::backend::StreamHandle,
+         chunk_start: u64,
+         chunk_end: u64,
+         plan: &[FreezePlan]|
+         -> Result<(), FreezeError> {
+            let pre_end = prelude_bytes.len() as u64;
+            if chunk_start < pre_end {
+                let overlap_start = chunk_start;
+                let overlap_end = chunk_end.min(pre_end);
+                let overlap_len = (overlap_end - overlap_start) as usize;
+                let pre_offset = overlap_start as usize;
+                let buf_offset = 0usize;
+                buf.as_mut_slice()[buf_offset..buf_offset + overlap_len]
+                    .copy_from_slice(&prelude_bytes[pre_offset..pre_offset + overlap_len]);
+            }
+            // D2H-dump any region payload bytes that fall in this chunk.
+            launch_dumps(backend, buf, stream, chunk_start, chunk_end, plan)?;
+            Ok(())
+        };
+
+    // Helper: write a chunk to disk, picking the right fd.
+    // Takes `&mut` so we can zero-fill the ragged tail before an
+    // O_DIRECT-aligned write (otherwise we'd leak uninit pinned
+    // memory to disk, even though we truncate right after).
+    let write_chunk_to_file = |buf: &mut crate::backend::PinnedBuffer,
+                               chunk_start: u64,
+                               chunk_len: usize|
+     -> Result<(), FreezeError> {
+        let aligned = align_up_4k(chunk_len);
+        if file_direct.is_direct() && aligned <= chunk_size {
+            // Aligned O_DIRECT write. If the tail of the aligned
+            // region is past the true file length, zero-fill the
+            // padding and truncate at the very end.
+            if aligned > chunk_len {
+                for b in &mut buf.as_mut_slice()[chunk_len..aligned] {
+                    *b = 0;
+                }
+            }
+            pwrite_exact(&file_direct, &buf.as_slice()[..aligned], chunk_start).or_else(
+                |e| {
+                    if e.kind() == std::io::ErrorKind::InvalidInput {
+                        // Some filesystems reject O_DIRECT at ragged edges.
+                        pwrite_exact(&file_buffered, &buf.as_slice()[..chunk_len], chunk_start)
+                    } else {
+                        Err(e)
+                    }
+                },
+            )
+        } else {
+            pwrite_exact(&file_buffered, &buf.as_slice()[..chunk_len], chunk_start)
+        }
+        .map_err(io_err)
+    };
+
+    // Prime: prepare chunk 0, sync.
+    {
+        let (c0_start, c0_end) = chunk_range(0);
+        prepare_chunk(backend, &mut bufs[0], &streams[0], c0_start, c0_end, &plan)?;
+        backend.stream_sync(&streams[0])?;
+    }
+
+    if num_chunks == 1 {
+        let (c0_start, c0_end) = chunk_range(0);
+        let len = (c0_end - c0_start) as usize;
+        write_chunk_to_file(&mut bufs[0], c0_start, len)?;
     } else {
-        write_region(&buf_b, last_size, sink)?;
+        for chunk_idx in 1..num_chunks {
+            let prev = (chunk_idx - 1) % 2;
+            let curr = chunk_idx % 2;
+
+            let (prev_start, prev_end) = chunk_range(chunk_idx - 1);
+            let prev_len = (prev_end - prev_start) as usize;
+
+            let (curr_start, curr_end) = chunk_range(chunk_idx);
+
+            // Kick off D2H for current chunk.
+            prepare_chunk(
+                backend,
+                &mut bufs[curr],
+                &streams[curr],
+                curr_start,
+                curr_end,
+                &plan,
+            )?;
+
+            // Write previous chunk (overlaps D2H).
+            write_chunk_to_file(&mut bufs[prev], prev_start, prev_len)?;
+
+            // Wait for current chunk's D2H before reuse.
+            backend.stream_sync(&streams[curr])?;
+        }
+
+        // Write final chunk.
+        let last = (num_chunks - 1) % 2;
+        let (last_start, last_end) = chunk_range(num_chunks - 1);
+        let last_len = (last_end - last_start) as usize;
+        write_chunk_to_file(&mut bufs[last], last_start, last_len)?;
     }
 
-    // Cleanup.
+    // Truncate to exact file size (strips O_DIRECT 4 KiB padding).
+    truncate(&file_direct, file_len).map_err(io_err)?;
+
+    // Cleanup streams.
     backend
-        .stream_destroy(stream_a)
+        .stream_destroy(streams[0])
         .map_err(FreezeError::Backend)?;
     backend
-        .stream_destroy(stream_b)
+        .stream_destroy(streams[1])
         .map_err(FreezeError::Backend)?;
+
+    // Return WC buffers to the per-thread cache.
+    release_wc_bufs(bufs, chunk_size);
 
     Ok(FreezeStats {
         regions_frozen: requests.len(),
@@ -360,10 +778,9 @@ where
     // Allocate two pinned buffers and two streams.
     // Use write-combining memory: the CPU writes (from pread/mmap) and the
     // GPU reads (via DMA). WC bypasses cache snooping → up to 40% faster H2D.
-    let mut bufs = [
-        backend.alloc_pinned_wc(chunk_size).map_err(RestoreError::Backend)?,
-        backend.alloc_pinned_wc(chunk_size).map_err(RestoreError::Backend)?,
-    ];
+    // Buffers come from the per-thread cache — amortizes `cudaHostAlloc`
+    // across successive restores (critical for thaw serve hot-swap).
+    let mut bufs = acquire_wc_bufs(backend, chunk_size).map_err(RestoreError::Backend)?;
     let streams = [
         backend.stream_create().map_err(RestoreError::Backend)?,
         backend.stream_create().map_err(RestoreError::Backend)?,
@@ -518,6 +935,9 @@ where
         .stream_destroy(streams[1])
         .map_err(RestoreError::Backend)?;
 
+    // Return WC buffers to the per-thread cache.
+    release_wc_bufs(bufs, chunk_size);
+
     Ok(RestoreStats {
         regions_restored: plan.len(),
         bytes_copied: total_bytes,
@@ -633,14 +1053,7 @@ where
     let read_len = (payload_end - read_start) as usize;
     let num_chunks = (read_len + chunk_size - 1) / chunk_size;
 
-    let mut bufs = [
-        backend
-            .alloc_pinned_wc(chunk_size)
-            .map_err(RestoreError::Backend)?,
-        backend
-            .alloc_pinned_wc(chunk_size)
-            .map_err(RestoreError::Backend)?,
-    ];
+    let mut bufs = acquire_wc_bufs(backend, chunk_size).map_err(RestoreError::Backend)?;
     let streams = [
         backend.stream_create().map_err(RestoreError::Backend)?,
         backend.stream_create().map_err(RestoreError::Backend)?,
@@ -779,6 +1192,9 @@ where
     backend
         .stream_destroy(streams[1])
         .map_err(RestoreError::Backend)?;
+
+    // Return WC buffers to the per-thread cache.
+    release_wc_bufs(bufs, chunk_size);
 
     Ok(RestoreStats {
         regions_restored: plan.len(),
@@ -1020,6 +1436,109 @@ where
         .map_err(RestoreError::Backend)?;
 
     Ok(())
+}
+
+// =============================================================================
+// UNIFIED PIPELINED RESTORE — ZERO-COPY WITH AUTOMATIC STAGING FALLBACK
+// =============================================================================
+//
+// Callers shouldn't have to pick between the zero-copy path and the
+// staging path — the "right" answer is "try zero-copy; if the host
+// can't register the bytes, transparently fall back to the staging
+// buffer copy path." That's what this function does.
+//
+// The zero-copy path can fail for a handful of reasons, all of which
+// are recoverable:
+//   - `ulimit -l` too low for `data.len()` bytes
+//   - buffer not page-aligned (rare — mmap always is, `bytes()` often
+//     is too, but a sliced `bytearray` may not be)
+//   - the CUDA driver transiently out of pinned-host address space
+//
+// The staging path works against any `&[u8]` regardless of alignment
+// or host memory state; it's just slower (one extra memcpy per chunk
+// at ~7 GB/s per core vs. zero-copy PCIe-saturating DMA).
+//
+// Semantics: `host_register` is attempted before any plan is built or
+// any stream is created. If it succeeds we run the zero-copy pipeline;
+// if it fails we fall back to the staging pipeline. Either way the
+// caller observes the same `RestoreStats` and the same error surface
+// (a backend failure *during* DMA still propagates as `RestoreError`).
+
+/// Pipelined restore from an in-memory byte slice with automatic
+/// zero-copy / staging dispatch.
+///
+/// First attempts [`restore_pipelined_from_registered_bytes`] (DMA
+/// directly from a `cudaHostRegister`-ed view of `data`). If the
+/// registration call fails — typically due to low `ulimit -l`,
+/// non-page-aligned bytes, or transient host-memory pressure — falls
+/// back to [`restore_pipelined_from_bytes`] (copy through a pinned
+/// staging buffer). The fallback is logged at WARN level via
+/// `eprintln!` with the failure reason so operators can diagnose why a
+/// given call landed on the slower path.
+///
+/// This is the correct entry point for callers that have snapshot
+/// bytes in host memory and don't know, or don't want to know, whether
+/// the current environment can support zero-copy DMA. The fast path
+/// is taken whenever possible; correctness is preserved in all cases.
+pub fn restore_pipelined_from_bytes_auto<B, F>(
+    backend: &B,
+    data: &[u8],
+    resolve: F,
+    config: &PipelineConfig,
+) -> Result<RestoreStats, RestoreError>
+where
+    B: PipelinedBackend,
+    F: FnMut(RegionKind, u32) -> Option<DeviceRegion>,
+{
+    // Try the zero-copy path first. The ONLY failure we consider
+    // recoverable is `host_register` itself — that's the "environment
+    // can't pin this buffer" signal. A failure during plan
+    // construction or during the DMA itself surfaces as a real
+    // `RestoreError` and must not be silently retried on the slow
+    // path: the slow path would hit the same error.
+    //
+    // SAFETY: `data` is borrowed for the duration of this function, so
+    // the pointer is valid for exactly `data.len()` bytes. The guard
+    // (`_registration`) drops before we return, so the registration
+    // does not outlive the borrow.
+    let registration = unsafe { backend.host_register(data.as_ptr() as *mut u8, data.len()) };
+
+    match registration {
+        Ok(_guard) => {
+            // Zero-copy path — same body as
+            // `restore_pipelined_from_registered_bytes`, inlined so we
+            // own the guard lifetime. The guard drops at the end of
+            // this match arm, after `run_pre_registered_plan` has
+            // synced both streams.
+            let (plan, total_bytes) = plan_copies_from_bytes(data, resolve)?;
+
+            if plan.is_empty() {
+                return Ok(RestoreStats::default());
+            }
+
+            run_pre_registered_plan(backend, data, &plan, config)?;
+
+            Ok(RestoreStats {
+                regions_restored: plan.len(),
+                bytes_copied: total_bytes,
+            })
+        }
+        Err(register_err) => {
+            // Staging-buffer fallback. Log at WARN level so operators
+            // can see which call site landed on the slow path and
+            // why. The codebase uses `eprintln!` for crate-level
+            // diagnostics (no `tracing` dep in thaw-runtime); matching
+            // that convention here keeps this wrapper dependency-free.
+            eprintln!(
+                "thaw: WARN restore_pipelined_from_bytes_auto: zero-copy \
+                 host_register failed ({register_err}) for {} bytes; falling \
+                 back to staging-buffer restore (slower, but works)",
+                data.len()
+            );
+
+            restore_pipelined_from_bytes(backend, data, resolve, config)
+        }
+    }
 }
 
 // =============================================================================
@@ -1391,6 +1910,220 @@ mod tests {
     }
 
     // =================================================================
+    // freeze_pipelined_to_file tests — O_DIRECT path
+    // =================================================================
+
+    /// freeze_pipelined_to_file writes the same bytes as the
+    /// writer-based freeze_pipelined. Proves the O_DIRECT path
+    /// produces a format-identical file.
+    #[test]
+    fn freeze_pipelined_to_file_matches_writer_bytes() {
+        let backend = MockCuda::new();
+        // Non-overlapping device ranges (weights+metadata = 8448 < 0x10000).
+        let w_ptr = DevicePtr(0x1000);
+        let m_ptr = DevicePtr(0x20_000);
+        let weights: Vec<u8> = (0..8192).map(|i| ((i * 11) & 0xFF) as u8).collect();
+        let metadata: Vec<u8> = (0..256).map(|i| (0x5A ^ i) as u8).collect();
+        backend.register_region(w_ptr, weights.clone());
+        backend.register_region(m_ptr, metadata.clone());
+
+        let requests = vec![
+            FreezeRequest::new(
+                RegionKind::Weights,
+                0,
+                DeviceRegion::new(w_ptr, weights.len() as u64),
+            ),
+            FreezeRequest::new(
+                RegionKind::Metadata,
+                0,
+                DeviceRegion::new(m_ptr, metadata.len() as u64),
+            ),
+        ];
+
+        // Small chunk_size forces the double-buffer loop to iterate.
+        let config = FreezeConfig {
+            chunk_size: 4096,
+            try_direct_io: false, // macOS: no O_DIRECT; test the buffered pwrite path
+            ..FreezeConfig::default()
+        };
+
+        // Writer-based reference bytes.
+        let mut ref_bytes: Vec<u8> = Vec::new();
+        freeze_pipelined(&backend, &requests, &config, &mut ref_bytes).expect("ref freeze");
+
+        // File-based path writes to a temp file.
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let stats = freeze_pipelined_to_file(&backend, &requests, &config, tmp.path())
+            .expect("freeze_to_file");
+        assert_eq!(stats.regions_frozen, 2);
+        assert_eq!(stats.bytes_copied, (weights.len() + metadata.len()) as u64);
+
+        let file_bytes = std::fs::read(tmp.path()).expect("read temp");
+        assert_eq!(file_bytes.len(), ref_bytes.len(), "file size mismatch");
+        assert_eq!(file_bytes, ref_bytes, "file bytes differ from writer path");
+    }
+
+    /// freeze_pipelined_to_file output round-trips through
+    /// restore_pipelined. Proves the whole freeze → disk → restore
+    /// pipeline end-to-end.
+    #[test]
+    fn freeze_to_file_then_restore_pipelined_round_trips() {
+        let src = MockCuda::new();
+        // Non-overlapping device ranges: weights occupy [0x1000, 0x1000+20000].
+        // Metadata sits well past the weights tail to avoid the mock's
+        // address-range-based region resolver from matching the wrong one.
+        let w_ptr = DevicePtr(0x1000);
+        let m_ptr = DevicePtr(0x100_000);
+        let weights: Vec<u8> = (0..20_000).map(|i| ((i * 3) & 0xFF) as u8).collect();
+        let metadata: Vec<u8> = (0..512).map(|i| (0xAB ^ i) as u8).collect();
+        src.register_region(w_ptr, weights.clone());
+        src.register_region(m_ptr, metadata.clone());
+
+        let requests = vec![
+            FreezeRequest::new(
+                RegionKind::Weights,
+                0,
+                DeviceRegion::new(w_ptr, weights.len() as u64),
+            ),
+            FreezeRequest::new(
+                RegionKind::Metadata,
+                0,
+                DeviceRegion::new(m_ptr, metadata.len() as u64),
+            ),
+        ];
+
+        // 8 KiB chunks — multiple of 4096, smaller than weights.
+        let freeze_config = FreezeConfig {
+            chunk_size: 8192,
+            try_direct_io: false,
+            ..FreezeConfig::default()
+        };
+
+        let tmp = NamedTempFile::new().expect("tempfile");
+        freeze_pipelined_to_file(&src, &requests, &freeze_config, tmp.path())
+            .expect("freeze_to_file");
+
+        // Restore into a fresh backend via the existing pipelined path.
+        // Use non-overlapping device ranges on the restore side too.
+        let dst = MockCuda::new();
+        let w_ptr2 = DevicePtr(0x10_000);
+        let m_ptr2 = DevicePtr(0x200_000);
+        dst.register_region(w_ptr2, vec![0u8; weights.len()]);
+        dst.register_region(m_ptr2, vec![0u8; metadata.len()]);
+
+        let restore_config = PipelineConfig {
+            chunk_size: 4096,
+            try_direct_io: false,
+        };
+        let stats = restore_pipelined(
+            &dst,
+            tmp.path(),
+            |kind, _| match kind {
+                RegionKind::Weights => {
+                    Some(DeviceRegion::new(w_ptr2, weights.len() as u64))
+                }
+                RegionKind::Metadata => {
+                    Some(DeviceRegion::new(m_ptr2, metadata.len() as u64))
+                }
+                _ => None,
+            },
+            &restore_config,
+        )
+        .expect("restore");
+
+        assert_eq!(stats.regions_restored, 2);
+        assert_eq!(
+            stats.bytes_copied,
+            (weights.len() + metadata.len()) as u64
+        );
+        assert_eq!(dst.read_region(w_ptr2).unwrap(), weights);
+        assert_eq!(dst.read_region(m_ptr2).unwrap(), metadata);
+    }
+
+    /// Many regions through the file-based path, each spanning
+    /// multiple chunks. Stresses the multi-region-per-chunk
+    /// packing logic on the freeze side.
+    #[test]
+    fn freeze_to_file_many_regions_multi_chunk() {
+        let backend = MockCuda::new();
+        let mut requests = Vec::new();
+        let mut expected: Vec<(DevicePtr, Vec<u8>)> = Vec::new();
+
+        // 50 regions of varying sizes that straddle multiple chunks.
+        for i in 0..50u32 {
+            let ptr = DevicePtr(0x1000 + i as u64 * 0x2000);
+            let size = 500 + (i as usize) * 37; // 500..2313 bytes, all different
+            let data: Vec<u8> = (0..size).map(|b| ((b + i as usize) & 0xFF) as u8).collect();
+            backend.register_region(ptr, data.clone());
+            requests.push(FreezeRequest::new(
+                RegionKind::Weights,
+                i,
+                DeviceRegion::new(ptr, size as u64),
+            ));
+            expected.push((ptr, data));
+        }
+
+        let config = FreezeConfig {
+            chunk_size: 4096,
+            try_direct_io: false,
+            ..FreezeConfig::default()
+        };
+
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let stats = freeze_pipelined_to_file(&backend, &requests, &config, tmp.path())
+            .expect("freeze");
+        assert_eq!(stats.regions_frozen, 50);
+
+        // Restore and verify.
+        let dst = MockCuda::new();
+        for (ptr, data) in &expected {
+            let dst_ptr = DevicePtr(0x100000 + ptr.0);
+            dst.register_region(dst_ptr, vec![0u8; data.len()]);
+        }
+        let restore_config = PipelineConfig {
+            chunk_size: 4096,
+            try_direct_io: false,
+        };
+        restore_pipelined(
+            &dst,
+            tmp.path(),
+            |_, logical_id| {
+                let idx = logical_id as usize;
+                let (src_ptr, data) = &expected[idx];
+                Some(DeviceRegion::new(
+                    DevicePtr(0x100000 + src_ptr.0),
+                    data.len() as u64,
+                ))
+            },
+            &restore_config,
+        )
+        .expect("restore");
+
+        for (src_ptr, data) in &expected {
+            let dst_ptr = DevicePtr(0x100000 + src_ptr.0);
+            assert_eq!(&dst.read_region(dst_ptr).unwrap()[..], data.as_slice());
+        }
+    }
+
+    /// Empty request list via file path: prelude-only file.
+    #[test]
+    fn freeze_to_file_empty() {
+        let backend = MockCuda::new();
+        let config = FreezeConfig {
+            try_direct_io: false,
+            ..FreezeConfig::default()
+        };
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let stats = freeze_pipelined_to_file(&backend, &[], &config, tmp.path())
+            .expect("freeze");
+        assert_eq!(stats.regions_frozen, 0);
+
+        let bytes = std::fs::read(tmp.path()).expect("read");
+        let parsed = thaw_core::Snapshot::from_prelude_bytes(&bytes).expect("parse");
+        assert_eq!(parsed.len(), 0);
+    }
+
+    // =================================================================
     // restore_pipelined_from_bytes tests
     // =================================================================
 
@@ -1714,6 +2447,86 @@ mod tests {
         assert_eq!(dst.read_region(w_ptr2).unwrap(), weights);
     }
 
+    /// Unified auto-dispatch path: the mock's `host_register` always
+    /// succeeds, so the auto function must take the zero-copy branch
+    /// and byte-exactly round-trip. This is the common-case happy
+    /// path — it just has to work against the mock, same as the
+    /// hand-written zero-copy variant.
+    #[test]
+    fn from_bytes_auto_round_trips() {
+        let src = MockCuda::new();
+        let w_ptr = DevicePtr(0x1000);
+        let m_ptr = DevicePtr(0x2000);
+        let weights: Vec<u8> = (0..512).map(|i| ((i * 3) & 0xFF) as u8).collect();
+        let metadata: Vec<u8> = (0..64).map(|i| (0xF0 ^ i) as u8).collect();
+        src.register_region(w_ptr, weights.clone());
+        src.register_region(m_ptr, metadata.clone());
+
+        let requests = vec![
+            FreezeRequest::new(
+                RegionKind::Weights,
+                0,
+                DeviceRegion::new(w_ptr, weights.len() as u64),
+            ),
+            FreezeRequest::new(
+                RegionKind::Metadata,
+                0,
+                DeviceRegion::new(m_ptr, metadata.len() as u64),
+            ),
+        ];
+        let data = freeze_to_bytes(&src, &requests);
+
+        let dst = MockCuda::new();
+        let w_ptr2 = DevicePtr(0xA000);
+        let m_ptr2 = DevicePtr(0xB000);
+        dst.register_region(w_ptr2, vec![0u8; weights.len()]);
+        dst.register_region(m_ptr2, vec![0u8; metadata.len()]);
+
+        let config = PipelineConfig::default();
+        let stats = restore_pipelined_from_bytes_auto(
+            &dst,
+            &data,
+            |kind, _| match kind {
+                RegionKind::Weights => {
+                    Some(DeviceRegion::new(w_ptr2, weights.len() as u64))
+                }
+                RegionKind::Metadata => {
+                    Some(DeviceRegion::new(m_ptr2, metadata.len() as u64))
+                }
+                _ => None,
+            },
+            &config,
+        )
+        .expect("restore");
+
+        assert_eq!(stats.regions_restored, 2);
+        assert_eq!(
+            stats.bytes_copied,
+            (weights.len() + metadata.len()) as u64
+        );
+        assert_eq!(dst.read_region(w_ptr2).unwrap(), weights);
+        assert_eq!(dst.read_region(m_ptr2).unwrap(), metadata);
+    }
+
+    /// Empty input is a no-op on the unified path too.
+    #[test]
+    fn from_bytes_auto_empty() {
+        let src = MockCuda::new();
+        let data = freeze_to_bytes(&src, &[]);
+
+        let dst = MockCuda::new();
+        let stats = restore_pipelined_from_bytes_auto(
+            &dst,
+            &data,
+            |_, _| panic!("should not be called"),
+            &PipelineConfig::default(),
+        )
+        .expect("restore");
+
+        assert_eq!(stats.regions_restored, 0);
+        assert_eq!(stats.bytes_copied, 0);
+    }
+
     /// Zero-region file restores with zero stats.
     #[test]
     fn zero_region_file() {
@@ -1735,5 +2548,109 @@ mod tests {
 
         assert_eq!(stats.regions_restored, 0);
         assert_eq!(stats.bytes_copied, 0);
+    }
+
+    // =========================================================================
+    // WC BUFFER CACHE TESTS
+    // =========================================================================
+
+    /// Peek at the current thread's cached chunk_size, if any.
+    /// Test-only helper that touches the module-private thread_local.
+    fn cached_chunk_size() -> Option<usize> {
+        super::WC_BUF_CACHE.with(|c| c.borrow().as_ref().map(|x| x.chunk_size))
+    }
+
+    /// After a successful pipelined freeze, the cache holds a pair sized
+    /// to that call's chunk_size. Calling again with the same chunk_size
+    /// leaves the cache still primed — proving `release_wc_bufs` put
+    /// buffers back and the next `acquire_wc_bufs` found them.
+    #[test]
+    fn wc_cache_primes_and_stays_primed_across_matching_calls() {
+        clear_wc_buf_cache();
+        assert_eq!(cached_chunk_size(), None);
+
+        let backend = MockCuda::new();
+        let w_ptr = DevicePtr(0x1_000);
+        let weights = vec![7u8; 4096];
+        backend.register_region(w_ptr, weights.clone());
+
+        let requests = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(w_ptr, weights.len() as u64),
+        )];
+        let cfg = FreezeConfig::default();
+
+        let tmp1 = NamedTempFile::new().expect("tmp1");
+        freeze_pipelined_to_file(&backend, &requests, &cfg, tmp1.path())
+            .expect("freeze 1");
+        assert_eq!(cached_chunk_size(), Some(cfg.chunk_size));
+
+        let tmp2 = NamedTempFile::new().expect("tmp2");
+        freeze_pipelined_to_file(&backend, &requests, &cfg, tmp2.path())
+            .expect("freeze 2");
+        // Cache still primed at same size — reuse path exercised.
+        assert_eq!(cached_chunk_size(), Some(cfg.chunk_size));
+    }
+
+    /// Calling with a different chunk_size drops the stale pair and
+    /// replaces the cache entry with the new size. Prior contents are
+    /// freed — the old pair doesn't leak.
+    #[test]
+    fn wc_cache_updates_on_chunk_size_change() {
+        clear_wc_buf_cache();
+
+        let backend = MockCuda::new();
+        let w_ptr = DevicePtr(0x1_000);
+        let weights = vec![3u8; 4096];
+        backend.register_region(w_ptr, weights.clone());
+
+        let requests = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(w_ptr, weights.len() as u64),
+        )];
+
+        // First call: default FreezeConfig chunk_size.
+        let tmp1 = NamedTempFile::new().expect("tmp1");
+        let cfg_default = FreezeConfig::default();
+        freeze_pipelined_to_file(&backend, &requests, &cfg_default, tmp1.path())
+            .expect("freeze default");
+        assert_eq!(cached_chunk_size(), Some(cfg_default.chunk_size));
+
+        // Second call: different chunk_size → cache entry is replaced.
+        let cfg_small = FreezeConfig {
+            chunk_size: 4096 * 16, // 64 KiB, multiple of 4096 for O_DIRECT
+            ..FreezeConfig::default()
+        };
+        let tmp2 = NamedTempFile::new().expect("tmp2");
+        freeze_pipelined_to_file(&backend, &requests, &cfg_small, tmp2.path())
+            .expect("freeze small");
+        assert_eq!(cached_chunk_size(), Some(cfg_small.chunk_size));
+    }
+
+    /// `clear_wc_buf_cache` empties this thread's cache so the next
+    /// pipelined call allocates from scratch.
+    #[test]
+    fn wc_cache_clear_empties_cache() {
+        clear_wc_buf_cache();
+
+        let backend = MockCuda::new();
+        let w_ptr = DevicePtr(0x1_000);
+        let weights = vec![5u8; 4096];
+        backend.register_region(w_ptr, weights.clone());
+
+        let requests = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(w_ptr, weights.len() as u64),
+        )];
+        let cfg = FreezeConfig::default();
+        let tmp = NamedTempFile::new().expect("tmp");
+        freeze_pipelined_to_file(&backend, &requests, &cfg, tmp.path()).expect("freeze");
+        assert!(cached_chunk_size().is_some());
+
+        clear_wc_buf_cache();
+        assert_eq!(cached_chunk_size(), None);
     }
 }

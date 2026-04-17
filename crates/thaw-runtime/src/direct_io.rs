@@ -59,6 +59,33 @@ pub fn open_direct(path: &Path, try_direct: bool) -> io::Result<DirectFile> {
     })
 }
 
+/// Open a file for writing (create+truncate), attempting O_DIRECT
+/// if `try_direct` is true. Falls back silently to buffered I/O if
+/// the platform or filesystem does not support it.
+///
+/// Used by `freeze_pipelined` to write `.thaw` files without
+/// thrashing the page cache — the bytes come straight out of pinned
+/// host memory that the CPU will never touch again.
+pub fn open_direct_write(path: &Path, try_direct: bool) -> io::Result<DirectFile> {
+    if try_direct {
+        if let Some(f) = try_open_direct_write(path) {
+            return Ok(DirectFile {
+                file: f,
+                direct: true,
+            });
+        }
+    }
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    Ok(DirectFile {
+        file,
+        direct: false,
+    })
+}
+
 /// Platform-specific O_DIRECT attempt. Returns `Some(File)` on
 /// success, `None` if the platform doesn't support it or the open
 /// fails.
@@ -72,6 +99,19 @@ fn try_open_direct(path: &Path) -> Option<File> {
         .ok()
 }
 
+/// O_DIRECT for write: create+truncate with the direct flag.
+#[cfg(target_os = "linux")]
+fn try_open_direct_write(path: &Path) -> Option<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_DIRECT)
+        .open(path)
+        .ok()
+}
+
 /// macOS does not support O_DIRECT. We could use F_NOCACHE via
 /// fcntl, but it is not equivalent (it still goes through the VFS
 /// buffer layer, just marks pages for eviction). For simplicity we
@@ -80,6 +120,11 @@ fn try_open_direct(path: &Path) -> Option<File> {
 /// kernel-side caching behavior.
 #[cfg(not(target_os = "linux"))]
 fn try_open_direct(_path: &Path) -> Option<File> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_open_direct_write(_path: &Path) -> Option<File> {
     None
 }
 
@@ -132,6 +177,66 @@ pub fn pread_exact(file: &DirectFile, buf: &mut [u8], offset: u64) -> io::Result
     Ok(())
 }
 
+/// Positional write: write up to `buf.len()` bytes to `file` at
+/// the given absolute `offset`, without changing the file's seek
+/// position. Returns the number of bytes actually written.
+///
+/// Mirror of `pread_into`. Uses `libc::pwrite` on Unix.
+#[cfg(unix)]
+pub fn pwrite_from(file: &DirectFile, buf: &[u8], offset: u64) -> io::Result<usize> {
+    use std::os::unix::io::AsRawFd;
+    let fd = file.file.as_raw_fd();
+    let ret = unsafe {
+        libc::pwrite(
+            fd,
+            buf.as_ptr() as *const libc::c_void,
+            buf.len(),
+            offset as libc::off_t,
+        )
+    };
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ret as usize)
+    }
+}
+
+/// Write exactly `buf.len()` bytes to `file` at `offset`, looping
+/// on short writes (which can happen on interrupted syscalls).
+/// Returns `Ok(())` on success.
+///
+/// Mirror of `pread_exact`. With O_DIRECT, `buf` must be page-
+/// aligned and `buf.len()` a multiple of the block size (4096 on
+/// all supported filesystems). Pinned buffers from `cudaMallocHost`
+/// satisfy alignment; the caller is responsible for length rounding.
+pub fn pwrite_exact(file: &DirectFile, buf: &[u8], offset: u64) -> io::Result<()> {
+    let mut pos = 0usize;
+    while pos < buf.len() {
+        let n = pwrite_from(file, &buf[pos..], offset + pos as u64)?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                format!(
+                    "pwrite_exact: wrote 0 after {} of {} bytes at offset {}",
+                    pos,
+                    buf.len(),
+                    offset
+                ),
+            ));
+        }
+        pos += n;
+    }
+    Ok(())
+}
+
+/// Truncate the file to `len` bytes. Used by the O_DIRECT write
+/// path to trim the 4 KiB-aligned tail padding after all chunks are
+/// written — O_DIRECT writes must be block-aligned but the final
+/// `.thaw` file length is whatever the region table says.
+pub fn truncate(file: &DirectFile, len: u64) -> io::Result<()> {
+    file.file.set_len(len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +267,51 @@ mod tests {
         let mut buf = [0u8; 100];
         let err = pread_exact(&df, &mut buf, 0).expect_err("should EOF");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn pwrite_roundtrip_via_pread() {
+        let f = NamedTempFile::new().expect("tempfile");
+
+        let wf = open_direct_write(f.path(), false).expect("open write");
+        assert!(!wf.is_direct()); // Mac: always buffered
+        pwrite_exact(&wf, b"Hello, pwrite world!", 0).expect("pwrite");
+
+        // Re-open for read.
+        let rf = open_direct(f.path(), false).expect("open read");
+        let mut buf = [0u8; 20];
+        pread_exact(&rf, &mut buf, 0).expect("pread");
+        assert_eq!(&buf, b"Hello, pwrite world!");
+    }
+
+    #[test]
+    fn pwrite_at_offset_skips_intervening_bytes() {
+        let f = NamedTempFile::new().expect("tempfile");
+
+        let wf = open_direct_write(f.path(), false).expect("open write");
+        pwrite_exact(&wf, b"HEAD", 0).expect("pwrite head");
+        pwrite_exact(&wf, b"TAIL", 100).expect("pwrite tail at 100");
+
+        let rf = open_direct(f.path(), false).expect("open read");
+        let mut head = [0u8; 4];
+        pread_exact(&rf, &mut head, 0).expect("pread head");
+        assert_eq!(&head, b"HEAD");
+
+        let mut tail = [0u8; 4];
+        pread_exact(&rf, &mut tail, 100).expect("pread tail");
+        assert_eq!(&tail, b"TAIL");
+    }
+
+    #[test]
+    fn truncate_shrinks_file() {
+        let f = NamedTempFile::new().expect("tempfile");
+        let wf = open_direct_write(f.path(), false).expect("open");
+        pwrite_exact(&wf, &[0xAAu8; 8192], 0).expect("pwrite");
+        truncate(&wf, 100).expect("truncate");
+        drop(wf);
+
+        let meta = std::fs::metadata(f.path()).expect("metadata");
+        assert_eq!(meta.len(), 100);
     }
 
     #[test]

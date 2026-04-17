@@ -5,8 +5,13 @@ thaw's entire value prop is FAST cold starts. A silent fallback to a
 slower path is the worst possible bug for this product. A production
 user hitting a pinned-memory exhaustion, an O_DIRECT permission denial,
 or a Rust extension load failure should NEVER see "restored in 12s" with
-no explanation — they should see a WARNING, and in strict mode they
-should see an exception.
+no explanation — they should see an exception that fails loudly.
+
+Strict mode is the DEFAULT as of 2026-04-17: any performance-critical
+fallback re-raises unless the caller explicitly opts into the slow
+Python path by setting `THAW_ALLOW_PYTHON_FALLBACK=1`. The "RUST AND
+CUDA EVERYWHERE" directive means a broken install must fail loudly,
+not silently limp along at 1/100th the throughput.
 
 Use this module wherever there is a performance-critical fallback:
 
@@ -21,8 +26,11 @@ Use this module wherever there is a performance-critical fallback:
         stats = python_fallback(...)
 
 Environment:
-    THAW_STRICT=1    — fallback paths re-raise instead of degrading
-    THAW_QUIET=1     — suppress fallback warnings (not recommended)
+    THAW_ALLOW_PYTHON_FALLBACK=1  — opt out of strict mode; let slow
+                                     Python fallbacks run instead of
+                                     raising. Off by default.
+    THAW_QUIET=1                  — suppress fallback warnings (not
+                                     recommended).
 """
 
 import logging
@@ -42,8 +50,19 @@ if not logger.handlers:
 
 
 def strict_mode() -> bool:
-    """True if THAW_STRICT=1 — fallbacks re-raise instead of degrading."""
-    return os.environ.get("THAW_STRICT", "").lower() in ("1", "true", "yes", "on")
+    """True unless THAW_ALLOW_PYTHON_FALLBACK=1 — fallbacks re-raise by default.
+
+    Strict is the default: a failed Rust fast-path raises instead of
+    silently degrading to a 100× slower Python path. Callers who
+    genuinely want the slow path can set
+    `THAW_ALLOW_PYTHON_FALLBACK=1` (or `true`/`yes`/`on`) to opt out.
+    """
+    return os.environ.get("THAW_ALLOW_PYTHON_FALLBACK", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def quiet_mode() -> bool:
@@ -63,7 +82,8 @@ def fallback_warning(label: str, exc: BaseException, *, dst: str = "") -> None:
     suffix = f" -> {dst}" if dst else ""
     logger.warning(
         "FALLBACK in %s%s (%s: %s). This path is significantly slower. "
-        "Set THAW_STRICT=1 to raise instead, or bump log level to DEBUG "
+        "Set THAW_ALLOW_PYTHON_FALLBACK=1 to opt into slow fallbacks "
+        "(strict mode raises by default), or bump log level to DEBUG "
         "for the full traceback.",
         label, suffix, type(exc).__name__, exc,
     )

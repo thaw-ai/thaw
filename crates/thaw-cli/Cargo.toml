@@ -12,6 +12,10 @@ description = "CLI benchmark: freeze/restore a GPU allocation and print throughp
 name = "thaw-bench"
 path = "src/main.rs"
 
+[[bin]]
+name = "thaw-bench-freeze"
+path = "src/bin/thaw-bench-freeze.rs"
+
 [features]
 # Default: no cuda. The binary prints "needs cuda" and exits.
 # On the GPU box, build with:
