@@ -13,6 +13,10 @@ import sys
 
 def cmd_freeze(args):
     """Freeze model weights (and optionally KV cache) to snapshot files."""
+    engine = getattr(args, 'engine', 'vllm')
+    if engine == 'sglang':
+        return _cmd_freeze_sglang(args)
+
     import os
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
@@ -76,6 +80,27 @@ def cmd_freeze(args):
               f"{kv_stats['total_bytes'] / 1e6:.1f} MB in {kv_stats['elapsed_s']:.3f}s")
 
     print("[thaw] Done.")
+
+
+def _cmd_freeze_sglang(args):
+    """Freeze model weights using SGLang instead of vLLM."""
+    import time
+    import thaw_sglang
+
+    tp = getattr(args, 'tensor_parallel', 1)
+
+    print(f"[thaw] Freezing {args.model} with SGLang" +
+          (f" (tensor_parallel={tp})" if tp > 1 else "") + "...")
+
+    kwargs = {"dtype": args.dtype}
+    if tp > 1:
+        kwargs["tp_size"] = tp
+
+    t0 = time.perf_counter()
+    thaw_sglang.freeze(args.model, args.output, **kwargs)
+    elapsed = time.perf_counter() - t0
+
+    print(f"[thaw] Done in {elapsed:.1f}s")
 
 
 def cmd_serve(args):
@@ -226,6 +251,8 @@ def main():
     p_freeze.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     p_freeze.add_argument("--tensor-parallel", "-tp", type=int, default=1,
                           help="Tensor parallel size (number of GPUs)")
+    p_freeze.add_argument("--engine", choices=["vllm", "sglang"], default="vllm",
+                          help="Inference engine to use for loading (default: vllm)")
 
     # thaw serve
     p_serve = sub.add_parser("serve", help="Start pre-warmed engine pool server")

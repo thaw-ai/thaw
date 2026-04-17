@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "thaw-vllm"
 version = "0.1.3"
-description = "Fast snapshot/restore for LLM inference. 17x faster cold starts, multi-GPU tensor parallel, KV cache snapshots."
+description = "Fast snapshot/restore for LLM inference. 17x faster cold starts, multi-GPU tensor parallel, KV cache snapshots. Supports vLLM and SGLang."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
     {name = "Nils Matteson"},
 ]
-keywords = ["llm", "inference", "vllm", "gpu", "cold-start", "kv-cache"]
+keywords = ["llm", "inference", "vllm", "sglang", "gpu", "cold-start", "kv-cache"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -27,6 +27,7 @@ dependencies = [
 [project.optional-dependencies]
 native = ["thaw-native>=0.1.1"]
 vllm = ["vllm>=0.18"]
+sglang = ["sglang>=0.4"]
 serve = ["vllm>=0.18", "fastapi", "uvicorn"]
 all = ["vllm>=0.18", "fastapi", "uvicorn", "thaw-native>=0.1.1"]
 
@@ -39,6 +40,7 @@ Repository = "https://github.com/thaw-ai/thaw"
 
 [tool.setuptools.packages.find]
 where = ["python"]
+include = ["thaw_common*", "thaw_vllm*", "thaw_sglang*"]
 
 [tool.setuptools.package-dir]
 "" = "python"

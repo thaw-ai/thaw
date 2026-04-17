@@ -30,13 +30,7 @@ from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 
 
-def _rank_snapshot_path(base_path: str, rank: int) -> str:
-    """Get per-rank snapshot path. Rank 0 uses base path (backward compat)."""
-    if rank == 0:
-        return base_path
-    # weights.thaw -> weights.rank1.thaw
-    stem, ext = os.path.splitext(base_path)
-    return f"{stem}.rank{rank}{ext}"
+from thaw_common.util import rank_snapshot_path as _rank_snapshot_path
 
 
 def _get_tp_rank() -> int:
