@@ -123,10 +123,54 @@ def _s3_client():
 def _download_s3(uri: str, dest: str) -> None:
     bucket, key = _parse_s3(uri)
     client = _s3_client()
-    client.download_file(bucket, key, dest)
+    try:
+        client.download_file(bucket, key, dest)
+    except Exception as e:
+        from botocore.exceptions import ClientError, NoCredentialsError
+        if isinstance(e, NoCredentialsError):
+            raise RuntimeError(
+                f"thaw S3 download failed ({uri}): no AWS credentials found. "
+                f"Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, use `aws configure`, "
+                f"or attach an IAM role."
+            ) from e
+        if isinstance(e, ClientError):
+            code = e.response.get("Error", {}).get("Code", "?")
+            if code in ("404", "NoSuchKey", "NoSuchBucket"):
+                raise FileNotFoundError(
+                    f"thaw S3 download failed: object not found at {uri}"
+                ) from e
+            if code in ("403", "AccessDenied"):
+                raise PermissionError(
+                    f"thaw S3 download failed: access denied for {uri}. "
+                    f"Check IAM permissions for s3:GetObject."
+                ) from e
+            raise RuntimeError(
+                f"thaw S3 download failed ({uri}): {code} — {e}"
+            ) from e
+        raise
 
 
 def _upload_s3(local_path: str, uri: str) -> None:
     bucket, key = _parse_s3(uri)
     client = _s3_client()
-    client.upload_file(local_path, bucket, key)
+    try:
+        client.upload_file(local_path, bucket, key)
+    except Exception as e:
+        from botocore.exceptions import ClientError, NoCredentialsError
+        if isinstance(e, NoCredentialsError):
+            raise RuntimeError(
+                f"thaw S3 upload failed ({uri}): no AWS credentials found. "
+                f"Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, use `aws configure`, "
+                f"or attach an IAM role."
+            ) from e
+        if isinstance(e, ClientError):
+            code = e.response.get("Error", {}).get("Code", "?")
+            if code in ("403", "AccessDenied"):
+                raise PermissionError(
+                    f"thaw S3 upload failed: access denied for {uri}. "
+                    f"Check IAM permissions for s3:PutObject."
+                ) from e
+            raise RuntimeError(
+                f"thaw S3 upload failed ({uri}): {code} — {e}"
+            ) from e
+        raise

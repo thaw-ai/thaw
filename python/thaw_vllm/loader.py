@@ -22,6 +22,7 @@ Multi-GPU / tensor parallel:
     This produces: weights.thaw, weights.rank1.thaw, weights.rank2.thaw, weights.rank3.thaw
 """
 
+import logging
 import os
 import torch.nn as nn
 
@@ -33,6 +34,8 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from thaw_common.util import rank_snapshot_path as _rank_snapshot_path
 from thaw_common.cloud import resolve_snapshot_path as _resolve_snapshot_path
 from thaw_common.telemetry import fallback_warning as _fallback_warning, strict_mode as _strict_mode
+
+logger = logging.getLogger(__name__)
 
 
 def _get_tp_rank() -> int:
@@ -120,6 +123,8 @@ class ThawModelLoader(BaseModelLoader):
 
         size_gb = stats['total_bytes'] / 1e9
         rank_info = f" (rank {tp_rank}/{tp_size})" if tp_size > 1 else ""
-        print(f"[thaw] Restored {stats['num_regions']} regions, "
-              f"{size_gb:.2f} GB in {stats['elapsed_s']:.1f}s "
-              f"({stats['throughput_gb_s']:.2f} GB/s){rank_info}")
+        logger.info(
+            "Restored %d regions, %.2f GB in %.1fs (%.2f GB/s)%s",
+            stats['num_regions'], size_gb, stats['elapsed_s'],
+            stats['throughput_gb_s'], rank_info,
+        )
