@@ -25,21 +25,28 @@
 //
 // ## The two entry points
 //
-// `freeze_to_file(path, requests, vllm_commit=None)` — takes a path,
-// a list of `(kind_str, logical_id, device_ptr_int, size_int)`
+// `freeze_to_file_pipelined(path, requests, vllm_commit=None)` — takes
+// a path, a list of `(kind_str, logical_id, device_ptr_int, size_int)`
 // tuples, and an optional 40-character hex commit string. Writes the
-// resulting `.thaw` file to disk. Returns the number of bytes
-// written on success.
+// resulting `.thaw` file to disk via the double-buffered O_DIRECT
+// pipeline and returns a `{"regions_frozen", "bytes_copied"}` dict.
 //
-// `restore_from_file(path, mapping)` — takes a path and a list of
-// `(kind_str, logical_id, device_ptr_int, size_int)` tuples that
-// describe where each region in the file should land. Returns a dict
-// `{"regions_restored": int, "bytes_copied": int}` on success.
+// `restore_from_file_pipelined(path, mapping)` — takes a path and a
+// list of `(kind_str, logical_id, device_ptr_int, size_int)` tuples
+// that describe where each region in the file should land. Returns a
+// dict `{"regions_restored": int, "bytes_copied": int}` on success.
 //
 // Both functions dispatch to `RealCuda` when the `cuda` feature is
 // enabled. Without the feature they raise `NotImplementedError`
 // immediately — this is the Mac development path, where the Python
 // glue itself can be iterated on without a GPU in the loop.
+//
+// The old `BufWriter`/`read_to_end`-based `freeze_to_file` /
+// `restore_from_file` entry points were removed on 2026-04-17 — they
+// were ~100× slower than the pipelined path and silently selecting
+// them (by dropping the `_pipelined` suffix) was a giant footgun. If
+// you are looking at a git blame that points here, use the
+// `_pipelined` siblings.
 //
 // ## Why strings for region kinds
 //
@@ -53,10 +60,6 @@
 // =============================================================================
 
 use std::collections::HashMap;
-#[cfg(feature = "cuda")]
-use std::fs::File;
-#[cfg(feature = "cuda")]
-use std::io::{BufReader, BufWriter, Read, Write};
 #[cfg(feature = "cuda")]
 use std::path::Path;
 
@@ -73,7 +76,7 @@ use thaw_runtime::{DevicePtr, DeviceRegion};
 // use keeps `cargo check` quieter on the Mac build.
 #[cfg(feature = "cuda")]
 use thaw_runtime::{
-    freeze, freeze_pipelined, restore, restore_pipelined, restore_pipelined_from_bytes,
+    freeze_pipelined_to_file, restore_pipelined, restore_pipelined_from_bytes_auto,
     restore_pipelined_from_pre_registered_bytes, restore_pipelined_from_registered_bytes,
     FreezeConfig, FreezeRequest, HostRegistration, PipelineConfig, PipelinedBackend, RealCuda,
 };
@@ -255,70 +258,6 @@ pub fn build_restore_map(
 // directly into thaw-runtime, and converts the result. Any logic you
 // find tempting to add here almost certainly belongs one function up.
 
-/// Freeze a list of device regions into a `.thaw` file.
-///
-/// Python signature:
-///
-/// ```python
-/// thaw.freeze_to_file(
-///     path: str,
-///     requests: list[tuple[str, int, int, int]],
-///     vllm_commit: str | None = None,
-/// ) -> int
-/// ```
-///
-/// `requests` is a list of `(kind, logical_id, device_ptr, size)`
-/// tuples where `kind` is one of `"weights"`, `"kv_live_block"`,
-/// `"metadata"`. Returns the number of bytes written.
-///
-/// Raises:
-///   - `NotImplementedError` if the extension was built without
-///     the `cuda` feature.
-///   - `ValueError` for malformed inputs (unknown region kind,
-///     wrong-length vllm_commit).
-///   - `IOError` for filesystem problems.
-///   - `RuntimeError` for anything the orchestrator returned that
-///     does not fit the above.
-#[pyfunction]
-#[pyo3(signature = (path, requests, vllm_commit=None))]
-fn freeze_to_file(
-    path: &str,
-    requests: Vec<(String, u32, u64, u64)>,
-    vllm_commit: Option<&str>,
-) -> PyResult<u64> {
-    #[cfg(not(feature = "cuda"))]
-    {
-        // Keep the argument signatures referenced so the compiler
-        // does not complain about unused parameters on Mac builds.
-        let _ = (path, requests, vllm_commit);
-        return Err(PyErr::from(ThawPyError::CudaUnavailable));
-    }
-
-    #[cfg(feature = "cuda")]
-    {
-        let backend = RealCuda::new();
-        let typed_requests = build_freeze_requests(requests)?;
-
-        let config = match vllm_commit {
-            Some(s) => FreezeConfig {
-                vllm_commit: Some(parse_vllm_commit(s)?),
-            },
-            None => FreezeConfig::default(),
-        };
-
-        let file = File::create(Path::new(path))
-            .map_err(|e| ThawPyError::Io(format!("open {path}: {e}")))?;
-        let mut writer = BufWriter::new(file);
-
-        let written = freeze(&backend, &typed_requests, &config, &mut writer)
-            .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
-        writer
-            .flush()
-            .map_err(|e| ThawPyError::Io(format!("flush {path}: {e}")))?;
-        Ok(written)
-    }
-}
-
 /// Pipelined freeze: double-buffered async D2H with overlapped writes.
 ///
 /// Python signature:
@@ -356,88 +295,23 @@ fn freeze_to_file_pipelined(
         let config = match vllm_commit {
             Some(s) => FreezeConfig {
                 vllm_commit: Some(parse_vllm_commit(s)?),
+                ..FreezeConfig::default()
             },
             None => FreezeConfig::default(),
         };
 
-        let file = File::create(Path::new(path))
-            .map_err(|e| ThawPyError::Io(format!("open {path}: {e}")))?;
-        let mut writer = BufWriter::new(file);
-
-        let stats = freeze_pipelined(&backend, &typed_requests, &config, &mut writer)
+        // Route straight to the O_DIRECT pwrite + write-combining pinned
+        // memory path. The generic `freeze_pipelined(&mut Writer)` path
+        // is ~100x slower end-to-end on NVMe because it loses both
+        // O_DIRECT alignment and the WC pinned source buffers. Everything
+        // that goes through Python (vLLM ModelLoader, `thaw freeze` CLI,
+        // `thaw serve`) lands here, so the file-native entry point is
+        // the only correct default.
+        let stats = freeze_pipelined_to_file(&backend, &typed_requests, &config, Path::new(path))
             .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
-        writer
-            .flush()
-            .map_err(|e| ThawPyError::Io(format!("flush {path}: {e}")))?;
 
         let dict = pyo3::types::PyDict::new_bound(py);
         dict.set_item("regions_frozen", stats.regions_frozen)?;
-        dict.set_item("bytes_copied", stats.bytes_copied)?;
-        Ok(dict.into())
-    }
-}
-
-/// Restore a `.thaw` file onto a list of device regions.
-///
-/// Python signature:
-///
-/// ```python
-/// thaw.restore_from_file(
-///     path: str,
-///     mapping: list[tuple[str, int, int, int]],
-/// ) -> dict
-/// ```
-///
-/// `mapping` describes where each region in the file should land:
-/// each tuple is `(kind, logical_id, device_ptr, size)`. The call
-/// returns `{"regions_restored": int, "bytes_copied": int}`.
-///
-/// Raises:
-///   - `NotImplementedError` if the extension was built without
-///     the `cuda` feature.
-///   - `ValueError` for unknown region kinds or missing mappings
-///     (any region in the file with no entry in `mapping`).
-///   - `IOError` for filesystem problems.
-///   - `RuntimeError` for anything else the orchestrator returned.
-#[pyfunction]
-fn restore_from_file(
-    py: Python<'_>,
-    path: &str,
-    mapping: Vec<(String, u32, u64, u64)>,
-) -> PyResult<PyObject> {
-    #[cfg(not(feature = "cuda"))]
-    {
-        let _ = (py, path, mapping);
-        return Err(PyErr::from(ThawPyError::CudaUnavailable));
-    }
-
-    #[cfg(feature = "cuda")]
-    {
-        let backend = RealCuda::new();
-        let lookup = build_restore_map(mapping)?;
-
-        // Read the whole file into memory. Same Phase 1
-        // simplification as the orchestrator itself — a later
-        // streaming restore will take a `Read` directly.
-        let mut file = BufReader::new(
-            File::open(Path::new(path))
-                .map_err(|e| ThawPyError::Io(format!("open {path}: {e}")))?,
-        );
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|e| ThawPyError::Io(format!("read {path}: {e}")))?;
-
-        let stats = restore(&backend, &bytes, |kind, logical_id| {
-            lookup.get(&(kind, logical_id)).copied()
-        })
-        .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
-
-        // Return a Python dict instead of a tuple. Dicts are self-
-        // describing at the call site (`stats["bytes_copied"]`
-        // reads better than `stats[1]`) and are trivially
-        // extensible if we add more fields later.
-        let dict = pyo3::types::PyDict::new_bound(py);
-        dict.set_item("regions_restored", stats.regions_restored)?;
         dict.set_item("bytes_copied", stats.bytes_copied)?;
         Ok(dict.into())
     }
@@ -516,6 +390,17 @@ fn restore_from_file_pipelined(
 /// `mmap.mmap`, `bytearray`, or any object implementing the buffer
 /// protocol. With mmap on /dev/shm this is zero-copy: the kernel maps
 /// the same physical RAM pages, no allocation or memcpy needed.
+///
+/// Dispatch: this binding now calls `restore_pipelined_from_bytes_auto`
+/// under the hood (changed 2026-04-17). The Rust wrapper attempts the
+/// zero-copy `cudaHostRegister` + async-DMA path first, and transparently
+/// falls back to the staging-buffer path (what this function used to
+/// call directly) if host registration fails. Callers that need the
+/// explicit auto-dispatch name can use `restore_from_bytes_auto` — it's
+/// an alias for the same behavior. The legacy zero-copy-only entry
+/// point `restore_from_bytes_pipelined_zerocopy` is still available for
+/// callers that require the fast path or want to observe registration
+/// failures as errors.
 #[pyfunction]
 #[pyo3(signature = (data, mapping, chunk_size_mb=64))]
 fn restore_from_bytes_pipelined(
@@ -548,7 +433,12 @@ fn restore_from_bytes_pipelined(
             try_direct_io: false, // not relevant for memory path
         };
 
-        let stats = restore_pipelined_from_bytes(
+        // Auto-dispatch: tries zero-copy first, falls back to the
+        // staging-buffer path on registration failure. This used to
+        // call `restore_pipelined_from_bytes` unconditionally — the
+        // new behavior is a strict superset (same fallback, plus the
+        // fast path when the host supports it).
+        let stats = restore_pipelined_from_bytes_auto(
             &backend,
             data_slice,
             |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
@@ -561,6 +451,41 @@ fn restore_from_bytes_pipelined(
         dict.set_item("bytes_copied", stats.bytes_copied)?;
         Ok(dict.into())
     }
+}
+
+/// Auto-dispatching RAM-backed pipelined restore (first-class alias).
+///
+/// Python signature:
+///
+/// ```python
+/// thaw.restore_from_bytes_auto(
+///     data: bytes | mmap | bytearray,
+///     mapping: list[tuple[str, int, int, int]],
+///     chunk_size_mb: int = 64,
+/// ) -> dict
+/// ```
+///
+/// Equivalent to `restore_from_bytes_pipelined`. Exposed under an
+/// explicit name so call sites that want "do the right thing"
+/// semantics can spell it out. Uses `restore_pipelined_from_bytes_auto`
+/// under the hood: zero-copy `cudaHostRegister` + DMA when possible,
+/// staging-buffer fallback when not.
+///
+/// This is the recommended entry point for new Python code that has
+/// snapshot bytes in memory and doesn't want to think about whether
+/// `cudaHostRegister` is going to succeed on the current host.
+#[pyfunction]
+#[pyo3(signature = (data, mapping, chunk_size_mb=64))]
+fn restore_from_bytes_auto(
+    py: Python<'_>,
+    data: pyo3::buffer::PyBuffer<u8>,
+    mapping: Vec<(String, u32, u64, u64)>,
+    chunk_size_mb: usize,
+) -> PyResult<PyObject> {
+    // Delegates to the same implementation as
+    // `restore_from_bytes_pipelined`; kept as a separate binding so
+    // the intent ("auto-dispatch, please") reads at the call site.
+    restore_from_bytes_pipelined(py, data, mapping, chunk_size_mb)
 }
 
 /// Zero-copy RAM-backed pipelined restore: DMA directly from the buffer.
@@ -807,11 +732,10 @@ fn restore_from_pinned_mmap(
 /// entry point.
 #[pymodule]
 fn thaw(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(freeze_to_file, m)?)?;
     m.add_function(wrap_pyfunction!(freeze_to_file_pipelined, m)?)?;
-    m.add_function(wrap_pyfunction!(restore_from_file, m)?)?;
     m.add_function(wrap_pyfunction!(restore_from_file_pipelined, m)?)?;
     m.add_function(wrap_pyfunction!(restore_from_bytes_pipelined, m)?)?;
+    m.add_function(wrap_pyfunction!(restore_from_bytes_auto, m)?)?;
     m.add_function(wrap_pyfunction!(restore_from_bytes_pipelined_zerocopy, m)?)?;
     m.add_class::<PinnedMmap>()?;
     m.add_function(wrap_pyfunction!(restore_from_pinned_mmap, m)?)?;

@@ -217,11 +217,25 @@ def cmd_info(args):
         import os
         file_size = os.path.getsize(args.snapshot)
 
+        meta_path = args.snapshot + ".meta"
+        is_kv = os.path.exists(meta_path)
+
         print(f"File:      {args.snapshot}")
-        print(f"Format:    THAW v{version}")
+        print(f"Format:    THAW v{version}" + (" + KV sidecar" if is_kv else ""))
         print(f"Regions:   {num_regions}")
         print(f"Data size: {total_bytes / 1e9:.2f} GB")
         print(f"File size: {file_size / 1e9:.2f} GB")
+
+        if is_kv:
+            import json
+            with open(meta_path, 'rb') as mf:
+                if mf.read(8) == b"THAWKV\x00\x00":
+                    meta_len = struct.unpack("<I", mf.read(4))[0]
+                    metadata = json.loads(mf.read(meta_len))
+                    print(f"KV blocks: {metadata.get('num_blocks', '?')}")
+                    print(f"KV layers: {metadata.get('num_layers', '?')}")
+                    print(f"Block sz:  {metadata.get('block_size', '?')}")
+                    print(f"Dtype:     {metadata.get('dtype', '?')}")
 
     elif header[0:8] == b"THAWKV\x00\x00":
         import json

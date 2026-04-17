@@ -35,10 +35,13 @@
 | Method | Time | Throughput | Speedup |
 |--------|------|-----------|---------|
 | Normal vLLM cold start | 24.8s | — | 1x |
-| **thaw (cold-cache NVMe)** | **2.6s** | 14.12 GB/s | **9.7x** |
-| thaw (warm-cache) | 2.5s | 13.99 GB/s | 9.9x |
+| **thaw restore (cold-cache NVMe)** | **2.6s** | 14.12 GB/s | **9.7x** |
+| thaw restore (warm-cache) | 2.5s | 13.99 GB/s | 9.9x |
+| thaw freeze (D2H + NVMe write) | 5.6s | 2.88 GB/s | — |
 
 > Cold-cache measurement verified with `vmtouch -e` (0% resident pages before restore, checked via `mincore`). fio parallel read on the same file confirms the NVMe ceiling — thaw's Rust reader saturates it. Reproducible across back-to-back runs. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology.
+>
+> **Freeze is currently slower than restore** (2.88 GB/s vs 14 GB/s on the same hardware). Our restore path is chunked/O_DIRECT/write-combining pinned memory; the freeze path still allocates one pinned buffer per region and writes through the page cache. This is a Rust-side pipeline asymmetry, not a hardware limit — the rewrite to mirror restore's architecture is the next perf target. Tracked in [`plans/2026-04-17_pipelined-freeze-rewrite.md`](plans/2026-04-17_pipelined-freeze-rewrite.md).
 >
 > A pre-staged RAM path (mmap + `cudaHostRegister`) is implemented but gated off by default (`THAW_ZEROCOPY_MMAP=1` to enable). `cudaHostRegister` is O(pages) — pinning a 16 GB mmap costs ~7s, which dominates one-shot restore. The path exists for `thaw serve`, where registration is amortized across many restores. Tracking proper amortization in a follow-up.
 
@@ -319,7 +322,9 @@ See [docs/LANDSCAPE.md](./docs/LANDSCAPE.md) for detailed analysis.
 - [x] **Pre-built native wheels** — `pip install thaw-vllm[all]`, no Rust toolchain needed
 - [x] **SGLang integration** — class-passthrough loader, freeze + restore, validated on H100 TP=2 (5.0 GB/s)
 - [x] **Slot-warm hot-swap** — persistent `cudaHostRegister` per pool slot, 0.29s / 55 GB/s model swap on H100 SXM (`thaw serve`)
-- [ ] Cloud snapshot storage (S3/GCS)
+- [x] **Cloud snapshot storage (S3)** — `thaw freeze --output s3://...` and `thaw serve --snapshot s3://...`, validated H100 SXM 2026-04-17 (15 GiB freeze+upload in 5.6s, 229s single-stream S3 download — ranged-GET crate is next)
+- [ ] Pipelined-freeze parity with restore — rewrite freeze to use chunked WC-pinned buffers + O_DIRECT, target 10-14 GB/s (3-4x current)
+- [ ] Rust `thaw-cloud` crate — concurrent ranged GETs for S3 restore at NIC line-rate
 - [ ] GPUDirect Storage support
 
 ## Design

@@ -3,8 +3,17 @@ conftest.py — Mock heavy dependencies (torch, vllm, sglang) so tests
 run locally without GPU/CUDA.
 """
 
+import os
 import sys
 from unittest.mock import MagicMock
+
+# These tests run CPU-only without the `thaw` native extension loaded,
+# so every Rust fast-path naturally fails. Strict mode is the library
+# default (as of 2026-04-17) and raises on those failures; opt the
+# test suite into Python fallbacks so the fallback chain itself can be
+# exercised. Individual tests that want to assert strict-raise behavior
+# can monkeypatch the env var back off.
+os.environ.setdefault("THAW_ALLOW_PYTHON_FALLBACK", "1")
 
 # Mock torch before any thaw imports
 mock_torch = MagicMock()
