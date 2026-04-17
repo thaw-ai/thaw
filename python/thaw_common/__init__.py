@@ -21,6 +21,8 @@ from thaw_common.snapshot import (
     restore_model,
     restore_model_pipelined,
     restore_model_from_ram,
+    make_pinned_mmap,
+    restore_model_from_pinned_mmap,
 )
 from thaw_common.util import rank_snapshot_path
 from thaw_common.cloud import (
@@ -47,6 +49,8 @@ __all__ = [
     "restore_model",
     "restore_model_pipelined",
     "restore_model_from_ram",
+    "make_pinned_mmap",
+    "restore_model_from_pinned_mmap",
     "rank_snapshot_path",
     "is_remote",
     "resolve_snapshot_path",

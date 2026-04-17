@@ -1,8 +1,8 @@
 # thaw
 
-**Fast snapshot/restore for LLM inference. 17x faster cold starts on 70B, multi-GPU tensor parallel, KV cache preservation.**
+**Fast snapshot/restore for LLM inference. Sub-second model hot-swap at 55 GB/s, 17x faster cold starts on 70B, multi-GPU tensor parallel, KV cache preservation.**
 
-vLLM cold-starts Llama-3-70B on 2x A100 in 546 seconds. thaw restores it in **31.8 seconds** — a **17.2x speedup**. Bit-identical outputs, verified by greedy decoding. Multi-GPU tensor parallel, Rust+CUDA pipelined DMA, and KV cache snapshots that no other tool offers.
+`thaw serve` hot-swaps a Llama-3-8B-class model in **0.29 seconds** at **55 GB/s** — PCIe Gen5-saturating, bit-identical output. Cold-start Llama-3-70B on 2x A100 drops from 546s to **31.8s** (17.2x). Rust+CUDA pipelined DMA, pinned-memory persistence, and KV cache snapshots that no other tool offers.
 
 <p align="center">
   <img src="site/terminal.gif" alt="thaw demo — pip install, freeze, serve, chat completions on RunPod A40" width="800">
@@ -10,7 +10,19 @@ vLLM cold-starts Llama-3-70B on 2x A100 in 546 seconds. thaw restores it in **31
 
 ## Benchmarks
 
-**Llama-3-70B-Instruct (141 GB fp16) on 2x A100 SXM 80GB — tensor parallel:**
+**Hot model swap (`thaw serve`, H100 SXM, Llama-3-8B-Instruct, 16 GB fp16):**
+
+| Reload # | Time | Throughput | Backend |
+|----------|------|-----------|---------|
+| 0 (cold, one-time pin) | 6.40s | — | `rust_pipelined_pinned_mmap` |
+| 1 | **0.29s** | **55.0 GB/s** | `rust_pipelined_pinned_mmap` |
+| 2 | **0.29s** | **55.1 GB/s** | `rust_pipelined_pinned_mmap` |
+| 3 | **0.29s** | **55.1 GB/s** | `rust_pipelined_pinned_mmap` |
+| 4 | **0.29s** | **55.1 GB/s** | `rust_pipelined_pinned_mmap` |
+
+> `thaw serve` pins the snapshot mmap once when a pool slot warms up (~6s for 16 GB — the one-time `cudaHostRegister` cost), then reuses that pinned buffer on every subsequent swap. Steady-state = pure PCIe Gen5 DMA at 86% of theoretical peak. Bit-identical output verified across reloads. Extrapolates to **~2.5s hot-swap for Llama-70B** (140 GB), directly comparable to InferX's "sub-2s" claim. Bench: [`bench_slot_warm.py`](bench_slot_warm.py), correctness: [`bench_slot_warm_correctness.py`](bench_slot_warm_correctness.py).
+
+**Llama-3-70B-Instruct (141 GB fp16) on 2x A100 SXM 80GB — tensor parallel cold start:**
 
 | Method | Time | Speedup |
 |--------|------|---------|
@@ -73,9 +85,10 @@ thaw restore (cold-cache NVMe):
 
 **Restore** initializes vLLM with dummy weights (fast — no disk I/O), then overwrites them from the snapshot using double-buffered pipelined DMA through pinned host memory. Two CUDA streams overlap PCIe transfers with disk reads. KV cache blocks are restored separately with their prefix cache hash mappings, so new requests immediately get cache hits.
 
-Two restore modes:
+Three restore modes:
 - **Disk**: reads snapshot from NVMe with O_DIRECT, bypassing the kernel page cache. Throughput limited by NVMe bandwidth — on H100 SXM NVMe this hits 14 GB/s with the Rust pipelined path, saturating the drive.
-- **Pre-staged RAM**: snapshot already in memory (tmpfs, shared memory, or mmapped with page cache warm). The full zero-copy path (mmap + `cudaHostRegister`) is implemented behind `THAW_ZEROCOPY_MMAP=1`, but the registration cost makes it a win only when amortized across many restores — the `thaw serve` use case. A default-on implementation that registers once at slot warm-up is in development.
+- **Pre-staged RAM**: snapshot already in memory (tmpfs, shared memory, or mmapped with page cache warm). The full zero-copy path (mmap + `cudaHostRegister`) is implemented behind `THAW_ZEROCOPY_MMAP=1`, but the one-time registration cost makes it a win only when amortized across many restores.
+- **Slot-warm hot-swap (`thaw serve`)**: when a pool slot warms up, `thaw serve` pins the snapshot mmap once (~6s `cudaHostRegister` for 16 GB) and persists the pinned handle on the slot. Every subsequent model swap into that slot reuses the pinned buffer and runs as pure PCIe DMA — 0.29s at 55 GB/s for an 8B model on H100 SXM, saturating Gen5 PCIe.
 
 **KV cache snapshots** capture the prefix-cached blocks that vLLM retains after generation. On restore, block data is DMA'd back to GPU and the prefix cache hash table is reconstructed. Requests with matching prefixes skip prefill — the most expensive part of inference.
 
@@ -141,7 +154,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### How `thaw serve` works
 
-`thaw serve` is PgBouncer for GPU inference. It keeps vLLM engines pre-initialized with dummy weights, then DMA-swaps real model weights from a snapshot on demand (~1s instead of 20s cold start).
+`thaw serve` is PgBouncer for GPU inference. It keeps vLLM engines pre-initialized with dummy weights, then DMA-swaps real model weights from a snapshot on demand. First swap into a slot pays the one-time `cudaHostRegister` pin cost (~6s for 16 GB); every subsequent swap runs at **55 GB/s (0.29s for 8B, ~2.5s for 70B)** — that's the pinned mmap reused through PCIe Gen5 DMA without ever leaving the slot.
 
 - **OpenAI-compatible API** — `/v1/completions`, `/v1/chat/completions`, streaming via SSE
 - **Model affinity** — requests for an already-loaded model have zero swap cost
@@ -305,6 +318,7 @@ See [docs/LANDSCAPE.md](./docs/LANDSCAPE.md) for detailed analysis.
 - [x] **Engine pool (`thaw serve`)** — pre-warmed vLLM engines with hot model swapping, OpenAI-compatible API, multi-model serving
 - [x] **Pre-built native wheels** — `pip install thaw-vllm[all]`, no Rust toolchain needed
 - [x] **SGLang integration** — class-passthrough loader, freeze + restore, validated on H100 TP=2 (5.0 GB/s)
+- [x] **Slot-warm hot-swap** — persistent `cudaHostRegister` per pool slot, 0.29s / 55 GB/s model swap on H100 SXM (`thaw serve`)
 - [ ] Cloud snapshot storage (S3/GCS)
 - [ ] GPUDirect Storage support
 

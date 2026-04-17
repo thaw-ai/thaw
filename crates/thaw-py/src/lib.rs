@@ -74,8 +74,8 @@ use thaw_runtime::{DevicePtr, DeviceRegion};
 #[cfg(feature = "cuda")]
 use thaw_runtime::{
     freeze, freeze_pipelined, restore, restore_pipelined, restore_pipelined_from_bytes,
-    restore_pipelined_from_registered_bytes, FreezeConfig, FreezeRequest, PipelineConfig,
-    RealCuda,
+    restore_pipelined_from_pre_registered_bytes, restore_pipelined_from_registered_bytes,
+    FreezeConfig, FreezeRequest, HostRegistration, PipelineConfig, PipelinedBackend, RealCuda,
 };
 
 // =============================================================================
@@ -634,6 +634,167 @@ fn restore_from_bytes_pipelined_zerocopy(
 }
 
 // =============================================================================
+// PERSISTENT PINNED REGISTRATION (slot-warm path for thaw serve)
+// =============================================================================
+//
+// `cudaHostRegister` is O(pages) — pinning 16 GB takes ~7 s. That cost
+// dominates every per-restore zero-copy call and makes the zero-copy
+// path slower than the chunked path when measured per-load. For
+// `thaw serve`, where a slot mmaps the snapshot once at warm-up and
+// then reloads the same bytes into the GPU many times, we want to pay
+// the registration cost exactly once.
+//
+// `PinnedMmap` is the amortization vehicle: construct it on slot warm
+// (`cudaHostRegister` happens in `__init__`) and reuse it on every
+// subsequent `restore_from_pinned_mmap` call (which skips registration
+// and goes straight to DMA). Drop unpins.
+
+/// A Python buffer that has been pinned in place for DMA.
+///
+/// Python signature:
+///
+/// ```python
+/// pinned = thaw.PinnedMmap(data)  # data: mmap | bytes | bytearray | any buffer
+/// stats = thaw.restore_from_pinned_mmap(pinned, mapping)
+/// # ... reuse `pinned` across many restores ...
+/// del pinned                        # unpins via cudaHostUnregister
+/// ```
+///
+/// Construction calls `cudaHostRegister` on the underlying pages. The
+/// resulting handle keeps a reference to the source buffer (so the
+/// Python mmap cannot be closed under us) and the CUDA registration
+/// (so the pages remain DMA-addressable). Dropping the handle on the
+/// Python side runs `cudaHostUnregister` and releases the buffer.
+///
+/// Constructing one is the slow step (O(pages), seconds for large
+/// snapshots). Reusing one across many `restore_from_pinned_mmap`
+/// calls is the whole point — that is what turns the amortized
+/// per-restore cost into just the PCIe DMA itself.
+///
+/// Raises `RuntimeError` if `cudaHostRegister` fails — usually
+/// `ulimit -l` is too low for the snapshot size, or the buffer is not
+/// page-aligned. The caller should fall back to
+/// `restore_from_bytes_pipelined`.
+#[pyclass(unsendable)]
+pub struct PinnedMmap {
+    // Field drop order is declaration order. We want the CUDA
+    // registration to drop first (cudaHostUnregister) and then the
+    // PyBuffer to release its Python reference. Reversing this would
+    // risk asking CUDA to unpin memory whose underlying mmap had
+    // already been torn down by Python.
+    #[cfg(feature = "cuda")]
+    _registration: Option<HostRegistration>,
+    _buffer: pyo3::buffer::PyBuffer<u8>,
+    // Raw ptr into the buffer's bytes. Read by `restore_from_pinned_mmap`
+    // on cuda builds; unused on non-cuda where construction always errors.
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    ptr: u64,
+    size: usize,
+}
+
+#[pymethods]
+impl PinnedMmap {
+    /// Pin a Python buffer in place for DMA.
+    #[new]
+    fn new(data: pyo3::buffer::PyBuffer<u8>) -> PyResult<Self> {
+        let ptr = data.buf_ptr() as *mut u8;
+        let size = data.len_bytes();
+
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = (ptr, size, data);
+            Err(PyErr::from(ThawPyError::CudaUnavailable))
+        }
+
+        #[cfg(feature = "cuda")]
+        {
+            let backend = RealCuda::new();
+            // SAFETY: the PyBuffer keeps the Python mmap (or other
+            // buffer-protocol object) alive for the lifetime of the
+            // returned PinnedMmap. The pages are contiguous by the
+            // buffer protocol's contract. If `ptr` is not page-aligned
+            // or the range cannot be pinned, `cudaHostRegister`
+            // returns an error which we propagate.
+            let registration = unsafe { backend.host_register(ptr, size) }
+                .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
+            Ok(PinnedMmap {
+                _registration: Some(registration),
+                _buffer: data,
+                ptr: ptr as u64,
+                size,
+            })
+        }
+    }
+
+    /// Length in bytes of the registered range.
+    fn __len__(&self) -> usize {
+        self.size
+    }
+
+    /// Number of bytes pinned.
+    #[getter]
+    fn size(&self) -> usize {
+        self.size
+    }
+}
+
+/// Restore a snapshot using a pre-registered `PinnedMmap`.
+///
+/// Python signature:
+///
+/// ```python
+/// thaw.restore_from_pinned_mmap(
+///     pinned: PinnedMmap,
+///     mapping: list[tuple[str, int, int, int]],
+/// ) -> dict
+/// ```
+///
+/// Skips the `cudaHostRegister` call entirely — the pages were pinned
+/// when `pinned` was constructed. The per-restore cost is the PCIe
+/// DMA itself plus a handful of microseconds of plan construction. In
+/// `thaw serve` this is the path that turns a 7-second slot reload
+/// into a sub-second one.
+#[pyfunction]
+fn restore_from_pinned_mmap(
+    py: Python<'_>,
+    pinned: &PinnedMmap,
+    mapping: Vec<(String, u32, u64, u64)>,
+) -> PyResult<PyObject> {
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (py, pinned, mapping);
+        return Err(PyErr::from(ThawPyError::CudaUnavailable));
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        let backend = RealCuda::new();
+        let lookup = build_restore_map(mapping)?;
+        let config = PipelineConfig::default();
+
+        // SAFETY: `pinned` holds the PyBuffer (keeps the mmap alive)
+        // and the HostRegistration (keeps the pages pinned), both for
+        // the duration of this call because we borrow `&PinnedMmap`.
+        let data_slice = unsafe {
+            std::slice::from_raw_parts(pinned.ptr as *const u8, pinned.size)
+        };
+
+        let stats = restore_pipelined_from_pre_registered_bytes(
+            &backend,
+            data_slice,
+            |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
+            &config,
+        )
+        .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
+
+        let dict = pyo3::types::PyDict::new_bound(py);
+        dict.set_item("regions_restored", stats.regions_restored)?;
+        dict.set_item("bytes_copied", stats.bytes_copied)?;
+        Ok(dict.into())
+    }
+}
+
+// =============================================================================
 // MODULE REGISTRATION
 // =============================================================================
 //
@@ -652,6 +813,8 @@ fn thaw(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(restore_from_file_pipelined, m)?)?;
     m.add_function(wrap_pyfunction!(restore_from_bytes_pipelined, m)?)?;
     m.add_function(wrap_pyfunction!(restore_from_bytes_pipelined_zerocopy, m)?)?;
+    m.add_class::<PinnedMmap>()?;
+    m.add_function(wrap_pyfunction!(restore_from_pinned_mmap, m)?)?;
     Ok(())
 }
 

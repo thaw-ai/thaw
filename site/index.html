@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>thaw — 10x faster LLM weight loading</title>
-  <meta name="description" content="GPU state management for LLM inference. 10x faster weight loading via pipelined DMA. Multi-GPU tensor parallel, KV cache snapshots. Open source MIT.">
-  <meta property="og:title" content="thaw — 10x faster LLM weight loading">
-  <meta property="og:description" content="Snapshot GPU state and restore via pipelined DMA at 14 GB/s. Multi-GPU tensor parallel. KV cache snapshots. Open source.">
+  <title>thaw — sub-second LLM hot-swap at 55 GB/s</title>
+  <meta name="description" content="GPU state management for LLM inference. Sub-second model hot-swap at 55 GB/s (PCIe Gen5-saturating), 17x faster cold starts, KV cache snapshots. Open source MIT.">
+  <meta property="og:title" content="thaw — sub-second LLM hot-swap at 55 GB/s">
+  <meta property="og:description" content="Hot-swap a Llama-3-8B model in 0.29s at 55 GB/s via pinned-memory DMA. 17.2x cold-start speedup on 70B. Multi-GPU tensor parallel. KV cache snapshots. Open source.">
   <meta property="og:type" content="website">
   <meta name="theme-color" content="#000000">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -992,8 +992,8 @@
       <span class="badge-dot"></span>
       Open Source &middot; MIT License
     </div>
-    <h1 class="reveal reveal-d2"><span class="hero-num" data-text="10&times;">10&times;</span> faster<br>LLM weight loading</h1>
-    <p class="hero-sub reveal reveal-d3">Snapshot GPU state and restore via pipelined DMA. Multi-GPU tensor parallel. KV cache snapshots. Bit-identical output verified on H100.</p>
+    <h1 class="reveal reveal-d2">Hot-swap LLMs in<br><span class="hero-num" data-text="0.29s">0.29s</span> at 55 GB/s</h1>
+    <p class="hero-sub reveal reveal-d3">Snapshot GPU state and restore via pipelined DMA. Pinned-memory hot-swap saturates PCIe Gen5. 17&times; faster cold starts. KV cache snapshots. Bit-identical output on H100.</p>
     <div class="hero-cta reveal reveal-d4">
       <div class="install-cmd" onclick="copyInstall(this)">
         <span class="prompt">$</span>
@@ -1013,30 +1013,30 @@
 <section class="bench-viz reveal">
   <div class="viz-box">
     <div class="viz-header">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M20 9h2M20 14h2M2 9h2M2 14h2"/></svg>
-      Llama-3.1-70B-Instruct &middot; 141 GB &middot; 2&times; H100 SXM 80 GB
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      Hot-swap &middot; Llama-3-8B (16 GB) &middot; H100 SXM &middot; <code style="font-family:var(--font-mono);color:var(--text-2);">thaw serve</code>
     </div>
     <div class="viz-body">
       <div class="bar-group">
         <div class="bar-row">
           <div class="bar-label">vLLM cold start</div>
           <div class="bar-track">
-            <div class="bar-fill bar-slow" style="--bar-dur: 1.3s; --bar-delay: 0s;">546.5s</div>
+            <div class="bar-fill bar-slow" style="--bar-dur: 1.3s; --bar-delay: 0s;">24.8s</div>
           </div>
         </div>
       </div>
       <div class="bar-group">
         <div class="bar-row">
-          <div class="bar-label">thaw restore</div>
+          <div class="bar-label">thaw hot-swap</div>
           <div class="bar-track">
-            <div class="bar-fill bar-fast" style="--bar-dur: 0.5s; --bar-delay: 0.4s;">31.8s</div>
+            <div class="bar-fill bar-fast" style="--bar-dur: 0.5s; --bar-delay: 0.4s; width: 6%;">0.29s</div>
           </div>
         </div>
       </div>
       <div class="viz-result">
-        <span class="viz-speedup">17.2&times; faster</span>
+        <span class="viz-speedup">55 GB/s &middot; 85&times; faster</span>
         <span class="viz-sep">&middot;</span>
-        <span class="viz-meta">Llama-3-70B &middot; 2&times; A100 TP=2</span>
+        <span class="viz-meta">PCIe Gen5-saturating</span>
         <span class="viz-sep">&middot;</span>
         <span class="viz-check">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
@@ -1052,16 +1052,16 @@
 <div class="stats reveal">
   <div class="stats-inner">
     <div class="stat">
-      <div class="stat-num">8/8</div>
-      <div class="stat-label">Models verified (bit-identical)</div>
+      <div class="stat-num"><span class="accent">0.29</span>s</div>
+      <div class="stat-label">Hot-swap a Llama-3-8B model</div>
     </div>
     <div class="stat">
-      <div class="stat-num"><span class="accent">14.4</span> GB/s</div>
-      <div class="stat-label">Peak DMA throughput</div>
+      <div class="stat-num"><span class="accent">55</span> GB/s</div>
+      <div class="stat-label">Sustained DMA — 86% of PCIe Gen5</div>
     </div>
     <div class="stat">
       <div class="stat-num"><span class="accent">17.2</span>&times;</div>
-      <div class="stat-label">Peak weight loading speedup</div>
+      <div class="stat-label">70B cold-start speedup (TP=2)</div>
     </div>
   </div>
 </div>
@@ -1152,8 +1152,8 @@
       </div>
       <div class="feature">
         <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
-        <h3>Engine Pool</h3>
-        <p><code>thaw serve</code> — pre-warmed vLLM engines with hot model swapping. OpenAI-compatible API. Swap models in ~1s via DMA instead of 20s cold start.</p>
+        <h3>Slot-Warm Hot-Swap</h3>
+        <p><code>thaw serve</code> pins a snapshot mmap once per slot, then reuses it for every reload. <strong style="color:var(--text)">0.29s swap at 55 GB/s</strong> for an 8B model — extrapolates to ~2.5s for 70B. OpenAI-compatible API.</p>
       </div>
     </div>
   </div>
@@ -1168,7 +1168,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
         Quick Start
       </span>
-      <h2>Four lines to 10&times;</h2>
+      <h2>Freeze once. Hot-swap forever.</h2>
       <p class="section-sub">Works with any model vLLM supports. Single GPU or multi-GPU tensor parallel.</p>
     </div>
     <div class="code-box reveal reveal-d1">

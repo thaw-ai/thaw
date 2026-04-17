@@ -49,7 +49,8 @@ pub use freeze::{freeze, FreezeConfig, FreezeError, FreezeRequest};
 pub use mock::MockCuda;
 pub use pipeline::{
     freeze_pipelined, restore_pipelined, restore_pipelined_from_bytes,
-    restore_pipelined_from_registered_bytes, FreezeStats, PipelineConfig,
+    restore_pipelined_from_pre_registered_bytes, restore_pipelined_from_registered_bytes,
+    FreezeStats, PipelineConfig,
 };
 #[cfg(feature = "cuda")]
 pub use real::{OwnedDeviceRegion, RealCuda};
