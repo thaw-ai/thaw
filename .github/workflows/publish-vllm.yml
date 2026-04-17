@@ -1,0 +1,74 @@
+name: Publish thaw-vllm to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tooling
+        run: pip install --upgrade build
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Verify pyproject version matches release tag
+        if: github.event_name == 'release'
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(python -c "import tomllib; print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "ERROR: tag v$TAG_VERSION does not match pyproject version $PKG_VERSION"
+            exit 1
+          fi
+          echo "version match OK: $PKG_VERSION"
+
+      - name: Cross-package pin check (thaw-native resolves on PyPI)
+        run: |
+          WHEEL=$(ls dist/*.whl | head -1)
+          set +e
+          pip install --dry-run --ignore-installed "${WHEEL}[native]" 2>&1 | tee /tmp/dryrun.log
+          set -e
+          if grep -qE "Could not find a version|No matching distribution" /tmp/dryrun.log; then
+            echo "ERROR: thaw-native pin in pyproject.toml does not resolve on PyPI"
+            exit 1
+          fi
+          echo "thaw-native pin resolves OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    environment: pypi
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
