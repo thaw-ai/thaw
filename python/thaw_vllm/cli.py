@@ -8,21 +8,29 @@ Usage:
 """
 
 import argparse
+import os
 import sys
+
+# Must run before any vllm import. See thaw_vllm/__init__.py for the why.
+os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 def cmd_freeze(args):
     """Freeze model weights (and optionally KV cache) to snapshot files."""
-    engine = getattr(args, 'engine', 'vllm')
-    if engine == 'sglang':
+    engine_choice = getattr(args, 'engine', 'vllm')
+    if engine_choice == 'sglang':
         return _cmd_freeze_sglang(args)
 
     import os
-    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-
     import time
+
+    # KV-cache snapshot reaches into scheduler state that only exists in
+    # V1-inproc or V0 mode. Weights-only freeze runs under V1 MP default.
+    if args.kv_output:
+        os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
     from vllm import LLM, SamplingParams
-    from thaw_vllm import freeze_model_pipelined, freeze_model_tp
+    from thaw_vllm import freeze_model_tp
     from thaw_vllm.kv_snapshot import freeze_kv_cache, freeze_kv_cache_tp
 
     tp = getattr(args, 'tensor_parallel', 1)
@@ -46,28 +54,15 @@ def cmd_freeze(args):
         sampling = SamplingParams(temperature=0, max_tokens=1)
         llm.generate([args.kv_warmup_prompt], sampling)
 
-    # Freeze weights
+    # Freeze weights — dispatches to workers via collective_rpc, so the
+    # same path handles TP=1 and TP>1 and works under V1 MP.
     print(f"[thaw] Freezing weights to {args.output}...")
-    if tp > 1:
-        wstats = freeze_model_tp(llm, args.output)
-        size_gb = wstats['total_bytes'] / 1e9
-        print(f"[thaw] Weights: {wstats['num_regions']} regions across {tp} GPUs, "
-              f"{size_gb:.2f} GB in {wstats['elapsed_s']:.1f}s "
-              f"({wstats['throughput_gb_s']:.2f} GB/s)")
-    else:
-        engine = llm.llm_engine
-        try:
-            model = engine.model_executor.driver_worker.model_runner.model
-        except AttributeError:
-            core = engine.engine_core
-            if hasattr(core, 'engine_core'):
-                core = core.engine_core
-            model = core.model_executor.driver_worker.model_runner.model
-
-        wstats = freeze_model_pipelined(model, args.output)
-        size_gb = wstats['total_bytes'] / 1e9
-        print(f"[thaw] Weights: {wstats['num_regions']} regions, {size_gb:.2f} GB "
-              f"in {wstats['elapsed_s']:.1f}s ({wstats['throughput_gb_s']:.2f} GB/s)")
+    wstats = freeze_model_tp(llm, args.output)
+    size_gb = wstats['total_bytes'] / 1e9
+    scope = f" across {tp} GPUs" if tp > 1 else ""
+    print(f"[thaw] Weights: {wstats['num_regions']} regions{scope}, "
+          f"{size_gb:.2f} GB in {wstats['elapsed_s']:.1f}s "
+          f"({wstats['throughput_gb_s']:.2f} GB/s)")
 
     # Freeze KV cache
     if args.kv_output:
@@ -106,10 +101,13 @@ def _cmd_freeze_sglang(args):
 def cmd_serve(args):
     """Start a pre-warmed engine pool server with hot model swapping."""
     import os
-    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-
     import logging
     import time
+
+    # KV-cache restore touches scheduler state that needs V1-inproc / V0.
+    # Weights-only serve runs under V1 MP default.
+    if args.kv_snapshot:
+        os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     logging.basicConfig(
         level=logging.INFO,

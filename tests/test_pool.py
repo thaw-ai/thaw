@@ -46,24 +46,14 @@ class FakeRequestOutput:
         self.outputs = [FakeOutput(text, token_ids)]
 
 
-class FakeLLM:
-    """Mock vLLM LLM that returns canned responses."""
-
-    def __init__(self, **kwargs):
-        self.init_kwargs = kwargs
-        self.generate_calls = []
-
-    def generate(self, prompts: List[str], sampling_params=None):
-        self.generate_calls.append((prompts, sampling_params))
-        return [FakeRequestOutput()]
-
-
 class FakeModelRunner:
     def __init__(self):
         self.model = MagicMock()
 
 
 class FakeDriverWorker:
+    """Stands in for a vLLM worker object handed to collective_rpc callables."""
+
     def __init__(self):
         self.model_runner = FakeModelRunner()
 
@@ -83,6 +73,31 @@ class FakeEngineCore:
 class FakeLLMEngine:
     def __init__(self):
         self.engine_core = FakeEngineCore()
+        self.vllm_config = MagicMock()
+        self.vllm_config.parallel_config.tensor_parallel_size = 1
+
+
+class FakeLLM:
+    """Mock vLLM LLM that returns canned responses.
+
+    `collective_rpc` simulates a single-worker dispatch by calling the
+    callable with a fake worker object — matches the real LLM API well
+    enough to exercise _pool_worker.swap_model and the freeze/restore
+    workers end-to-end in tests.
+    """
+
+    def __init__(self, **kwargs):
+        self.init_kwargs = kwargs
+        self.generate_calls = []
+        self._worker = FakeDriverWorker()
+        self.llm_engine = FakeLLMEngine()
+
+    def generate(self, prompts: List[str], sampling_params=None):
+        self.generate_calls.append((prompts, sampling_params))
+        return [FakeRequestOutput()]
+
+    def collective_rpc(self, fn, args=()):
+        return [fn(self._worker, *args)]
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +133,6 @@ def pool_with_slots(snapshot_files):
 
     for i in range(2):
         llm = FakeLLM()
-        llm.llm_engine = FakeLLMEngine()
         slot = EngineSlot(id=i, llm=llm)
         pool.slots.append(slot)
 
@@ -126,6 +140,20 @@ def pool_with_slots(snapshot_files):
     pool.register("model_b", snapshot_files["model_b"])
 
     return pool
+
+
+@pytest.fixture(autouse=True)
+def _clear_pool_worker_state():
+    """Reset slot-persistent worker state between tests.
+
+    _pool_worker._slot_state is a module-level dict that survives the
+    test process. Slot reuse across tests (same slot_id, different
+    pool) would bleed state without this.
+    """
+    from thaw_vllm import _pool_worker
+    _pool_worker._slot_state.clear()
+    yield
+    _pool_worker._slot_state.clear()
 
 
 _FAKE_STATS = {
@@ -137,19 +165,22 @@ _FAKE_STATS = {
 
 
 def _patch_restore():
-    """Patch restore_model_from_ram to be a no-op that returns stats."""
+    """Patch the worker's RAM restore path to a no-op that returns stats.
+
+    This is the path reached when the pinned-mmap fast path is either
+    not patched (native `thaw` ext unavailable in tests → falls through)
+    or explicitly fails via a side_effect in the caller.
+    """
     return patch(
-        "thaw_vllm.snapshot.restore_model_from_ram",
+        "thaw_common.snapshot.restore_model_from_ram",
         return_value=dict(_FAKE_STATS),
     )
 
 
-def _patch_restore_tp():
-    """Patch restore_model_tp for TP>1 tests."""
-    return patch(
-        "thaw_vllm.snapshot.restore_model_tp",
-        return_value=dict(_FAKE_STATS),
-    )
+def _worker_slot_state(slot_id: int):
+    """Return the pinned-mmap state dict the worker keeps for this slot."""
+    from thaw_vllm import _pool_worker
+    return _pool_worker._slot_state.get(slot_id, {})
 
 
 # ---------------------------------------------------------------------------
@@ -304,18 +335,25 @@ class TestEnginePool:
         with pytest.raises(ValueError, match="does not exist"):
             pool_with_slots.preload("model_a", slot_id=99)
 
-    def test_swap_model_tp(self, pool_with_slots, snapshot_files):
-        """TP>1 uses restore_model_tp instead of restore_model_from_ram."""
-        pool = pool_with_slots
-        pool.tp_size = 2
+    def test_swap_model_dispatches_via_collective_rpc(self, pool_with_slots):
+        """Pool delegates weight restore to the worker via collective_rpc.
 
-        with _patch_restore_tp() as mock_tp_restore:
-            pool.preload("model_a", slot_id=0)
-            assert mock_tp_restore.called
-            # First arg is the llm instance, second is the path
-            call_args = mock_tp_restore.call_args
-            assert call_args[0][0] is pool.slots[0].llm
-            assert call_args[0][1] == snapshot_files["model_a"]
+        After the V1-MP refactor, TP=1 and TP>1 share the same dispatch
+        path — the pool no longer reaches into engine internals.
+        """
+        pool = pool_with_slots
+        from thaw_vllm._pool_worker import swap_model as expected_fn
+
+        with _patch_restore():
+            with patch.object(
+                pool.slots[0].llm, "collective_rpc",
+                wraps=pool.slots[0].llm.collective_rpc,
+            ) as mock_rpc:
+                pool.preload("model_a", slot_id=0)
+                assert mock_rpc.called
+                assert mock_rpc.call_args.args[0] is expected_fn
+                slot_id, _path = mock_rpc.call_args.kwargs["args"]
+                assert slot_id == 0
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +402,7 @@ class TestSlotPinnedMmap:
             assert mk.call_count == 1
             assert rst.call_count == 1
             assert rst.call_args[0][1] is sentinel
-            assert pool.slots[0]._pinned_mmap is sentinel
+            assert _worker_slot_state(0)["pinned_mmap"] is sentinel
 
     def test_warm_reload_reuses_pinned_mmap(self, pool_with_slots):
         """Second load of the SAME snapshot reuses the existing handle."""
@@ -383,7 +421,7 @@ class TestSlotPinnedMmap:
             # Same sentinel handed to the restore function both times.
             assert rst.call_args_list[0][0][1] is sentinel
             assert rst.call_args_list[1][0][1] is sentinel
-            assert pool.slots[0]._pinned_mmap is sentinel
+            assert _worker_slot_state(0)["pinned_mmap"] is sentinel
 
     def test_swap_to_different_snapshot_drops_old_handle(self, pool_with_slots):
         """Swapping to a different model drops + rebuilds the registration."""
@@ -398,10 +436,10 @@ class TestSlotPinnedMmap:
             side_effect=handles,
         ) as mk, _patch_pinned_restore() as rst:
             pool.preload("model_a", slot_id=0)
-            assert pool.slots[0]._pinned_mmap is handles[0]
+            assert _worker_slot_state(0)["pinned_mmap"] is handles[0]
 
             pool.preload("model_b", slot_id=0)
-            assert pool.slots[0]._pinned_mmap is handles[1]
+            assert _worker_slot_state(0)["pinned_mmap"] is handles[1]
 
             # Two make calls, one per distinct snapshot path.
             assert mk.call_count == 2
@@ -421,8 +459,8 @@ class TestSlotPinnedMmap:
 
             assert mk.called
             assert fallback.called
-            # Slot has no pinned mmap because registration failed.
-            assert pool.slots[0]._pinned_mmap is None
+            # Worker has no pinned mmap because registration failed.
+            assert _worker_slot_state(0).get("pinned_mmap") is None
             # Model name still set — the fallback completed successfully.
             assert pool.slots[0].model_name == "model_a"
 
@@ -442,7 +480,7 @@ class TestSlotPinnedMmap:
             assert pinned_rst.called
             assert fallback.called
             # Handle dropped so the next reload will rebuild cleanly.
-            assert pool.slots[0]._pinned_mmap is None
+            assert _worker_slot_state(0).get("pinned_mmap") is None
             assert pool.slots[0].model_name == "model_a"
 
 

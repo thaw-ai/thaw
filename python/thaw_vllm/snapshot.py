@@ -3,7 +3,7 @@ thaw_vllm.snapshot — vLLM-specific tensor parallel freeze/restore.
 
 Engine-agnostic functions (freeze_model, restore_model, etc.) live in
 thaw_common.snapshot. This module adds vLLM-specific TP support using
-collective_rpc.
+collective_rpc, which works transparently under V0, V1 inproc, and V1 MP.
 
 For backward compatibility, all functions are re-exported from here.
 """
@@ -13,8 +13,6 @@ import time
 from typing import Optional
 
 # Re-export engine-agnostic functions for backward compatibility.
-# Existing code that does `from thaw_vllm.snapshot import freeze_model`
-# continues to work.
 from thaw_common.snapshot import (  # noqa: F401
     freeze_model,
     freeze_model_pipelined,
@@ -43,17 +41,111 @@ from thaw_common.util import rank_snapshot_path as _rank_snapshot_path
 def _get_engine_core_from_llm(llm):
     """Navigate to an object with model_executor and vllm_config.
 
-    Works with both V0 (no engine_core) and V1 (nested engine_core).
+    Works under V1 inproc mode (single process) and V0. Under V1 MP,
+    model_executor lives in a child process and is not accessible from
+    the parent — use llm.collective_rpc for weight ops instead. Kept
+    for kv_snapshot.py, which still reaches into scheduler state and
+    so requires VLLM_ENABLE_V1_MULTIPROCESSING=0.
     """
     engine = llm.llm_engine
-    # V1 engine: engine_core wraps the real core
     if hasattr(engine, 'engine_core'):
         ec = engine.engine_core
         if hasattr(ec, 'engine_core'):
             ec = ec.engine_core
         return ec
-    # V0 engine: model_executor lives directly on the engine
     return engine
+
+
+def _worker_freeze(worker, base_path, vllm_commit):
+    """Freeze this worker's model shard to a rank-specific path.
+
+    Runs inside a vLLM worker process via collective_rpc. Each TP rank
+    writes to rank_snapshot_path(base_path, rank); for TP=1 that is
+    just base_path.
+    """
+    import os as _os
+    import tempfile
+    from vllm.distributed import get_tensor_model_parallel_rank
+    from thaw_common.snapshot import freeze_model_pipelined, freeze_model
+    from thaw_common.util import rank_snapshot_path
+    from thaw_common.cloud import is_remote, upload_snapshot
+    from thaw_common.telemetry import fallback_warning, strict_mode
+
+    rank = get_tensor_model_parallel_rank()
+    target_uri = rank_snapshot_path(base_path, rank)
+    model = worker.model_runner.model
+
+    # For remote targets, freeze to a local tempfile then upload.
+    if is_remote(target_uri):
+        fd, local_path = tempfile.mkstemp(suffix=".thaw")
+        _os.close(fd)
+    else:
+        local_path = target_uri
+
+    try:
+        stats = freeze_model_pipelined(model, local_path, vllm_commit)
+    except Exception as e:
+        fallback_warning(
+            f"_worker_freeze(rank={rank}).freeze_model_pipelined", e,
+            dst="freeze_model (pure python)",
+        )
+        if strict_mode():
+            raise
+        stats = freeze_model(model, local_path, vllm_commit)
+
+    if is_remote(target_uri):
+        upload_snapshot(local_path, target_uri)
+        _os.unlink(local_path)
+
+    stats['rank'] = rank
+    stats['path'] = target_uri
+    return stats
+
+
+def _worker_restore(worker, base_path, chunk_size_mb):
+    """Restore this worker's model shard from its rank-specific snapshot.
+
+    Runs inside a vLLM worker process via collective_rpc. Tries the
+    fast RAM-mmap path first, falls back to pipelined DMA, then to
+    pure-Python region-by-region.
+    """
+    from vllm.distributed import get_tensor_model_parallel_rank
+    from thaw_common.snapshot import (
+        restore_model_from_ram,
+        restore_model_pipelined,
+        restore_model,
+    )
+    from thaw_common.util import rank_snapshot_path
+    from thaw_common.cloud import resolve_snapshot_path
+    from thaw_common.telemetry import fallback_warning, strict_mode
+
+    rank = get_tensor_model_parallel_rank()
+    rank_path = resolve_snapshot_path(rank_snapshot_path(base_path, rank))
+    model = worker.model_runner.model
+
+    try:
+        stats = restore_model_from_ram(model, rank_path, chunk_size_mb)
+    except Exception as e_ram:
+        fallback_warning(
+            f"_worker_restore(rank={rank}).restore_model_from_ram", e_ram,
+            dst="restore_model_pipelined",
+        )
+        if strict_mode():
+            raise
+        try:
+            stats = restore_model_pipelined(model, rank_path, chunk_size_mb)
+        except Exception as e_pipe:
+            fallback_warning(
+                f"_worker_restore(rank={rank}).restore_model_pipelined", e_pipe,
+                dst="restore_model (pure python)",
+            )
+            if strict_mode():
+                raise
+            stats = restore_model(model, rank_path)
+
+    stats['rank'] = rank
+    stats['path'] = rank_path
+    return stats
 
 
 def freeze_model_tp(
@@ -63,83 +155,13 @@ def freeze_model_tp(
 ) -> dict:
     """Freeze model weights from all tensor parallel workers.
 
-    With TP > 1, each worker runs in a separate process. This function
-    uses vLLM's collective_rpc to dispatch freeze_model to each worker.
-    Each worker saves its own shard to a per-rank file:
-      base_path (rank 0), base_path.rank1.thaw (rank 1), etc.
-
-    With TP = 1, falls back to the standard single-GPU freeze.
+    Dispatches to each worker via llm.collective_rpc, which works under
+    V0, V1 inproc, and V1 MP. With TP=1 the result list has one entry;
+    with TP>1 each rank writes rank_snapshot_path(base_path, rank).
     """
-    ec = _get_engine_core_from_llm(llm)
-    tp_size = ec.vllm_config.parallel_config.tensor_parallel_size
+    tp_size = llm.llm_engine.vllm_config.parallel_config.tensor_parallel_size
 
-    if tp_size == 1:
-        from thaw_common.cloud import is_remote, upload_snapshot
-        from thaw_common.telemetry import fallback_warning, strict_mode
-        model = ec.model_executor.driver_worker.model_runner.model
-
-        if is_remote(base_path):
-            import tempfile
-            fd, local_path = tempfile.mkstemp(suffix=".thaw")
-            os.close(fd)
-        else:
-            local_path = base_path
-
-        try:
-            stats = freeze_model_pipelined(model, local_path, vllm_commit)
-        except Exception as e:
-            fallback_warning("freeze_model_tp(TP=1).freeze_model_pipelined", e,
-                             dst="freeze_model (pure python)")
-            if strict_mode():
-                raise
-            stats = freeze_model(model, local_path, vllm_commit)
-
-        if is_remote(base_path):
-            upload_snapshot(local_path, base_path)
-            os.unlink(local_path)
-
-        return stats
-
-    def _worker_freeze(worker, base_path, vllm_commit):
-        """Runs inside each worker process."""
-        import os
-        import tempfile
-        from vllm.distributed import get_tensor_model_parallel_rank
-        from thaw_common.snapshot import freeze_model_pipelined, freeze_model
-        from thaw_common.util import rank_snapshot_path
-        from thaw_common.cloud import is_remote, upload_snapshot
-        from thaw_common.telemetry import fallback_warning, strict_mode
-
-        rank = get_tensor_model_parallel_rank()
-        target_uri = rank_snapshot_path(base_path, rank)
-        model = worker.model_runner.model
-
-        # For S3 targets, freeze locally then upload. Freeze is slow
-        # (~1.6 GB/s) so sequential upload is fine for MVP.
-        if is_remote(target_uri):
-            fd, local_path = tempfile.mkstemp(suffix=".thaw")
-            os.close(fd)
-        else:
-            local_path = target_uri
-
-        try:
-            stats = freeze_model_pipelined(model, local_path, vllm_commit)
-        except Exception as e:
-            fallback_warning(f"_worker_freeze(rank={rank}).freeze_model_pipelined", e,
-                             dst="freeze_model (pure python)")
-            if strict_mode():
-                raise
-            stats = freeze_model(model, local_path, vllm_commit)
-
-        if is_remote(target_uri):
-            upload_snapshot(local_path, target_uri)
-            os.unlink(local_path)
-
-        stats['rank'] = rank
-        stats['path'] = target_uri
-        return stats
-
-    results = ec.model_executor.collective_rpc(
+    results = llm.collective_rpc(
         _worker_freeze,
         args=(base_path, vllm_commit),
     )
@@ -163,60 +185,15 @@ def restore_model_tp(
     base_path: str,
     chunk_size_mb: int = 64,
 ) -> dict:
-    """Restore model weights to all tensor parallel workers.
+    """Restore model weights into all tensor parallel workers.
 
-    With TP > 1, each worker runs in a separate process. This function
-    uses vLLM's collective_rpc to dispatch restore to each worker.
-    Each worker loads from its per-rank snapshot file:
-      base_path (rank 0), base_path.rank1.thaw (rank 1), etc.
-
-    With TP = 1, falls back to the standard single-GPU restore_model_from_ram.
+    Dispatches to each worker via llm.collective_rpc, which works under
+    V0, V1 inproc, and V1 MP. Each rank loads from rank_snapshot_path
+    with the RAM→pipelined→pure-Python fallback chain.
     """
-    ec = _get_engine_core_from_llm(llm)
-    tp_size = ec.vllm_config.parallel_config.tensor_parallel_size
+    tp_size = llm.llm_engine.vllm_config.parallel_config.tensor_parallel_size
 
-    if tp_size == 1:
-        from thaw_common.cloud import resolve_snapshot_path
-        model = ec.model_executor.driver_worker.model_runner.model
-        return restore_model_from_ram(model, resolve_snapshot_path(base_path), chunk_size_mb)
-
-    def _worker_restore(worker, base_path, chunk_size_mb):
-        """Runs inside each worker process."""
-        from vllm.distributed import get_tensor_model_parallel_rank
-        from thaw_common.snapshot import (
-            restore_model_from_ram,
-            restore_model_pipelined,
-            restore_model,
-        )
-        from thaw_common.util import rank_snapshot_path
-        from thaw_common.cloud import resolve_snapshot_path
-        from thaw_common.telemetry import fallback_warning, strict_mode
-
-        rank = get_tensor_model_parallel_rank()
-        rank_path = resolve_snapshot_path(rank_snapshot_path(base_path, rank))
-        model = worker.model_runner.model
-
-        try:
-            stats = restore_model_from_ram(model, rank_path, chunk_size_mb)
-        except Exception as e_ram:
-            fallback_warning(f"_worker_restore(rank={rank}).restore_model_from_ram", e_ram,
-                             dst="restore_model_pipelined")
-            if strict_mode():
-                raise
-            try:
-                stats = restore_model_pipelined(model, rank_path, chunk_size_mb)
-            except Exception as e_pipe:
-                fallback_warning(f"_worker_restore(rank={rank}).restore_model_pipelined", e_pipe,
-                                 dst="restore_model (pure python)")
-                if strict_mode():
-                    raise
-                stats = restore_model(model, rank_path)
-
-        stats['rank'] = rank
-        stats['path'] = rank_path
-        return stats
-
-    results = ec.model_executor.collective_rpc(
+    results = llm.collective_rpc(
         _worker_restore,
         args=(base_path, chunk_size_mb),
     )
