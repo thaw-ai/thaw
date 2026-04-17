@@ -34,6 +34,8 @@ from sglang.srt.configs.load_config import LoadConfig
 from sglang.srt.model_loader.loader import BaseModelLoader, get_model_loader
 
 from thaw_common.util import rank_snapshot_path
+from thaw_common.cloud import resolve_snapshot_path, upload_snapshot, is_remote
+from thaw_common.telemetry import fallback_warning, strict_mode
 from thaw_common.snapshot import (
     freeze_model,
     freeze_model_pipelined,
@@ -120,9 +122,13 @@ class ThawSGLangModelLoader(BaseModelLoader):
                 setattr(parent, model_parts[-1], buf.to(device='cuda'))
 
         # Step 2: Determine per-rank snapshot path for TP.
+        # Remote URIs (s3://...) are resolved after per-rank name computation,
+        # so s3://bucket/weights.thaw + TP=2 → s3://bucket/weights.rank1.thaw
+        # for rank 1, downloaded to local cache on each worker.
         tp_rank = _get_tp_rank()
         tp_size = _get_tp_size()
         snapshot_path = rank_snapshot_path(self.snapshot_path, tp_rank)
+        snapshot_path = resolve_snapshot_path(snapshot_path)
 
         if tp_size > 1 and not os.path.exists(snapshot_path):
             raise FileNotFoundError(
@@ -134,12 +140,21 @@ class ThawSGLangModelLoader(BaseModelLoader):
 
         # Step 3: Restore weights from snapshot via DMA.
         # Try RAM path first (fastest), fall back through strategies.
+        # All fallbacks are logged; THAW_STRICT=1 re-raises instead.
         try:
             stats = restore_model_from_ram(model, snapshot_path)
-        except Exception:
+        except Exception as e_ram:
+            fallback_warning("ThawSGLangModelLoader.restore_model_from_ram", e_ram,
+                             dst="restore_model_pipelined")
+            if strict_mode():
+                raise
             try:
                 stats = restore_model_pipelined(model, snapshot_path)
-            except Exception:
+            except Exception as e_pipe:
+                fallback_warning("ThawSGLangModelLoader.restore_model_pipelined", e_pipe,
+                                 dst="restore_model (pure python)")
+                if strict_mode():
+                    raise
                 stats = restore_model(model, snapshot_path)
 
         size_gb = stats['total_bytes'] / 1e9
@@ -186,14 +201,33 @@ class ThawSGLangFreezeLoader(BaseModelLoader):
         )
 
         # Step 2: Freeze weights to .thaw snapshot.
+        # For remote URIs (s3://...) we freeze to a local temp file first,
+        # then upload. Freeze is the slow path (~1.6 GB/s), so layering the
+        # upload on top is fine for MVP.
         tp_rank = _get_tp_rank()
         tp_size = _get_tp_size()
-        snapshot_path = rank_snapshot_path(self.snapshot_path, tp_rank)
+        target_uri = rank_snapshot_path(self.snapshot_path, tp_rank)
+
+        if is_remote(target_uri):
+            import tempfile
+            local_fd, local_path = tempfile.mkstemp(suffix=".thaw")
+            os.close(local_fd)
+        else:
+            local_path = target_uri
 
         try:
-            stats = freeze_model_pipelined(model, snapshot_path)
-        except Exception:
-            stats = freeze_model(model, snapshot_path)
+            stats = freeze_model_pipelined(model, local_path)
+        except Exception as e:
+            fallback_warning("ThawSGLangFreezeLoader.freeze_model_pipelined", e,
+                             dst="freeze_model (pure python)")
+            if strict_mode():
+                raise
+            stats = freeze_model(model, local_path)
+
+        if is_remote(target_uri):
+            print(f"[thaw] Uploading {local_path} -> {target_uri}")
+            upload_snapshot(local_path, target_uri)
+            os.unlink(local_path)
 
         size_gb = stats['total_bytes'] / 1e9
         rank_info = f" (rank {tp_rank}/{tp_size})" if tp_size > 1 else ""

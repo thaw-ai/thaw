@@ -32,6 +32,12 @@ from thaw_common.format import (
     read_header,
     read_region_entry,
 )
+from thaw_common.telemetry import (
+    fallback_warning,
+    strict_mode,
+    check_pinned,
+    logger as _log,
+)
 
 
 def freeze_model(
@@ -78,6 +84,7 @@ def freeze_model(
     t0 = time.perf_counter()
 
     flat_pinned = torch.empty(total_bytes, dtype=torch.uint8, pin_memory=True)
+    check_pinned(flat_pinned, "freeze_model flat staging buffer")
 
     offset = 0
     for _, p in params:
@@ -148,6 +155,7 @@ def restore_model(
             total_bytes += size
 
         flat_pinned = torch.empty(total_bytes, dtype=torch.uint8, pin_memory=True)
+        check_pinned(flat_pinned, "restore_model flat staging buffer")
 
         payload_start = entries[0][3] if entries else 0
         f.seek(payload_start)
@@ -197,7 +205,11 @@ def freeze_model_pipelined(
         import thaw as _thaw
         if not hasattr(_thaw, 'freeze_to_file_pipelined'):
             raise ImportError("freeze_to_file_pipelined not found")
-    except ImportError:
+    except ImportError as e:
+        fallback_warning("freeze_model_pipelined (rust ext not loaded)", e,
+                         dst="freeze_model (pure python)")
+        if strict_mode():
+            raise
         return freeze_model(model, path, engine_commit)
 
     params = []
@@ -253,8 +265,11 @@ def restore_model_from_ram(
         import thaw as _thaw
         if hasattr(_thaw, 'restore_from_bytes_pipelined'):
             use_rust = True
-    except ImportError:
-        pass
+    except ImportError as e:
+        fallback_warning("restore_model_from_ram (rust ext not loaded)", e,
+                         dst="python region-by-region copy")
+        if strict_mode():
+            raise
 
     if use_rust:
         mapping = [
@@ -275,10 +290,17 @@ def restore_model_from_ram(
             try:
                 libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
                 buf = (ctypes.c_char * file_size).from_buffer(mm)
-                libc.madvise(ctypes.addressof(buf), file_size, MADV_HUGEPAGE)
+                if libc.madvise(ctypes.addressof(buf), file_size, MADV_HUGEPAGE) != 0:
+                    _log.warning(
+                        "madvise(MADV_HUGEPAGE) failed (errno=%d). TLB hit rate "
+                        "will be lower for large mmaps — check kernel "
+                        "transparent_hugepage setting and container privileges.",
+                        ctypes.get_errno(),
+                    )
                 del buf
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning("madvise setup failed (%s: %s) — continuing without hugepage hint",
+                             type(e).__name__, e)
         else:
             mm = mmap.mmap(fd, file_size, access=mmap.ACCESS_READ)
         os.close(fd)
@@ -324,6 +346,7 @@ def restore_model_from_ram(
             for i, (name, param) in enumerate(params):
                 nbytes = param.data.nbytes
                 pinned = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+                check_pinned(pinned, f"restore_model_from_ram region {i} ({name})")
                 np_buf = pinned.numpy()
                 bytes_read = f.readinto(np_buf)
                 if bytes_read != nbytes:
@@ -366,7 +389,11 @@ def restore_model_pipelined(
         import thaw as _thaw
         if not hasattr(_thaw, 'restore_from_file_pipelined'):
             raise ImportError("restore_from_file_pipelined not found")
-    except ImportError:
+    except ImportError as e:
+        fallback_warning("restore_model_pipelined (rust ext not loaded)", e,
+                         dst="restore_model (pure python)")
+        if strict_mode():
+            raise
         return restore_model(model, path)
 
     params = []

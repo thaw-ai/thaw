@@ -23,6 +23,16 @@ from thaw_common.snapshot import (
     restore_model_from_ram,
 )
 from thaw_common.util import rank_snapshot_path
+from thaw_common.cloud import (
+    is_remote,
+    resolve_snapshot_path,
+    upload_snapshot,
+)
+from thaw_common.telemetry import (
+    fallback_warning,
+    strict_mode,
+    check_pinned,
+)
 
 __all__ = [
     "MAGIC",
@@ -38,4 +48,7 @@ __all__ = [
     "restore_model_pipelined",
     "restore_model_from_ram",
     "rank_snapshot_path",
+    "is_remote",
+    "resolve_snapshot_path",
+    "upload_snapshot",
 ]

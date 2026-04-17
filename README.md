@@ -22,18 +22,24 @@ vLLM cold-starts Llama-3-70B on 2x A100 in 546 seconds. thaw restores it in **31
 
 | Method | Time | Throughput | Speedup |
 |--------|------|-----------|---------|
-| Normal vLLM cold start | 20.7s | — | 1x |
-| **thaw (NVMe)** | **3.7s** | 8.26 GB/s | **5.6x** |
-| **thaw (RAM hot path)** | **3.5s** | 10.69 GB/s | **5.9x** |
+| Normal vLLM cold start | 25.0s | — | 1x |
+| **thaw (cold-cache NVMe)** | **2.7s** | 13.0 GB/s | **9.2x** |
+| thaw (pre-staged RAM) | 3.5s | 10.69 GB/s | 5.9x<sup>†</sup> |
+
+> Cold-cache measurement verified with `vmtouch -e` (0% resident pages before restore, checked via `mincore`). fio parallel read on the same file confirms the NVMe ceiling at 11.9 GB/s — thaw's Rust reader saturates it. Reproducible: 9.1× / 9.2× / 9.4× across 3 back-to-back runs. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology.
+>
+> <sup>†</sup> The 5.9× pre-staged RAM row is from an earlier H100 SXM pod. On the 2026-04-17 verification pod the pre-staged path regressed to ~2 GB/s due to an `madvise(MADV_HUGEPAGE)` failure (container/kernel mismatch); cold-cache NVMe is unaffected. Tracking.
 
 **Agent fork — clone a running AI session (Llama-3-8B-Instruct, H100 SXM):**
 
 | Operation | Time | Notes |
 |-----------|------|-------|
-| Weight restore (Rust pipelined) | **1.1s** | **14.79 GB/s** — PCIe Gen5-saturating |
-| KV cache restore | **0.135s** | 65 blocks, 136 MB |
+| Weight restore (warm-cache, post-freeze) | 1.1s | 14.79 GB/s — file was in page cache, see note below |
+| **KV cache restore** | **0.135s** | 65 blocks, 136 MB — prefill eliminated |
 | Total restore (incl. vLLM init) | **7.3s** | vs 16s normal cold start |
 | Fork 3 parallel completions | **1.6s avg** | All share 872-token cached prefix |
+
+> The 14.79 GB/s weight restore here is a warm-cache measurement (the freeze that ran 5s earlier left the 16 GB file in Linux's page cache). The agent-fork *flow* is still the differentiator — no other tool restores KV cache at all. The KV restore number, the fork completion numbers, and the "skip prefill" claim all stand on their own regardless of where the weights came from.
 
 All paths produce **bit-identical** inference output. KV cache restore preserves prefix cache across cold starts — new requests skip prefill entirely.
 
@@ -43,7 +49,7 @@ All paths produce **bit-identical** inference output. KV cache restore preserves
 | GPU | Model | Normal | thaw | Speedup |
 |-----|-------|--------|------|---------|
 | 2x A100 SXM 80GB | Llama-3-70B (TP=2) | 546.5s | 31.8s | **17.2x** |
-| H100 SXM 80GB | Llama-3-8B | 20.7s | 3.5s | **5.9x** |
+| H100 SXM 80GB | Llama-3-8B | 25.0s | 2.7s | **9.2x** |
 | RTX PRO 6000 (Blackwell) | Llama-3-8B | 28.6s | 3.2s | **8.9x** |
 | RTX A6000 | Llama-3-8B | 73.2s | 5.8s | **12.6x** |
 
@@ -56,11 +62,11 @@ Larger models show bigger speedups because weight loading dominates more of the 
 ```
 Normal vLLM cold start:
   Download weights → deserialize safetensors → copy to GPU → init KV cache → ready
-  [==================================] 20.7s
+  [======================================] 25.0s
 
-thaw restore:
-  Dummy init → DMA snapshot to GPU (pipelined, pinned memory, O_DIRECT)
-  [=====] 3.5s
+thaw restore (cold-cache NVMe):
+  Dummy init → parallel NVMe read → pipelined DMA to GPU
+  [====] 2.7s
 ```
 
 **Freeze** captures all GPU state into binary snapshots — model weights (`.thaw`) and KV cache blocks (`.thawkv`).
@@ -68,8 +74,8 @@ thaw restore:
 **Restore** initializes vLLM with dummy weights (fast — no disk I/O), then overwrites them from the snapshot using double-buffered pipelined DMA through pinned host memory. Two CUDA streams overlap PCIe transfers with disk reads. KV cache blocks are restored separately with their prefix cache hash mappings, so new requests immediately get cache hits.
 
 Two restore modes:
-- **Disk**: reads snapshot from NVMe with O_DIRECT, bypassing the kernel page cache. Throughput limited by NVMe bandwidth.
-- **RAM hot path**: snapshot pre-loaded in memory (tmpfs, shared memory, mmap). Pure PCIe DMA — 10.69 GB/s on H100. For production use where snapshots are pre-staged.
+- **Disk**: reads snapshot from NVMe with O_DIRECT, bypassing the kernel page cache. Throughput limited by NVMe bandwidth (5–7 GB/s on typical container overlay storage, more on local PCIe Gen5 SSDs).
+- **Pre-staged RAM**: snapshot already in memory (tmpfs, shared memory, or mmapped with page cache warm). Pure PCIe DMA — 10.69 GB/s on H100. This is what `thaw serve` uses to hit sub-second hot swaps.
 
 **KV cache snapshots** capture the prefix-cached blocks that vLLM retains after generation. On restore, block data is DMA'd back to GPU and the prefix cache hash table is reconstructed. Requests with matching prefixes skip prefill — the most expensive part of inference.
 
@@ -163,7 +169,7 @@ from vllm import LLM, SamplingParams
 llm = LLM(model="meta-llama/Meta-Llama-3-8B", dtype="float16", enforce_eager=True)
 thaw_vllm.freeze_model_pipelined(model, "/path/to/weights.thaw")
 
-# Restore: two lines, 5.9x faster cold start
+# Restore: two lines, 9.2x faster cold start
 llm = thaw_vllm.load("meta-llama/Meta-Llama-3-8B", "/path/to/weights.thaw")
 ```
 
@@ -188,6 +194,32 @@ thaw_vllm.freeze_model_tp(llm, "/path/to/weights.thaw")
 llm = thaw_vllm.load("meta-llama/Meta-Llama-3-70B-Instruct", "/path/to/weights.thaw",
                       tensor_parallel_size=2)
 ```
+
+**Cloud storage (S3)** — load snapshots directly from S3 URIs (install with `pip install thaw-vllm[cloud]`):
+
+```python
+# Freeze once, upload to S3, restore anywhere
+llm = thaw_vllm.load("meta-llama/Meta-Llama-3-8B",
+                     "s3://my-bucket/llama-3-8b.thaw")
+```
+
+First call downloads to `~/.cache/thaw/snapshots/` (override with `THAW_CACHE_DIR`); subsequent calls hit the local cache. For TP, per-rank files live at `s3://bucket/weights.thaw` and `s3://bucket/weights.rank1.thaw` — thaw derives the per-rank URIs automatically. AWS credentials come from the standard boto3 chain (env vars, `~/.aws/credentials`, IAM role).
+
+**SGLang** — same API, class-passthrough loader (install with `pip install thaw-vllm[sglang]`):
+
+```python
+import sglang
+from thaw_sglang import ThawSGLangModelLoader
+
+engine = sglang.Engine(
+    model_path="meta-llama/Meta-Llama-3-8B",
+    load_format=ThawSGLangModelLoader,
+    model_loader_extra_config={"snapshot": "/path/to/weights.thaw"},
+    dtype="float16",
+)
+```
+
+TP works automatically — each SGLang worker loads its own rank-specific snapshot. Freeze via `thaw freeze --engine sglang ...` or `ThawSGLangFreezeLoader`. Note: vLLM and SGLang cannot coexist in one env (torch version conflict) — use separate pods.
 
 **Agent fork demo** — clone a running AI session, fork parallel completions:
 
@@ -272,7 +304,7 @@ See [docs/LANDSCAPE.md](./docs/LANDSCAPE.md) for detailed analysis.
 - [x] **Multi-GPU / tensor parallel** — 17.2x speedup on Llama-3-70B with 2x A100 (TP=2), bit-exact correctness verified
 - [x] **Engine pool (`thaw serve`)** — pre-warmed vLLM engines with hot model swapping, OpenAI-compatible API, multi-model serving
 - [x] **Pre-built native wheels** — `pip install thaw-vllm[all]`, no Rust toolchain needed
-- [ ] SGLang integration
+- [x] **SGLang integration** — class-passthrough loader, freeze + restore, validated on H100 TP=2 (5.0 GB/s)
 - [ ] Cloud snapshot storage (S3/GCS)
 - [ ] GPUDirect Storage support
 

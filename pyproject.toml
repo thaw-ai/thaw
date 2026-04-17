@@ -29,7 +29,8 @@ native = ["thaw-native>=0.1.1"]
 vllm = ["vllm>=0.18"]
 sglang = ["sglang>=0.4"]
 serve = ["vllm>=0.18", "fastapi", "uvicorn"]
-all = ["vllm>=0.18", "fastapi", "uvicorn", "thaw-native>=0.1.1"]
+cloud = ["boto3>=1.26"]
+all = ["vllm>=0.18", "fastapi", "uvicorn", "thaw-native>=0.1.1", "boto3>=1.26"]
 
 [project.scripts]
 thaw = "thaw_vllm.cli:main"
