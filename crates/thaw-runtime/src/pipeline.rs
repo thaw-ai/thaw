@@ -787,6 +787,177 @@ where
 }
 
 // =============================================================================
+// ZERO-COPY PIPELINED RESTORE — DMA DIRECTLY FROM REGISTERED HOST MEMORY
+// =============================================================================
+//
+// Identical shape to `restore_pipelined_from_bytes`, but skips the
+// memcpy-into-pinned-buffer hop by `cudaHostRegister`-ing the input
+// byte range once up front. After registration, each region's bytes
+// can be DMA'd directly from the mapped pages via the raw async
+// memcpy path — no intermediate staging buffer, no double-buffering.
+//
+// This is the fix for the pre-staged-RAM path. The previous
+// `restore_pipelined_from_bytes` was bottlenecked by
+// `buf.as_mut_slice().copy_from_slice(&data[..])` at ~7 GB/s per core.
+// Registering an mmap of the snapshot lets us fire async DMAs on two
+// streams from the mapped pages directly; wall-clock converges on the
+// PCIe Gen5 x16 ceiling (~25 GB/s on the H100 SXM pod).
+//
+// The fallback is still available via `restore_pipelined_from_bytes`
+// for hosts where `cudaHostRegister` fails (low `ulimit -l`, sealed
+// mmap, etc.); the Python wrapper tries this path first and only
+// falls back on error.
+
+/// Zero-copy pipelined restore from a registered host byte range.
+///
+/// Calls `backend.host_register` on the full input range once, then
+/// issues `memcpy_h2d_async_raw` for each region slice directly from
+/// the registered pointer. Returns when all copies have completed on
+/// both streams.
+///
+/// No double-buffering: the registered range IS the DMA source, so
+/// there is nothing to fill. Two streams are still used so the driver
+/// can overlap the per-region DMAs across the GPU's two copy engines.
+///
+/// # Safety / Requirements
+///
+/// - `data` must come from a stable allocation that lives for the
+///   duration of this call. Typical source: a Python mmap passed
+///   through PyO3 with the GIL held.
+/// - For real CUDA, `data.as_ptr()` must be page-aligned (mmap
+///   always is).
+/// - The registration can fail if the system's `ulimit -l` is too
+///   low for `data.len()` bytes; callers handle this by catching
+///   `RestoreError::Backend { .. BackendError::Cuda { .. } }` and
+///   falling back to `restore_pipelined_from_bytes`.
+pub fn restore_pipelined_from_registered_bytes<B, F>(
+    backend: &B,
+    data: &[u8],
+    mut resolve: F,
+    _config: &PipelineConfig,
+) -> Result<RestoreStats, RestoreError>
+where
+    B: PipelinedBackend,
+    F: FnMut(RegionKind, u32) -> Option<DeviceRegion>,
+{
+    // -- Phase 1: Parse header and build copy plan ------------------
+
+    if data.len() < HEADER_SIZE as usize {
+        return Err(RestoreError::Snapshot(thaw_core::SnapshotError::Io {
+            kind: std::io::ErrorKind::UnexpectedEof,
+            message: format!("data too short for header: {} bytes", data.len()),
+        }));
+    }
+
+    let snapshot = Snapshot::from_prelude_bytes(data).map_err(RestoreError::Snapshot)?;
+
+    let mut plan: Vec<CopyEntry> = Vec::with_capacity(snapshot.len());
+    let mut total_bytes: u64 = 0;
+
+    for i in 0..snapshot.len() {
+        let entry = snapshot.table().get(i).ok_or(RestoreError::Snapshot(
+            thaw_core::SnapshotError::TruncatedTable { got: 0, need: 0 },
+        ))?;
+
+        let kind = entry.kind();
+        let logical_id = entry.logical_id();
+        let size = entry.size();
+        let file_offset = entry.file_offset();
+
+        let device_region = resolve(kind, logical_id)
+            .ok_or(RestoreError::UnmappedRegion { kind, logical_id })?;
+
+        if device_region.size != size {
+            return Err(RestoreError::DeviceSizeMismatch {
+                kind,
+                logical_id,
+                file_size: size,
+                device_size: device_region.size,
+            });
+        }
+
+        total_bytes += size;
+        plan.push(CopyEntry {
+            file_offset,
+            size,
+            device_region,
+        });
+    }
+
+    if plan.is_empty() {
+        return Ok(RestoreStats::default());
+    }
+
+    // -- Phase 2: Register the input range, then fire async DMAs ----
+    //
+    // Registering the entire slice rather than one region at a time
+    // avoids per-region ioctl overhead — a single pin covers all the
+    // offsets the copy loop will read from. The RAII guard unpins on
+    // the way out regardless of which arm we take below.
+    //
+    // SAFETY: `data` is a `&[u8]` borrowed for the duration of this
+    // function, so the pointer is valid for exactly `data.len()`
+    // bytes. The guard's Drop runs before this function returns, so
+    // the registration does not outlive the borrow.
+    let _registration = unsafe {
+        backend
+            .host_register(data.as_ptr() as *mut u8, data.len())
+            .map_err(RestoreError::Backend)?
+    };
+
+    let streams = [
+        backend.stream_create().map_err(RestoreError::Backend)?,
+        backend.stream_create().map_err(RestoreError::Backend)?,
+    ];
+
+    // Round-robin regions across streams so the GPU's two copy
+    // engines can run concurrently. Each DMA is directly from the
+    // registered mmap pages — no staging copy.
+    for (i, entry) in plan.iter().enumerate() {
+        let src_ptr = unsafe { data.as_ptr().add(entry.file_offset as usize) };
+        let stream = &streams[i % 2];
+
+        // SAFETY: `src_ptr` points into `data`, which remains valid
+        // until we return (borrow holds it alive). The registration
+        // guard above has pinned it for DMA. The stream handle came
+        // from `stream_create` a few lines up. We sync both streams
+        // below before the guard drops, so the DMA completes before
+        // the pages are unpinned.
+        unsafe {
+            backend
+                .memcpy_h2d_async_raw(
+                    &entry.device_region,
+                    src_ptr,
+                    entry.size as usize,
+                    stream,
+                )
+                .map_err(RestoreError::Backend)?;
+        }
+    }
+
+    backend
+        .stream_sync(&streams[0])
+        .map_err(RestoreError::Backend)?;
+    backend
+        .stream_sync(&streams[1])
+        .map_err(RestoreError::Backend)?;
+
+    backend
+        .stream_destroy(streams[0])
+        .map_err(RestoreError::Backend)?;
+    backend
+        .stream_destroy(streams[1])
+        .map_err(RestoreError::Backend)?;
+
+    // _registration drops here, unpinning the mmap pages.
+
+    Ok(RestoreStats {
+        regions_restored: plan.len(),
+        bytes_copied: total_bytes,
+    })
+}
+
+// =============================================================================
 // TESTS
 // =============================================================================
 
@@ -1324,6 +1495,89 @@ mod tests {
             &file_bytes,
             |_, _| panic!("should not be called"),
             &config,
+        )
+        .expect("restore");
+
+        assert_eq!(stats.regions_restored, 0);
+        assert_eq!(stats.bytes_copied, 0);
+    }
+
+    /// Zero-copy round-trip: freeze to bytes, restore via the
+    /// host-registered pipeline. The mock's `host_register` is a
+    /// no-op and `memcpy_h2d_async_raw` snapshots the source bytes
+    /// just like the pinned-buffer variant, so a correct
+    /// orchestration against the trait must byte-exactly restore
+    /// the frozen regions.
+    #[test]
+    fn from_registered_bytes_round_trips() {
+        let src = MockCuda::new();
+        let w_ptr = DevicePtr(0x1000);
+        let m_ptr = DevicePtr(0x2000);
+        let weights: Vec<u8> = (0..512).map(|i| ((i * 3) & 0xFF) as u8).collect();
+        let metadata: Vec<u8> = (0..64).map(|i| (0xF0 ^ i) as u8).collect();
+        src.register_region(w_ptr, weights.clone());
+        src.register_region(m_ptr, metadata.clone());
+
+        let requests = vec![
+            FreezeRequest::new(
+                RegionKind::Weights,
+                0,
+                DeviceRegion::new(w_ptr, weights.len() as u64),
+            ),
+            FreezeRequest::new(
+                RegionKind::Metadata,
+                0,
+                DeviceRegion::new(m_ptr, metadata.len() as u64),
+            ),
+        ];
+        let data = freeze_to_bytes(&src, &requests);
+
+        let dst = MockCuda::new();
+        let w_ptr2 = DevicePtr(0xA000);
+        let m_ptr2 = DevicePtr(0xB000);
+        dst.register_region(w_ptr2, vec![0u8; weights.len()]);
+        dst.register_region(m_ptr2, vec![0u8; metadata.len()]);
+
+        let config = PipelineConfig::default();
+        let stats = restore_pipelined_from_registered_bytes(
+            &dst,
+            &data,
+            |kind, _| match kind {
+                RegionKind::Weights => {
+                    Some(DeviceRegion::new(w_ptr2, weights.len() as u64))
+                }
+                RegionKind::Metadata => {
+                    Some(DeviceRegion::new(m_ptr2, metadata.len() as u64))
+                }
+                _ => None,
+            },
+            &config,
+        )
+        .expect("restore");
+
+        assert_eq!(stats.regions_restored, 2);
+        assert_eq!(
+            stats.bytes_copied,
+            (weights.len() + metadata.len()) as u64
+        );
+        assert_eq!(dst.read_region(w_ptr2).unwrap(), weights);
+        assert_eq!(dst.read_region(m_ptr2).unwrap(), metadata);
+    }
+
+    /// Empty input is a no-op on the zero-copy path too. Verifies
+    /// that `host_register(.., 0)` and the empty-plan short-circuit
+    /// do not attempt any FFI work.
+    #[test]
+    fn from_registered_bytes_empty() {
+        let src = MockCuda::new();
+        let data = freeze_to_bytes(&src, &[]);
+
+        let dst = MockCuda::new();
+        let stats = restore_pipelined_from_registered_bytes(
+            &dst,
+            &data,
+            |_, _| panic!("should not be called"),
+            &PipelineConfig::default(),
         )
         .expect("restore");
 

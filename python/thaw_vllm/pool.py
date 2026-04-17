@@ -188,15 +188,27 @@ class EnginePool:
             from thaw_vllm.snapshot import (
                 restore_model_pipelined,
                 restore_model_from_ram,
+                restore_model,
             )
+            from thaw_common.cloud import resolve_snapshot_path
+            from thaw_common.telemetry import fallback_warning, strict_mode
+
+            local_path = resolve_snapshot_path(snapshot_path)
             try:
-                stats = restore_model_pipelined(slot.model, snapshot_path)
-            except Exception as e:
-                logger.warning(
-                    "Slot %d: pipelined restore failed (%s), falling back to RAM restore",
-                    slot.id, e,
-                )
-                stats = restore_model_from_ram(slot.model, snapshot_path)
+                stats = restore_model_from_ram(slot.model, local_path)
+            except Exception as e_ram:
+                fallback_warning(f"EnginePool.slot{slot.id}.restore_model_from_ram", e_ram,
+                                 dst="restore_model_pipelined")
+                if strict_mode():
+                    raise
+                try:
+                    stats = restore_model_pipelined(slot.model, local_path)
+                except Exception as e_pipe:
+                    fallback_warning(f"EnginePool.slot{slot.id}.restore_model_pipelined", e_pipe,
+                                     dst="restore_model (pure python)")
+                    if strict_mode():
+                        raise
+                    stats = restore_model(slot.model, local_path)
 
         elapsed = time.perf_counter() - t0
         slot.model_name = model_name

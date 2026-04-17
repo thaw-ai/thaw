@@ -74,7 +74,8 @@ use thaw_runtime::{DevicePtr, DeviceRegion};
 #[cfg(feature = "cuda")]
 use thaw_runtime::{
     freeze, freeze_pipelined, restore, restore_pipelined, restore_pipelined_from_bytes,
-    FreezeConfig, FreezeRequest, PipelineConfig, RealCuda,
+    restore_pipelined_from_registered_bytes, FreezeConfig, FreezeRequest, PipelineConfig,
+    RealCuda,
 };
 
 // =============================================================================
@@ -562,6 +563,76 @@ fn restore_from_bytes_pipelined(
     }
 }
 
+/// Zero-copy RAM-backed pipelined restore: DMA directly from the buffer.
+///
+/// Python signature:
+///
+/// ```python
+/// thaw.restore_from_bytes_pipelined_zerocopy(
+///     data: bytes | mmap | bytearray,
+///     mapping: list[tuple[str, int, int, int]],
+/// ) -> dict
+/// ```
+///
+/// Same semantics as `restore_from_bytes_pipelined`, but uses
+/// `cudaHostRegister` to pin the caller's buffer in place and
+/// `cudaMemcpyAsync` directly from the mapped pages — no intermediate
+/// staging buffer, no per-chunk memcpy. For a `/dev/shm` or file-
+/// backed mmap this is a true PCIe-saturating zero-copy restore.
+///
+/// Failure modes the caller should handle:
+///   - `RuntimeError: cudaHostRegister` — usually `ulimit -l` is too
+///     low for the snapshot size, or the buffer is not page-aligned.
+///     Fall back to `restore_from_bytes_pipelined`.
+///   - `ValueError` — malformed mapping, same as the other restore
+///     entry points.
+#[pyfunction]
+fn restore_from_bytes_pipelined_zerocopy(
+    py: Python<'_>,
+    data: pyo3::buffer::PyBuffer<u8>,
+    mapping: Vec<(String, u32, u64, u64)>,
+) -> PyResult<PyObject> {
+    // SAFETY: see `restore_from_bytes_pipelined`. Same invariants: the
+    // PyBuffer keeps the underlying allocation alive, we hold the GIL
+    // for the whole call, and for mmap this points straight at the
+    // mapped pages (page-aligned, contiguous — exactly what
+    // `cudaHostRegister` wants).
+    let data_slice = unsafe {
+        std::slice::from_raw_parts(data.buf_ptr() as *const u8, data.len_bytes())
+    };
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (py, data_slice, mapping);
+        return Err(PyErr::from(ThawPyError::CudaUnavailable));
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        let backend = RealCuda::new();
+        let lookup = build_restore_map(mapping)?;
+
+        // The zero-copy path does not chunk — `chunk_size` is
+        // unused — but we construct a default `PipelineConfig` so
+        // the function signature is symmetric with the other
+        // restore entry points.
+        let config = PipelineConfig::default();
+
+        let stats = restore_pipelined_from_registered_bytes(
+            &backend,
+            data_slice,
+            |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
+            &config,
+        )
+        .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
+
+        let dict = pyo3::types::PyDict::new_bound(py);
+        dict.set_item("regions_restored", stats.regions_restored)?;
+        dict.set_item("bytes_copied", stats.bytes_copied)?;
+        Ok(dict.into())
+    }
+}
+
 // =============================================================================
 // MODULE REGISTRATION
 // =============================================================================
@@ -580,6 +651,7 @@ fn thaw(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(restore_from_file, m)?)?;
     m.add_function(wrap_pyfunction!(restore_from_file_pipelined, m)?)?;
     m.add_function(wrap_pyfunction!(restore_from_bytes_pipelined, m)?)?;
+    m.add_function(wrap_pyfunction!(restore_from_bytes_pipelined_zerocopy, m)?)?;
     Ok(())
 }
 

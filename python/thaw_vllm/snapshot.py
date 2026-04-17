@@ -74,28 +74,69 @@ def freeze_model_tp(
     tp_size = ec.vllm_config.parallel_config.tensor_parallel_size
 
     if tp_size == 1:
+        from thaw_common.cloud import is_remote, upload_snapshot
+        from thaw_common.telemetry import fallback_warning, strict_mode
         model = ec.model_executor.driver_worker.model_runner.model
+
+        if is_remote(base_path):
+            import tempfile
+            fd, local_path = tempfile.mkstemp(suffix=".thaw")
+            os.close(fd)
+        else:
+            local_path = base_path
+
         try:
-            return freeze_model_pipelined(model, base_path, vllm_commit)
-        except Exception:
-            return freeze_model(model, base_path, vllm_commit)
+            stats = freeze_model_pipelined(model, local_path, vllm_commit)
+        except Exception as e:
+            fallback_warning("freeze_model_tp(TP=1).freeze_model_pipelined", e,
+                             dst="freeze_model (pure python)")
+            if strict_mode():
+                raise
+            stats = freeze_model(model, local_path, vllm_commit)
+
+        if is_remote(base_path):
+            upload_snapshot(local_path, base_path)
+            os.unlink(local_path)
+
+        return stats
 
     def _worker_freeze(worker, base_path, vllm_commit):
         """Runs inside each worker process."""
+        import os
+        import tempfile
         from vllm.distributed import get_tensor_model_parallel_rank
         from thaw_common.snapshot import freeze_model_pipelined, freeze_model
         from thaw_common.util import rank_snapshot_path
+        from thaw_common.cloud import is_remote, upload_snapshot
+        from thaw_common.telemetry import fallback_warning, strict_mode
 
         rank = get_tensor_model_parallel_rank()
-        rank_path = rank_snapshot_path(base_path, rank)
+        target_uri = rank_snapshot_path(base_path, rank)
         model = worker.model_runner.model
 
+        # For S3 targets, freeze locally then upload. Freeze is slow
+        # (~1.6 GB/s) so sequential upload is fine for MVP.
+        if is_remote(target_uri):
+            fd, local_path = tempfile.mkstemp(suffix=".thaw")
+            os.close(fd)
+        else:
+            local_path = target_uri
+
         try:
-            stats = freeze_model_pipelined(model, rank_path, vllm_commit)
-        except Exception:
-            stats = freeze_model(model, rank_path, vllm_commit)
+            stats = freeze_model_pipelined(model, local_path, vllm_commit)
+        except Exception as e:
+            fallback_warning(f"_worker_freeze(rank={rank}).freeze_model_pipelined", e,
+                             dst="freeze_model (pure python)")
+            if strict_mode():
+                raise
+            stats = freeze_model(model, local_path, vllm_commit)
+
+        if is_remote(target_uri):
+            upload_snapshot(local_path, target_uri)
+            os.unlink(local_path)
+
         stats['rank'] = rank
-        stats['path'] = rank_path
+        stats['path'] = target_uri
         return stats
 
     results = ec.model_executor.collective_rpc(
@@ -135,8 +176,9 @@ def restore_model_tp(
     tp_size = ec.vllm_config.parallel_config.tensor_parallel_size
 
     if tp_size == 1:
+        from thaw_common.cloud import resolve_snapshot_path
         model = ec.model_executor.driver_worker.model_runner.model
-        return restore_model_from_ram(model, base_path, chunk_size_mb)
+        return restore_model_from_ram(model, resolve_snapshot_path(base_path), chunk_size_mb)
 
     def _worker_restore(worker, base_path, chunk_size_mb):
         """Runs inside each worker process."""
@@ -147,17 +189,27 @@ def restore_model_tp(
             restore_model,
         )
         from thaw_common.util import rank_snapshot_path
+        from thaw_common.cloud import resolve_snapshot_path
+        from thaw_common.telemetry import fallback_warning, strict_mode
 
         rank = get_tensor_model_parallel_rank()
-        rank_path = rank_snapshot_path(base_path, rank)
+        rank_path = resolve_snapshot_path(rank_snapshot_path(base_path, rank))
         model = worker.model_runner.model
 
         try:
             stats = restore_model_from_ram(model, rank_path, chunk_size_mb)
-        except Exception:
+        except Exception as e_ram:
+            fallback_warning(f"_worker_restore(rank={rank}).restore_model_from_ram", e_ram,
+                             dst="restore_model_pipelined")
+            if strict_mode():
+                raise
             try:
                 stats = restore_model_pipelined(model, rank_path, chunk_size_mb)
-            except Exception:
+            except Exception as e_pipe:
+                fallback_warning(f"_worker_restore(rank={rank}).restore_model_pipelined", e_pipe,
+                                 dst="restore_model (pure python)")
+                if strict_mode():
+                    raise
                 stats = restore_model(model, rank_path)
 
         stats['rank'] = rank
