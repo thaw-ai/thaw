@@ -1,6 +1,6 @@
 # thaw — Project State & Roadmap
 
-*Updated 2026-04-17. This file is for Claude Code sessions — start here before suggesting work.*
+*Updated 2026-04-17 (post-issue-#5). This file is for Claude Code sessions — start here before suggesting work.*
 
 ## What thaw is
 
@@ -46,6 +46,7 @@ python/
 7. **OpenAI-compatible server** — streaming chat completions on top of EnginePool
 8. **Pre-built wheels** on PyPI (`pip install thaw-vllm`)
 9. **Stress-tested** — 8/8 models across 5 architectures, bit-identical on 2× H100 SXM
+10. **V1 MP default support** — weights freeze/restore/load/pool/TP all work under vLLM's default multiprocessing mode. No more `VLLM_ENABLE_V1_MULTIPROCESSING=0` env-var hack for users (validated 2×A40 2026-04-17). Only KV cache path still needs V1 MP=0 — that's auto-set internally when `--kv-output`/`kv_snapshot` is used.
 
 ## What's NOT built (the gaps)
 
@@ -93,6 +94,9 @@ Open-source library (shipped) → `thaw serve` daemon (shipped) → **thaw Cloud
 - **SGLang TP=2 requires H100 or L40S** — A40 hits SGLang's piecewise CUDA graph bug during warmup. Not a thaw issue; don't chase it.
 - **Gated HF models need `huggingface-cli login`** on every fresh pod before `thaw freeze/serve`.
 - **Public repo = release quality only.** Never push to `thaw-ai/thaw` main without GPU validation. Use `sync-public.sh` with a branch.
+- **`VLLM_ALLOW_INSECURE_SERIALIZATION=1` is set automatically** by `thaw_vllm` on import. vLLM 0.19+ defaults to msgspec for EngineCore IPC, which rejects function objects; `collective_rpc(fn, ...)` needs cloudpickle fallback. Setdefault means users can override.
+- **KV cache path still requires V1 MP=0** — scheduler state only reachable in V1-inproc/V0. `cmd_freeze` (with `--kv-output`) and `load()` (with `kv_snapshot`) set this internally. Weights-only paths run under V1 MP default.
+- **Building `thaw-native` with `--features cuda` on a pod**: must pass `--auditwheel skip` to maturin. auditwheel-repair can't resolve torch's hash-suffixed `libcudart-<hash>.so.12` and will abort the build.
 
 ## Team
 

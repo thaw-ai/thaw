@@ -23,6 +23,12 @@ sys.modules.setdefault("vllm.model_executor", MagicMock())
 sys.modules.setdefault("vllm.model_executor.model_loader", MagicMock())
 sys.modules.setdefault("vllm.model_executor.model_loader.base_loader", MagicMock())
 
+# vllm.distributed — TP rank helpers the pool worker calls inside collective_rpc
+mock_vllm_distributed = MagicMock()
+mock_vllm_distributed.get_tensor_model_parallel_rank = MagicMock(return_value=0)
+mock_vllm_distributed.get_tensor_model_parallel_world_size = MagicMock(return_value=1)
+sys.modules.setdefault("vllm.distributed", mock_vllm_distributed)
+
 # Mock sglang
 mock_sglang = MagicMock()
 sys.modules.setdefault("sglang", mock_sglang)
