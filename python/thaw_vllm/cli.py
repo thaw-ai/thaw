@@ -115,7 +115,13 @@ def cmd_serve(args):
     )
     logger = logging.getLogger("thaw.pool")
 
-    if not os.path.exists(args.snapshot):
+    from thaw_common.cloud import is_remote, resolve_snapshot_path
+
+    # Local: verify the file exists before spinning up the pool so we
+    # fail fast on typos. Remote URIs are verified lazily at load time —
+    # S3 reachability errors surface with typed boto3 exceptions via
+    # thaw_common.cloud.
+    if not is_remote(args.snapshot) and not os.path.exists(args.snapshot):
         print(f"[thaw] Error: snapshot not found: {args.snapshot}", file=sys.stderr)
         sys.exit(1)
 
@@ -157,14 +163,21 @@ def cmd_serve(args):
     print(f"[thaw] Pre-loading '{model_name}' from {args.snapshot}...")
     pool.preload(model_name, slot_id=0)
 
-    # Step 3: Restore KV cache if provided
-    if args.kv_snapshot and os.path.exists(args.kv_snapshot):
-        from thaw_vllm.kv_snapshot import restore_kv_cache
-        print(f"[thaw] Restoring KV cache from {args.kv_snapshot}...")
-        t0 = time.perf_counter()
-        kv_stats = restore_kv_cache(pool.slots[0].llm, args.kv_snapshot)
-        print(f"[thaw] KV cache: {kv_stats['num_blocks']} blocks in "
-              f"{time.perf_counter() - t0:.3f}s")
+    # Step 3: Restore KV cache if provided. Resolve remote URIs first so
+    # s3://bucket/kv.thawkv works; a silent skip would hide a typo or a
+    # missing S3 object from the operator.
+    if args.kv_snapshot:
+        kv_path = resolve_snapshot_path(args.kv_snapshot)
+        if os.path.exists(kv_path):
+            from thaw_vllm.kv_snapshot import restore_kv_cache
+            print(f"[thaw] Restoring KV cache from {args.kv_snapshot}...")
+            t0 = time.perf_counter()
+            kv_stats = restore_kv_cache(pool.slots[0].llm, kv_path)
+            print(f"[thaw] KV cache: {kv_stats['num_blocks']} blocks in "
+                  f"{time.perf_counter() - t0:.3f}s")
+        else:
+            print(f"[thaw] Warning: KV snapshot not found: {args.kv_snapshot} "
+                  f"(skipping KV restore)", file=sys.stderr)
 
     total_time = time.perf_counter() - total_t0
     print(f"[thaw] Ready in {total_time:.1f}s "
