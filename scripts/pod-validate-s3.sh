@@ -20,9 +20,11 @@
 # Usage (pod template: vllm-latest → vllm/vllm-openai:latest):
 #   export GH_PAT=... AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 #   export AWS_DEFAULT_REGION=us-east-2 THAW_BUCKET=thaw-test-nils-2026
-#   curl -sL -H "Authorization: token $GH_PAT" \
-#     "https://raw.githubusercontent.com/matteso1/thaw/main/scripts/pod-validate-s3.sh?t=$(date +%s)" \
-#     | bash
+#   git clone https://$GH_PAT@github.com/matteso1/thaw.git /workspace/thaw
+#   bash /workspace/thaw/scripts/pod-validate-s3.sh
+#
+# The script fetches + hard-resets origin/main itself, so to re-run with
+# the latest code just invoke the same bash command again.
 
 set -euo pipefail
 

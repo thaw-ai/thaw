@@ -9,6 +9,24 @@ so new requests with the same prefix get cache hits (skip prefill).
 This is the competitive moat: nobody else snapshots KV cache.
 
 Requires vLLM V1 engine with VLLM_ENABLE_V1_MULTIPROCESSING=0.
+
+Performance strategy
+--------------------
+The KV blob can be tens of GB. Python-level per-block loops serializing
+each K/V slab through a staging tensor bottleneck at O(100 MB/s). The
+fast path builds a flat `(kind, logical_id, device_ptr, nbytes)` mapping
+over every K and V slab of every cached block and hands the entire batch
+to the Rust pipelined writer/reader (`_thaw.freeze_to_file_pipelined` /
+`_thaw.restore_from_file_pipelined`) — the same double-buffered, O_DIRECT
+path weights use. Per-block `.contiguous()` GPU copies disappear: in
+the vLLM KV cache layout ``[2, num_blocks, block_size, heads, head_size]``,
+``kv_layer[k, bid]`` with ``k`` fixed is already contiguous, so we DMA
+directly from it.
+
+The on-disk format is a standard THAW file (via `freeze_to_file_pipelined`)
+holding every K/V slab as a `kv_live_block` region, paired with a small
+sidecar ``<path>.meta`` JSON file carrying block_ids, block_hashes, and
+shape/dtype info needed to reconstruct the prefix cache on restore.
 """
 
 import base64
@@ -20,20 +38,69 @@ from pathlib import Path
 
 import torch
 
-# KV cache snapshot file format:
-# [8 bytes: magic "THAWKV\x00\x00"]
-# [4 bytes: metadata length (little-endian u32)]
-# [metadata_length bytes: JSON metadata]
-# [payload: concatenated block data, ordered by (layer, block_index)]
-#
-# The metadata contains everything needed to reconstruct the prefix cache:
-# - block_ids: list of cached block IDs
-# - block_hashes: serialized BlockHashWithGroupId for each block
-# - num_layers: number of model layers
-# - block_shape: [2, block_size, num_kv_heads, head_size] per layer per block
-# - dtype: tensor dtype string
+from thaw_common.telemetry import (
+    fallback_warning,
+    strict_mode,
+    check_pinned,
+)
 
+# Legacy (pre-pipelined) single-file format, still recognized for
+# backward-compatible reads:
+#   [8 bytes: magic "THAWKV\x00\x00"]
+#   [4 bytes: metadata length (little-endian u32)]
+#   [metadata_length bytes: JSON metadata]
+#   [payload: concatenated block data, ordered by (layer, block_index)]
+#
+# New format (the fast path):
+#   <path>        : standard THAW file written by the Rust pipelined
+#                   freeze. Each region is a `kv_live_block` containing
+#                   either the K or V slab of one (layer, block) pair.
+#                   Regions are ordered (layer_idx, slot_idx, kv_idx)
+#                   with logical_id = layer*N*2 + slot*2 + kv.
+#   <path>.meta   : small JSON sidecar; [KV_MAGIC | u32 len | JSON].
+#                   Carries block_ids, block_hashes, num_layers, block
+#                   shape/dtype so prefix-cache state can be rebuilt.
 KV_MAGIC = b"THAWKV\x00\x00"
+
+
+def _meta_path(path: str) -> str:
+    """Sidecar metadata path for a given KV snapshot path."""
+    return path + ".meta"
+
+
+def _write_meta_sidecar(path: str, metadata: dict) -> None:
+    """Write the KV sidecar metadata file: [KV_MAGIC | u32 len | JSON]."""
+    meta_bytes = json.dumps(metadata).encode()
+    with open(_meta_path(path), "wb") as f:
+        f.write(KV_MAGIC)
+        f.write(struct.pack("<I", len(meta_bytes)))
+        f.write(meta_bytes)
+
+
+def _read_meta_sidecar(path: str) -> dict:
+    """Read the KV sidecar metadata file. Raises if magic is wrong."""
+    with open(_meta_path(path), "rb") as f:
+        magic = f.read(8)
+        if magic != KV_MAGIC:
+            raise ValueError(f"Bad KV meta magic: {magic!r}")
+        meta_len = struct.unpack("<I", f.read(4))[0]
+        return json.loads(f.read(meta_len))
+
+
+def _read_legacy_single_file(path: str):
+    """Peek at a legacy single-file snapshot. Returns (metadata, payload_offset)
+    if the file is a legacy THAWKV file, else (None, None)."""
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(8)
+            if magic != KV_MAGIC:
+                return None, None
+            meta_len = struct.unpack("<I", f.read(4))[0]
+            metadata = json.loads(f.read(meta_len))
+            payload_offset = 8 + 4 + meta_len
+            return metadata, payload_offset
+    except (OSError, ValueError):
+        return None, None
 
 
 def _get_engine_core(llm):
@@ -76,6 +143,127 @@ def _rank_kv_path(base_path: str, rank: int) -> str:
     return f"{stem}.rank{rank}{ext}"
 
 
+def _collect_kv_slab_requests(kv_caches, block_ids):
+    """Build the pipelined freeze/restore mapping list for every K and V slab
+    of every (layer, block) pair.
+
+    vLLM's layout is ``[2, num_blocks, block_size, num_kv_heads, head_size]``.
+    With K/V split at dim 0, each ``kv_layer[k, bid]`` (k in {0,1}) is a
+    single contiguous memory region, which is the PCIe-DMA-friendly unit.
+
+    Returns ``(mapping, slab_nbytes)`` where ``mapping`` is a list of
+    ``("kv_live_block", logical_id, device_ptr, nbytes)`` tuples and
+    ``slab_nbytes`` is the byte size of one K or V slab (half of
+    ``block_bytes``). Iteration order is ``(layer, slot, kv)`` and
+    ``logical_id = layer * num_slots * 2 + slot * 2 + kv``.
+    """
+    num_layers = len(kv_caches)
+    num_slots = len(block_ids)
+
+    # kv_layer[0, bid] is contiguous: the last three dims are packed.
+    sample = kv_caches[0][0, 0]
+    slab_nbytes = sample.numel() * sample.element_size()
+
+    mapping = []
+    for layer_idx in range(num_layers):
+        kv_layer = kv_caches[layer_idx]
+        base = layer_idx * num_slots * 2
+        for slot_idx, bid in enumerate(block_ids):
+            for kv_idx in (0, 1):
+                slab = kv_layer[kv_idx, bid]
+                ptr = slab.data_ptr()
+                logical_id = base + slot_idx * 2 + kv_idx
+                mapping.append(("kv_live_block", logical_id, ptr, slab_nbytes))
+    return mapping, slab_nbytes
+
+
+def _freeze_kv_python_fallback(path, kv_caches, metadata, block_ids):
+    """Pure-Python KV freeze: staged pinned buffer, legacy single-file format.
+
+    Used only when the Rust pipelined extension is unavailable. Produces a
+    legacy THAWKV file (no sidecar) so read-path compatibility is preserved
+    without a rust build.
+    """
+    num_layers = len(kv_caches)
+    # block_bytes in metadata is the full [2, B, H, D] slab pair size.
+    block_bytes = metadata["block_bytes"]
+
+    total_payload = len(block_ids) * num_layers * block_bytes
+
+    if total_payload == 0:
+        with open(path, "wb") as f:
+            f.write(KV_MAGIC)
+            meta_empty = json.dumps({"num_blocks": 0}).encode()
+            f.write(struct.pack("<I", len(meta_empty)))
+            f.write(meta_empty)
+        return 0
+
+    flat_buf = torch.empty(total_payload, dtype=torch.uint8, pin_memory=True)
+    check_pinned(flat_buf, "kv_snapshot freeze fallback staging buffer")
+
+    offset = 0
+    for layer_idx in range(num_layers):
+        kv_layer = kv_caches[layer_idx]
+        for bid in block_ids:
+            block_tensor = kv_layer[:, bid].contiguous()
+            src = block_tensor.view(-1).view(torch.uint8)
+            flat_buf[offset:offset + block_bytes].copy_(src, non_blocking=True)
+            offset += block_bytes
+    torch.cuda.synchronize()
+
+    meta_bytes = json.dumps(metadata).encode()
+    with open(path, "wb") as f:
+        f.write(KV_MAGIC)
+        f.write(struct.pack("<I", len(meta_bytes)))
+        f.write(meta_bytes)
+        f.write(flat_buf.numpy().tobytes())
+
+    del flat_buf
+    return total_payload
+
+
+def _restore_kv_python_fallback_legacy(path, kv_caches, metadata, payload_offset):
+    """Pure-Python KV restore for legacy single-file snapshots."""
+    block_ids = metadata["block_ids"]
+    num_layers = metadata["num_layers"]
+    block_bytes = metadata["block_bytes"]
+    block_shape = metadata["block_shape"]
+    dtype_str = metadata["dtype"]
+
+    total_payload = len(block_ids) * num_layers * block_bytes
+    flat_pinned = torch.empty(total_payload, dtype=torch.uint8, pin_memory=True)
+    check_pinned(flat_pinned, "kv_snapshot restore fallback staging buffer")
+
+    with open(path, "rb") as f:
+        f.seek(payload_offset)
+        np_buf = flat_pinned.numpy()
+        bytes_read = f.readinto(np_buf)
+        if bytes_read != total_payload:
+            raise ValueError(
+                f"Truncated KV payload: expected {total_payload}, got {bytes_read}"
+            )
+
+    dtype = getattr(torch, dtype_str.replace("torch.", ""))
+    device = kv_caches[0].device
+    flat_gpu = flat_pinned.to(device, non_blocking=True)
+    torch.cuda.synchronize()
+    del flat_pinned
+
+    offset = 0
+    for layer_idx in range(num_layers):
+        kv_layer = kv_caches[layer_idx]
+        for bid in block_ids:
+            block_data = (
+                flat_gpu[offset:offset + block_bytes]
+                .view(dtype)
+                .reshape(block_shape)
+            )
+            kv_layer[:, bid].copy_(block_data)
+            offset += block_bytes
+    del flat_gpu
+    return total_payload
+
+
 def freeze_kv_cache(llm, path: str) -> dict:
     """Freeze prefix-cached KV blocks to a file.
 
@@ -83,6 +271,10 @@ def freeze_kv_cache(llm, path: str) -> dict:
     completed requests release their blocks but the blocks retain
     their hash in the prefix cache. This function captures those
     cached blocks so they can be restored on a fresh instance.
+
+    Writes a standard THAW file (via the Rust pipelined writer) plus a
+    sidecar ``<path>.meta`` JSON file. Falls back to the legacy
+    single-file format when the Rust extension is unavailable.
 
     Args:
         llm: A vLLM LLM instance (V1 engine, in-process).
@@ -108,12 +300,18 @@ def freeze_kv_cache(llm, path: str) -> dict:
             cached_blocks.append(block)
 
     if not cached_blocks:
-        # Write empty snapshot
+        # Write empty snapshot (legacy single-file form; no KV payload
+        # means no reason to drag in the Rust path).
         with open(path, 'wb') as f:
             f.write(KV_MAGIC)
             meta = json.dumps({"num_blocks": 0}).encode()
             f.write(struct.pack('<I', len(meta)))
             f.write(meta)
+        # Ensure no stale sidecar lingers from a previous run.
+        try:
+            os.remove(_meta_path(path))
+        except FileNotFoundError:
+            pass
         return {"num_blocks": 0, "total_bytes": 0, "elapsed_s": 0}
 
     block_ids = [b.block_id for b in cached_blocks]
@@ -125,7 +323,6 @@ def freeze_kv_cache(llm, path: str) -> dict:
     block_bytes = kv_caches[0][:, 0].nbytes
     dtype_str = str(kv_caches[0].dtype)
 
-    # Build metadata
     metadata = {
         "num_blocks": len(cached_blocks),
         "block_ids": block_ids,
@@ -136,32 +333,44 @@ def freeze_kv_cache(llm, path: str) -> dict:
         "dtype": dtype_str,
         "block_size": ec.scheduler.block_size,
     }
-    meta_bytes = json.dumps(metadata).encode()
 
-    # Extract block data from GPU — all layers, all cached blocks.
-    # We gather into a flat CPU buffer for sequential write.
-    total_payload = len(cached_blocks) * num_layers * block_bytes
-    flat_buf = torch.empty(total_payload, dtype=torch.uint8, pin_memory=True)
+    # --- Fast path: Rust pipelined freeze over every K/V slab ---
+    use_rust = True
+    try:
+        import thaw as _thaw
+        if not hasattr(_thaw, "freeze_to_file_pipelined"):
+            raise ImportError("freeze_to_file_pipelined not found")
+    except ImportError as e:
+        fallback_warning(
+            "freeze_kv_cache (rust ext not loaded)", e,
+            dst="pure-python pinned-staging single-file",
+        )
+        if strict_mode():
+            raise
+        use_rust = False
 
-    offset = 0
-    for layer_idx in range(num_layers):
-        kv_layer = kv_caches[layer_idx]  # [2, num_blocks, block_size, heads, head_size]
-        for bid in block_ids:
-            block_tensor = kv_layer[:, bid].contiguous()
-            src = block_tensor.view(-1).view(torch.uint8)
-            flat_buf[offset:offset + block_bytes].copy_(src, non_blocking=True)
-            offset += block_bytes
+    if use_rust:
+        mapping, slab_nbytes = _collect_kv_slab_requests(kv_caches, block_ids)
+        metadata["slab_nbytes"] = slab_nbytes
+        metadata["num_slots"] = len(block_ids)
+        try:
+            _thaw.freeze_to_file_pipelined(path, mapping, vllm_commit=None)
+            _write_meta_sidecar(path, metadata)
+            total_payload = slab_nbytes * len(mapping)
+        except Exception as e:
+            fallback_warning(
+                "freeze_kv_cache (rust pipelined failed)", e,
+                dst="pure-python pinned-staging single-file",
+            )
+            if strict_mode():
+                raise
+            use_rust = False
 
-    torch.cuda.synchronize()
+    if not use_rust:
+        total_payload = _freeze_kv_python_fallback(
+            path, kv_caches, metadata, block_ids,
+        )
 
-    # Write to file
-    with open(path, 'wb') as f:
-        f.write(KV_MAGIC)
-        f.write(struct.pack('<I', len(meta_bytes)))
-        f.write(meta_bytes)
-        f.write(flat_buf.numpy().tobytes())
-
-    del flat_buf
     elapsed = time.perf_counter() - t0
 
     return {
@@ -179,6 +388,9 @@ def restore_kv_cache(llm, path: str) -> dict:
     hash mappings in the block pool so new requests with matching
     prefixes get cache hits.
 
+    Recognizes both the new THAW + sidecar format and the legacy
+    single-file THAWKV format.
+
     Args:
         llm: A vLLM LLM instance (V1 engine, in-process). Should already
             have weights restored (via restore_model or similar).
@@ -195,67 +407,30 @@ def restore_kv_cache(llm, path: str) -> dict:
     mr = ec.model_executor.driver_worker.model_runner
     kv_caches = mr.kv_caches
 
-    with open(path, 'rb') as f:
-        magic = f.read(8)
-        if magic != KV_MAGIC:
-            raise ValueError(f"Bad KV cache magic: {magic!r}")
+    legacy_meta, legacy_offset = _read_legacy_single_file(path)
+    has_sidecar = os.path.exists(_meta_path(path))
 
-        meta_len = struct.unpack('<I', f.read(4))[0]
-        metadata = json.loads(f.read(meta_len))
-
-        num_blocks = metadata["num_blocks"]
-        if num_blocks == 0:
+    if legacy_meta is not None and not has_sidecar:
+        # Legacy format — read metadata from the file itself.
+        metadata = legacy_meta
+        if metadata.get("num_blocks", 0) == 0:
             return {"num_blocks": 0, "total_bytes": 0, "elapsed_s": 0}
+        _validate_metadata(metadata, kv_caches)
+        total_payload = _restore_kv_python_fallback_legacy(
+            path, kv_caches, metadata, legacy_offset,
+        )
+    else:
+        # New format with sidecar metadata.
+        metadata = _read_meta_sidecar(path)
+        if metadata.get("num_blocks", 0) == 0:
+            return {"num_blocks": 0, "total_bytes": 0, "elapsed_s": 0}
+        _validate_metadata(metadata, kv_caches)
+        total_payload = _restore_kv_rust_or_fallback(
+            path, kv_caches, metadata,
+        )
 
-        block_ids = metadata["block_ids"]
-        block_hashes = metadata["block_hashes"]
-        num_layers = metadata["num_layers"]
-        block_bytes = metadata["block_bytes"]
-        block_shape = metadata["block_shape"]
-        dtype_str = metadata["dtype"]
-
-        # Validate against current model
-        if num_layers != len(kv_caches):
-            raise ValueError(
-                f"KV snapshot has {num_layers} layers but model has "
-                f"{len(kv_caches)} layers"
-            )
-
-        current_block_shape = list(kv_caches[0][:, 0].shape)
-        if block_shape != current_block_shape:
-            raise ValueError(
-                f"Block shape mismatch: snapshot {block_shape} vs "
-                f"model {current_block_shape}"
-            )
-
-        # Read payload into pinned memory
-        total_payload = num_blocks * num_layers * block_bytes
-        flat_pinned = torch.empty(total_payload, dtype=torch.uint8, pin_memory=True)
-        np_buf = flat_pinned.numpy()
-        bytes_read = f.readinto(np_buf)
-        if bytes_read != total_payload:
-            raise ValueError(
-                f"Truncated KV payload: expected {total_payload}, got {bytes_read}"
-            )
-
-    # Resolve dtype
-    dtype = getattr(torch, dtype_str.replace('torch.', ''))
-
-    # Write block data to GPU
-    device = kv_caches[0].device
-    flat_gpu = flat_pinned.to(device, non_blocking=True)
-    torch.cuda.synchronize()
-    del flat_pinned
-
-    offset = 0
-    for layer_idx in range(num_layers):
-        kv_layer = kv_caches[layer_idx]
-        for bid in block_ids:
-            block_data = flat_gpu[offset:offset + block_bytes].view(dtype).reshape(block_shape)
-            kv_layer[:, bid].copy_(block_data)
-            offset += block_bytes
-
-    del flat_gpu
+    block_ids = metadata["block_ids"]
+    block_hashes = metadata["block_hashes"]
 
     # Validate block IDs fit in this instance's block pool
     max_block_id = len(block_pool.blocks) - 1
@@ -283,10 +458,127 @@ def restore_kv_cache(llm, path: str) -> dict:
     elapsed = time.perf_counter() - t0
 
     return {
-        "num_blocks": num_blocks,
+        "num_blocks": metadata["num_blocks"],
         "total_bytes": total_payload,
         "elapsed_s": elapsed,
     }
+
+
+def _validate_metadata(metadata, kv_caches):
+    """Shared metadata vs. live model sanity checks."""
+    num_layers = metadata["num_layers"]
+    block_shape = metadata["block_shape"]
+    if num_layers != len(kv_caches):
+        raise ValueError(
+            f"KV snapshot has {num_layers} layers but model has "
+            f"{len(kv_caches)} layers"
+        )
+    current_block_shape = list(kv_caches[0][:, 0].shape)
+    if block_shape != current_block_shape:
+        raise ValueError(
+            f"Block shape mismatch: snapshot {block_shape} vs "
+            f"model {current_block_shape}"
+        )
+
+
+def _restore_kv_rust_or_fallback(path, kv_caches, metadata):
+    """Restore a new-format (THAW + sidecar) KV snapshot.
+
+    Fast path is `_thaw.restore_from_file_pipelined` with one mapping entry
+    per K/V slab. Falls back to a staged pinned read+copy if the Rust
+    extension isn't loaded.
+    """
+    block_ids = metadata["block_ids"]
+
+    try:
+        import thaw as _thaw
+        if not hasattr(_thaw, "restore_from_file_pipelined"):
+            raise ImportError("restore_from_file_pipelined not found")
+    except ImportError as e:
+        fallback_warning(
+            "restore_kv_cache (rust ext not loaded)", e,
+            dst="pure-python readinto + GPU scatter",
+        )
+        if strict_mode():
+            raise
+        return _restore_kv_python_fallback_new(path, kv_caches, metadata)
+
+    mapping, _slab_nbytes = _collect_kv_slab_requests(kv_caches, block_ids)
+    try:
+        _thaw.restore_from_file_pipelined(path, mapping)
+    except Exception as e:
+        fallback_warning(
+            "restore_kv_cache (rust pipelined failed)", e,
+            dst="pure-python readinto + GPU scatter",
+        )
+        if strict_mode():
+            raise
+        return _restore_kv_python_fallback_new(path, kv_caches, metadata)
+
+    num_layers = metadata["num_layers"]
+    return len(block_ids) * num_layers * metadata["block_bytes"]
+
+
+def _restore_kv_python_fallback_new(path, kv_caches, metadata):
+    """Pure-Python restore for the new THAW-format KV file.
+
+    Reads THAW regions directly (bypassing the Rust ext) and scatters
+    them into kv_caches. Slow — intended only as a safety net.
+    """
+    from thaw_common.format import read_header, read_region_entry
+
+    block_ids = metadata["block_ids"]
+    num_layers = metadata["num_layers"]
+    slab_nbytes = metadata.get("slab_nbytes")
+    dtype_str = metadata["dtype"]
+    dtype = getattr(torch, dtype_str.replace("torch.", ""))
+
+    if slab_nbytes is None:
+        # Legacy-schema sidecar (shouldn't happen, but be defensive).
+        slab_nbytes = metadata["block_bytes"] // 2
+
+    with open(path, "rb") as f:
+        num_regions, _engine_commit = read_header(f)
+        entries = [read_region_entry(f) for _ in range(num_regions)]
+
+        total_payload = sum(size for _k, _lid, size, _off in entries)
+        flat_pinned = torch.empty(total_payload, dtype=torch.uint8, pin_memory=True)
+        check_pinned(flat_pinned, "restore_kv_cache fallback staging buffer")
+
+        payload_start = entries[0][3] if entries else 0
+        f.seek(payload_start)
+        np_buf = flat_pinned.numpy()
+        bytes_read = f.readinto(np_buf)
+        if bytes_read != total_payload:
+            raise ValueError(
+                f"Truncated KV payload: expected {total_payload}, got {bytes_read}"
+            )
+
+    device = kv_caches[0].device
+    flat_gpu = flat_pinned.to(device, non_blocking=True)
+    torch.cuda.synchronize()
+    del flat_pinned
+
+    # Region layout is (layer, slot, kv) flattened; reconstruct the
+    # matching K/V slab view and copy into place.
+    num_slots = len(block_ids)
+    offset = 0
+    for layer_idx in range(num_layers):
+        kv_layer = kv_caches[layer_idx]
+        for slot_idx, bid in enumerate(block_ids):
+            for kv_idx in (0, 1):
+                slab = kv_layer[kv_idx, bid]
+                slab_shape = list(slab.shape)
+                slice_gpu = (
+                    flat_gpu[offset:offset + slab_nbytes]
+                    .view(dtype)
+                    .reshape(slab_shape)
+                )
+                slab.copy_(slice_gpu)
+                offset += slab_nbytes
+
+    del flat_gpu
+    return total_payload
 
 
 def freeze_kv_cache_tp(llm, base_path: str) -> dict:
@@ -326,13 +618,22 @@ def freeze_kv_cache_tp(llm, base_path: str) -> dict:
     # Dispatch KV cache freeze to each worker
     def _worker_freeze_kv(worker, base_path, block_ids, block_hashes, block_size):
         """Runs inside each worker process."""
-        import json
-        import os
-        import struct
         import time
 
         import torch
         from vllm.distributed import get_tensor_model_parallel_rank
+
+        # Import helpers from the outer module so workers use the same
+        # fast-path logic. Workers run in the same interpreter under V1
+        # in-proc, so a plain import is fine here.
+        from thaw_vllm.kv_snapshot import (
+            _collect_kv_slab_requests,
+            _freeze_kv_python_fallback,
+            _rank_kv_path,
+            _write_meta_sidecar,
+            KV_MAGIC,
+        )
+        from thaw_common.telemetry import fallback_warning, strict_mode
 
         rank = get_tensor_model_parallel_rank()
         rank_path = _rank_kv_path(base_path, rank)
@@ -357,29 +658,43 @@ def freeze_kv_cache_tp(llm, base_path: str) -> dict:
             "block_size": block_size,
             "tensor_parallel_rank": rank,
         }
-        meta_bytes = json.dumps(metadata).encode()
 
-        total_payload = len(block_ids) * num_layers * block_bytes
-        flat_buf = torch.empty(total_payload, dtype=torch.uint8, pin_memory=True)
+        use_rust = True
+        try:
+            import thaw as _thaw
+            if not hasattr(_thaw, "freeze_to_file_pipelined"):
+                raise ImportError("freeze_to_file_pipelined not found")
+        except ImportError as e:
+            fallback_warning(
+                f"freeze_kv_cache_tp rank {rank} (rust ext not loaded)", e,
+                dst="pure-python pinned-staging single-file",
+            )
+            if strict_mode():
+                raise
+            use_rust = False
 
-        offset = 0
-        for layer_idx in range(num_layers):
-            kv_layer = kv_caches[layer_idx]
-            for bid in block_ids:
-                block_tensor = kv_layer[:, bid].contiguous()
-                src = block_tensor.view(-1).view(torch.uint8)
-                flat_buf[offset:offset + block_bytes].copy_(src, non_blocking=True)
-                offset += block_bytes
+        if use_rust:
+            mapping, slab_nbytes = _collect_kv_slab_requests(kv_caches, block_ids)
+            metadata["slab_nbytes"] = slab_nbytes
+            metadata["num_slots"] = len(block_ids)
+            try:
+                _thaw.freeze_to_file_pipelined(rank_path, mapping, vllm_commit=None)
+                _write_meta_sidecar(rank_path, metadata)
+                total_payload = slab_nbytes * len(mapping)
+            except Exception as e:
+                fallback_warning(
+                    f"freeze_kv_cache_tp rank {rank} (rust pipelined failed)", e,
+                    dst="pure-python pinned-staging single-file",
+                )
+                if strict_mode():
+                    raise
+                use_rust = False
 
-        torch.cuda.synchronize()
+        if not use_rust:
+            total_payload = _freeze_kv_python_fallback(
+                rank_path, kv_caches, metadata, block_ids,
+            )
 
-        with open(rank_path, 'wb') as f:
-            f.write(KV_MAGIC)
-            f.write(struct.pack('<I', len(meta_bytes)))
-            f.write(meta_bytes)
-            f.write(flat_buf.numpy().tobytes())
-
-        del flat_buf
         elapsed = time.perf_counter() - t0
 
         return {
@@ -426,13 +741,22 @@ def restore_kv_cache_tp(llm, base_path: str) -> dict:
     # Dispatch KV restore to each worker (they write data to their GPU)
     def _worker_restore_kv(worker, base_path):
         """Runs inside each worker process."""
-        import json
         import os
-        import struct
         import time
 
-        import torch
         from vllm.distributed import get_tensor_model_parallel_rank
+
+        from thaw_vllm.kv_snapshot import (
+            _collect_kv_slab_requests,
+            _rank_kv_path,
+            _read_legacy_single_file,
+            _read_meta_sidecar,
+            _meta_path,
+            _restore_kv_python_fallback_legacy,
+            _restore_kv_python_fallback_new,
+            _validate_metadata,
+        )
+        from thaw_common.telemetry import fallback_warning, strict_mode
 
         rank = get_tensor_model_parallel_rank()
         rank_path = _rank_kv_path(base_path, rank)
@@ -442,65 +766,73 @@ def restore_kv_cache_tp(llm, base_path: str) -> dict:
         mr = worker.model_runner
         kv_caches = mr.kv_caches
 
-        with open(rank_path, 'rb') as f:
-            magic = f.read(8)
-            if magic != KV_MAGIC:
-                raise ValueError(f"Bad KV cache magic: {magic!r}")
+        legacy_meta, legacy_offset = _read_legacy_single_file(rank_path)
+        has_sidecar = os.path.exists(_meta_path(rank_path))
 
-            meta_len = struct.unpack('<I', f.read(4))[0]
-            metadata = json.loads(f.read(meta_len))
-
-            num_blocks = metadata["num_blocks"]
-            if num_blocks == 0:
+        if legacy_meta is not None and not has_sidecar:
+            metadata = legacy_meta
+            if metadata.get("num_blocks", 0) == 0:
                 return {"num_blocks": 0, "total_bytes": 0, "elapsed_s": 0,
                         "rank": rank, "block_ids": [], "block_hashes": []}
+            _validate_metadata(metadata, kv_caches)
+            total_payload = _restore_kv_python_fallback_legacy(
+                rank_path, kv_caches, metadata, legacy_offset,
+            )
+        else:
+            metadata = _read_meta_sidecar(rank_path)
+            if metadata.get("num_blocks", 0) == 0:
+                return {"num_blocks": 0, "total_bytes": 0, "elapsed_s": 0,
+                        "rank": rank, "block_ids": [], "block_hashes": []}
+            _validate_metadata(metadata, kv_caches)
 
-            block_ids = metadata["block_ids"]
-            block_hashes = metadata["block_hashes"]
-            num_layers = metadata["num_layers"]
-            block_bytes = metadata["block_bytes"]
-            block_shape = metadata["block_shape"]
-            dtype_str = metadata["dtype"]
+            use_rust = True
+            try:
+                import thaw as _thaw
+                if not hasattr(_thaw, "restore_from_file_pipelined"):
+                    raise ImportError("restore_from_file_pipelined not found")
+            except ImportError as e:
+                fallback_warning(
+                    f"restore_kv_cache_tp rank {rank} (rust ext not loaded)", e,
+                    dst="pure-python readinto + GPU scatter",
+                )
+                if strict_mode():
+                    raise
+                use_rust = False
 
-            if num_layers != len(kv_caches):
-                raise ValueError(
-                    f"KV snapshot has {num_layers} layers but model has "
-                    f"{len(kv_caches)} layers (rank {rank})"
+            if use_rust:
+                mapping, _slab_nbytes = _collect_kv_slab_requests(
+                    kv_caches, metadata["block_ids"],
+                )
+                try:
+                    _thaw.restore_from_file_pipelined(rank_path, mapping)
+                    total_payload = (
+                        len(metadata["block_ids"])
+                        * metadata["num_layers"]
+                        * metadata["block_bytes"]
+                    )
+                except Exception as e:
+                    fallback_warning(
+                        f"restore_kv_cache_tp rank {rank} (rust pipelined failed)", e,
+                        dst="pure-python readinto + GPU scatter",
+                    )
+                    if strict_mode():
+                        raise
+                    use_rust = False
+
+            if not use_rust:
+                total_payload = _restore_kv_python_fallback_new(
+                    rank_path, kv_caches, metadata,
                 )
 
-            total_payload = num_blocks * num_layers * block_bytes
-            flat_pinned = torch.empty(total_payload, dtype=torch.uint8, pin_memory=True)
-            np_buf = flat_pinned.numpy()
-            bytes_read = f.readinto(np_buf)
-            if bytes_read != total_payload:
-                raise ValueError(
-                    f"Truncated KV payload: expected {total_payload}, got {bytes_read}"
-                )
-
-        dtype = getattr(torch, dtype_str.replace('torch.', ''))
-        device = kv_caches[0].device
-        flat_gpu = flat_pinned.to(device, non_blocking=True)
-        torch.cuda.synchronize()
-        del flat_pinned
-
-        offset = 0
-        for layer_idx in range(num_layers):
-            kv_layer = kv_caches[layer_idx]
-            for bid in block_ids:
-                block_data = flat_gpu[offset:offset + block_bytes].view(dtype).reshape(block_shape)
-                kv_layer[:, bid].copy_(block_data)
-                offset += block_bytes
-
-        del flat_gpu
         elapsed = time.perf_counter() - t0
 
         return {
-            "num_blocks": num_blocks,
+            "num_blocks": metadata["num_blocks"],
             "total_bytes": total_payload,
             "elapsed_s": elapsed,
             "rank": rank,
-            "block_ids": block_ids,
-            "block_hashes": block_hashes,
+            "block_ids": metadata["block_ids"],
+            "block_hashes": metadata["block_hashes"],
         }
 
     results = ec.model_executor.collective_rpc(

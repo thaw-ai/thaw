@@ -133,17 +133,36 @@ pub enum FreezeError {
 
 /// The freeze configuration.
 ///
-/// A minimal "options bag" passed alongside the request list.
-/// Today it only carries the vllm_commit hash; later it will
-/// also carry things like "stream N regions in parallel,"
-/// "use this chunk size," "attach this metadata JSON."
-#[derive(Debug, Clone, Default)]
+/// Used by both `freeze` (simple, sequential) and `freeze_pipelined`
+/// (chunked, double-buffered). The `chunk_size` and `try_direct_io`
+/// fields are only consulted by the pipelined path.
+#[derive(Debug, Clone)]
 pub struct FreezeConfig {
     /// Optional 40-byte vllm_commit hash. If `Some`, the freeze
     /// orchestrator stamps it onto the snapshot header. If
     /// `None`, the header's slot stays at all-zeros and the
     /// later vLLM integration layer will refuse the file.
     pub vllm_commit: Option<[u8; 40]>,
+
+    /// Pipelined-only: size of each I/O chunk in bytes. Each of
+    /// the two pinned buffers will be this size. Must be a
+    /// multiple of 4096 for O_DIRECT. Default: 64 MiB.
+    pub chunk_size: usize,
+
+    /// Pipelined-only: whether to attempt O_DIRECT when opening
+    /// the output file. Falls back to buffered I/O if the
+    /// platform or filesystem does not support it.
+    pub try_direct_io: bool,
+}
+
+impl Default for FreezeConfig {
+    fn default() -> Self {
+        FreezeConfig {
+            vllm_commit: None,
+            chunk_size: 64 * 1024 * 1024, // 64 MiB
+            try_direct_io: true,
+        }
+    }
 }
 
 /// Freeze a list of device regions into a complete `.thaw` file,
@@ -331,6 +350,7 @@ mod tests {
         let mut sink: Vec<u8> = Vec::new();
         let config = FreezeConfig {
             vllm_commit: Some(hash),
+            ..FreezeConfig::default()
         };
         freeze(&backend, &requests, &config, &mut sink).expect("freeze");
 
