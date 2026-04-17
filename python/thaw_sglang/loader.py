@@ -66,6 +66,35 @@ def _get_tp_size() -> int:
         return 1
 
 
+# GPUs where SGLang TP>1 hits a piecewise CUDA graph bug during warmup
+# (validated 2026-04-17 on 2×A40). The bug is in SGLang's graph capture,
+# not thaw — but users still blame us. Emit a clear warning so the cause
+# is obvious when they hit it, and point at the workaround.
+_SGLANG_TP_BAD_GPUS = ("A40", "A10", "A30", "A100-PCI")
+
+
+def _a40_preflight(tp_size: int) -> None:
+    if tp_size <= 1:
+        return
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return
+        name = torch.cuda.get_device_name(0)
+    except Exception:
+        return
+    for bad in _SGLANG_TP_BAD_GPUS:
+        if bad in name:
+            logger.warning(
+                "SGLang TP=%d on %s is known to hit a piecewise CUDA graph "
+                "bug during warmup. If capture hangs or crashes, either pass "
+                "enforce_eager=True (slower but works) or move to H100/L40S. "
+                "This is an SGLang bug, not thaw.",
+                tp_size, name,
+            )
+            return
+
+
 class ThawSGLangModelLoader(BaseModelLoader):
     """Load model weights from a .thaw snapshot file.
 
@@ -130,6 +159,7 @@ class ThawSGLangModelLoader(BaseModelLoader):
         # for rank 1, downloaded to local cache on each worker.
         tp_rank = _get_tp_rank()
         tp_size = _get_tp_size()
+        _a40_preflight(tp_size)
         snapshot_path = rank_snapshot_path(self.snapshot_path, tp_rank)
         snapshot_path = resolve_snapshot_path(snapshot_path)
 
