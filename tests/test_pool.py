@@ -319,6 +319,134 @@ class TestEnginePool:
 
 
 # ---------------------------------------------------------------------------
+# Slot-persistent pinned-mmap lifecycle tests
+# ---------------------------------------------------------------------------
+#
+# These tests pin down the slot's reuse-across-reloads contract without
+# needing CUDA. The strategy: patch `make_pinned_mmap` to return a
+# sentinel object (mock) and patch `restore_model_from_pinned_mmap` to
+# record which handle it was called with. Then exercise three lifecycle
+# shapes:
+#   - cold load: slot mmaps + registers once, uses the new handle
+#   - warm reload (same path): slot reuses the existing handle, does
+#     not call `make_pinned_mmap` again
+#   - swap (different path): slot drops the old handle (confirming
+#     unpin) and builds a new one for the new snapshot
+
+
+def _patch_pinned_mmap(pinned_handle):
+    """Patch the slot-warm path to return `pinned_handle` from make_pinned_mmap."""
+    return patch(
+        "thaw_common.snapshot.make_pinned_mmap",
+        return_value=pinned_handle,
+    )
+
+
+def _patch_pinned_restore(stats=None):
+    """Patch restore_model_from_pinned_mmap to return canned stats."""
+    return patch(
+        "thaw_common.snapshot.restore_model_from_pinned_mmap",
+        return_value=dict(stats or _FAKE_STATS),
+    )
+
+
+class TestSlotPinnedMmap:
+
+    def test_cold_load_builds_pinned_mmap(self, pool_with_slots):
+        """First load on a slot constructs a PinnedMmap and uses it."""
+        pool = pool_with_slots
+        sentinel = MagicMock(name="pinned_mmap_handle")
+
+        with _patch_pinned_mmap(sentinel) as mk, \
+             _patch_pinned_restore() as rst:
+            pool.preload("model_a", slot_id=0)
+
+            assert mk.call_count == 1
+            assert rst.call_count == 1
+            assert rst.call_args[0][1] is sentinel
+            assert pool.slots[0]._pinned_mmap is sentinel
+
+    def test_warm_reload_reuses_pinned_mmap(self, pool_with_slots):
+        """Second load of the SAME snapshot reuses the existing handle."""
+        pool = pool_with_slots
+        sentinel = MagicMock(name="pinned_mmap_handle")
+
+        with _patch_pinned_mmap(sentinel) as mk, _patch_pinned_restore() as rst:
+            pool.preload("model_a", slot_id=0)
+            pool.preload("model_a", slot_id=0)
+
+            # Build the handle exactly once across two reloads.
+            assert mk.call_count == 1
+            # But restore should have been called twice — the whole
+            # point is amortizing the registration across loads.
+            assert rst.call_count == 2
+            # Same sentinel handed to the restore function both times.
+            assert rst.call_args_list[0][0][1] is sentinel
+            assert rst.call_args_list[1][0][1] is sentinel
+            assert pool.slots[0]._pinned_mmap is sentinel
+
+    def test_swap_to_different_snapshot_drops_old_handle(self, pool_with_slots):
+        """Swapping to a different model drops + rebuilds the registration."""
+        pool = pool_with_slots
+        handles = [
+            MagicMock(name="pinned_mmap_a"),
+            MagicMock(name="pinned_mmap_b"),
+        ]
+
+        with patch(
+            "thaw_common.snapshot.make_pinned_mmap",
+            side_effect=handles,
+        ) as mk, _patch_pinned_restore() as rst:
+            pool.preload("model_a", slot_id=0)
+            assert pool.slots[0]._pinned_mmap is handles[0]
+
+            pool.preload("model_b", slot_id=0)
+            assert pool.slots[0]._pinned_mmap is handles[1]
+
+            # Two make calls, one per distinct snapshot path.
+            assert mk.call_count == 2
+            # Restore called once per preload, with the right handle.
+            assert rst.call_args_list[0][0][1] is handles[0]
+            assert rst.call_args_list[1][0][1] is handles[1]
+
+    def test_make_pinned_mmap_failure_falls_back(self, pool_with_slots):
+        """If cudaHostRegister fails, the slot falls back to chunked RAM."""
+        pool = pool_with_slots
+
+        with patch(
+            "thaw_common.snapshot.make_pinned_mmap",
+            side_effect=RuntimeError("cudaHostRegister: ulimit -l too low"),
+        ) as mk, _patch_restore() as fallback:
+            pool.preload("model_a", slot_id=0)
+
+            assert mk.called
+            assert fallback.called
+            # Slot has no pinned mmap because registration failed.
+            assert pool.slots[0]._pinned_mmap is None
+            # Model name still set — the fallback completed successfully.
+            assert pool.slots[0].model_name == "model_a"
+
+    def test_pinned_restore_failure_drops_handle_and_falls_back(self, pool_with_slots):
+        """If restore_from_pinned_mmap raises, drop handle and retry via RAM path."""
+        pool = pool_with_slots
+        sentinel = MagicMock(name="pinned_mmap_handle")
+
+        with _patch_pinned_mmap(sentinel), \
+             patch(
+                 "thaw_common.snapshot.restore_model_from_pinned_mmap",
+                 side_effect=RuntimeError("DMA failed"),
+             ) as pinned_rst, \
+             _patch_restore() as fallback:
+            pool.preload("model_a", slot_id=0)
+
+            assert pinned_rst.called
+            assert fallback.called
+            # Handle dropped so the next reload will rebuild cleanly.
+            assert pool.slots[0]._pinned_mmap is None
+            assert pool.slots[0].model_name == "model_a"
+
+
+# ---------------------------------------------------------------------------
 # FastAPI endpoint tests
 # ---------------------------------------------------------------------------
 

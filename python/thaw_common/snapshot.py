@@ -404,6 +404,93 @@ def restore_model_from_ram(
     return stats
 
 
+def make_pinned_mmap(path: str):
+    """Open `path` and pin its pages for DMA, once.
+
+    Returns a `thaw.PinnedMmap` handle. The handle keeps the underlying
+    mmap alive via the Python buffer protocol, so the caller does not
+    have to hold the mmap object separately. Dropping the handle
+    unpins (via cudaHostUnregister) and releases the mmap.
+
+    Intended for `thaw serve`: warm each slot once with this, then
+    pass the handle to `restore_model_from_pinned_mmap` on every
+    subsequent load of the same snapshot. The per-restore cost drops
+    to just the PCIe DMA — the O(pages) registration cost is paid once
+    at slot warm-up and amortized across every reload.
+
+    Raises:
+        RuntimeError: if `cudaHostRegister` fails. Usually `ulimit -l`
+            is too low for the snapshot size. The caller should fall
+            back to `restore_model_from_ram`, which chunks through a
+            staging pinned buffer and does not need locked-memory quota.
+    """
+    import thaw as _thaw
+
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        file_size = os.fstat(fd).st_size
+        # Same mmap flags as restore_model_from_ram: writable pages
+        # are required by cudaHostRegister's default flag. We never
+        # actually write — MAP_PRIVATE on the read-only file means
+        # any write would trigger COW anyway, but the zero-copy path
+        # is strictly read-only so that never happens.
+        if sys.platform == "linux":
+            MAP_POPULATE = 0x08000
+            mm = mmap.mmap(
+                fd, file_size,
+                flags=mmap.MAP_PRIVATE | MAP_POPULATE,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            )
+        else:
+            mm = mmap.mmap(fd, file_size, access=mmap.ACCESS_READ)
+    finally:
+        os.close(fd)
+
+    # PinnedMmap takes the PyBuffer from `mm`, pinning the pages via
+    # cudaHostRegister. `mm` stays alive through the buffer-protocol
+    # reference held inside the PinnedMmap until the handle is dropped.
+    return _thaw.PinnedMmap(mm)
+
+
+def restore_model_from_pinned_mmap(model: nn.Module, pinned) -> dict:
+    """Restore weights from a `PinnedMmap` produced by `make_pinned_mmap`.
+
+    Skips the registration step entirely — the mmap pages were pinned
+    when `pinned` was constructed. The per-restore cost is the PCIe
+    DMA itself plus plan construction (microseconds).
+
+    Reuses the same parameter-ordering contract as
+    `restore_model_from_ram`: regions are matched against CUDA
+    parameters in `model.named_parameters()` order.
+    """
+    import thaw as _thaw
+
+    params = []
+    for name, param in model.named_parameters():
+        if param.is_cuda:
+            params.append((name, param))
+
+    mapping = [
+        ("weights", i, param.data.data_ptr(), param.data.nbytes)
+        for i, (name, param) in enumerate(params)
+    ]
+
+    t0 = time.perf_counter()
+    result = _thaw.restore_from_pinned_mmap(pinned, mapping)
+    elapsed = time.perf_counter() - t0
+
+    total_bytes = result["bytes_copied"]
+    return {
+        "num_regions": result["regions_restored"],
+        "total_bytes": total_bytes,
+        "elapsed_s": elapsed,
+        "dma_time_s": elapsed,
+        "dma_throughput_gb_s": (total_bytes / 1e9) / elapsed if elapsed > 0 else 0,
+        "throughput_gb_s": (total_bytes / 1e9) / elapsed if elapsed > 0 else 0,
+        "backend": "rust_pipelined_pinned_mmap",
+    }
+
+
 def restore_model_pipelined(
     model: nn.Module,
     path: str,
