@@ -31,6 +31,8 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 
 
 from thaw_common.util import rank_snapshot_path as _rank_snapshot_path
+from thaw_common.cloud import resolve_snapshot_path as _resolve_snapshot_path
+from thaw_common.telemetry import fallback_warning as _fallback_warning, strict_mode as _strict_mode
 
 
 def _get_tp_rank() -> int:
@@ -82,7 +84,11 @@ class ThawModelLoader(BaseModelLoader):
         tp_size = _get_tp_size()
 
         # For TP > 1, each worker loads from its per-rank snapshot file.
+        # Per-rank URI is computed first (string manipulation), then
+        # resolved — so s3://bucket/weights.thaw with TP=2 naturally becomes
+        # s3://bucket/weights.rank1.thaw for rank 1, each downloaded per-worker.
         snapshot_path = _rank_snapshot_path(self.snapshot_path, tp_rank)
+        snapshot_path = _resolve_snapshot_path(snapshot_path)
 
         if tp_size > 1 and not os.path.exists(snapshot_path):
             raise FileNotFoundError(
@@ -94,13 +100,22 @@ class ThawModelLoader(BaseModelLoader):
 
         # Try RAM path first (pre-stage file into memory, then DMA — avoids
         # slow pread-to-pinned-memory kernel path, ~6x faster on most systems).
-        # Fall back to file-based pipelined, then pure Python.
+        # Fall back to file-based pipelined, then pure Python. Every fallback
+        # is logged; THAW_STRICT=1 re-raises instead of degrading silently.
         try:
             stats = restore_model_from_ram(model, snapshot_path)
-        except Exception:
+        except Exception as e_ram:
+            _fallback_warning("ThawModelLoader.restore_model_from_ram", e_ram,
+                              dst="restore_model_pipelined")
+            if _strict_mode():
+                raise
             try:
                 stats = restore_model_pipelined(model, snapshot_path)
-            except Exception:
+            except Exception as e_pipe:
+                _fallback_warning("ThawModelLoader.restore_model_pipelined", e_pipe,
+                                  dst="restore_model (pure python)")
+                if _strict_mode():
+                    raise
                 stats = restore_model(model, snapshot_path)
 
         size_gb = stats['total_bytes'] / 1e9

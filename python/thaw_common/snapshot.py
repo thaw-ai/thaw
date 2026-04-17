@@ -32,6 +32,12 @@ from thaw_common.format import (
     read_header,
     read_region_entry,
 )
+from thaw_common.telemetry import (
+    fallback_warning,
+    strict_mode,
+    check_pinned,
+    logger as _log,
+)
 
 
 def freeze_model(
@@ -78,6 +84,7 @@ def freeze_model(
     t0 = time.perf_counter()
 
     flat_pinned = torch.empty(total_bytes, dtype=torch.uint8, pin_memory=True)
+    check_pinned(flat_pinned, "freeze_model flat staging buffer")
 
     offset = 0
     for _, p in params:
@@ -148,6 +155,7 @@ def restore_model(
             total_bytes += size
 
         flat_pinned = torch.empty(total_bytes, dtype=torch.uint8, pin_memory=True)
+        check_pinned(flat_pinned, "restore_model flat staging buffer")
 
         payload_start = entries[0][3] if entries else 0
         f.seek(payload_start)
@@ -197,7 +205,11 @@ def freeze_model_pipelined(
         import thaw as _thaw
         if not hasattr(_thaw, 'freeze_to_file_pipelined'):
             raise ImportError("freeze_to_file_pipelined not found")
-    except ImportError:
+    except ImportError as e:
+        fallback_warning("freeze_model_pipelined (rust ext not loaded)", e,
+                         dst="freeze_model (pure python)")
+        if strict_mode():
+            raise
         return freeze_model(model, path, engine_commit)
 
     params = []
@@ -253,8 +265,11 @@ def restore_model_from_ram(
         import thaw as _thaw
         if hasattr(_thaw, 'restore_from_bytes_pipelined'):
             use_rust = True
-    except ImportError:
-        pass
+    except ImportError as e:
+        fallback_warning("restore_model_from_ram (rust ext not loaded)", e,
+                         dst="python region-by-region copy")
+        if strict_mode():
+            raise
 
     if use_rust:
         mapping = [
@@ -265,29 +280,66 @@ def restore_model_from_ram(
         t_read = time.perf_counter()
         fd = os.open(path, os.O_RDONLY)
         file_size = os.fstat(fd).st_size
+        # MAP_PRIVATE + PROT_READ|PROT_WRITE: cudaHostRegister needs
+        # writable pages under the default flag (it sets up a bidirectional
+        # pin). A read-only mapping returns cudaErrorInvalidValue on
+        # registration even though we only DMA from it. MAP_PRIVATE is
+        # safe because we never actually write — the zero-copy restore
+        # path only reads these pages, so no COW fault is triggered and
+        # we DMA directly from the original page-cache pages.
         if sys.platform == "linux":
             import ctypes
             import ctypes.util
             MAP_POPULATE = 0x08000
             MADV_HUGEPAGE = 14
-            mm = mmap.mmap(fd, file_size, flags=mmap.MAP_PRIVATE | MAP_POPULATE,
-                            prot=mmap.PROT_READ | mmap.PROT_WRITE)
+            mm = mmap.mmap(fd, file_size,
+                           flags=mmap.MAP_PRIVATE | MAP_POPULATE,
+                           prot=mmap.PROT_READ | mmap.PROT_WRITE)
             try:
                 libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
                 buf = (ctypes.c_char * file_size).from_buffer(mm)
-                libc.madvise(ctypes.addressof(buf), file_size, MADV_HUGEPAGE)
+                if libc.madvise(ctypes.addressof(buf), file_size, MADV_HUGEPAGE) != 0:
+                    _log.debug(
+                        "madvise(MADV_HUGEPAGE) unavailable (errno=%d); "
+                        "zero-copy cudaHostRegister path doesn't need it.",
+                        ctypes.get_errno(),
+                    )
                 del buf
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("madvise setup skipped (%s: %s)",
+                           type(e).__name__, e)
         else:
             mm = mmap.mmap(fd, file_size, access=mmap.ACCESS_READ)
         os.close(fd)
         read_time = time.perf_counter() - t_read
 
+        # Zero-copy path (cudaHostRegister + direct DMA) is opt-in via
+        # THAW_ZEROCOPY_MMAP=1. cudaHostRegister is O(pages) — pinning a
+        # 16 GB mmap can take several seconds, which dominates the
+        # restore budget for a one-shot load. The chunked pinned-staging
+        # path is faster when registration can't be amortized. The
+        # zero-copy path is designed for `thaw serve`, which registers
+        # the mmap once at slot warm-up and reuses it across restores.
+        backend_label = "rust_pipelined_mmap"
+        zerocopy_fn = getattr(_thaw, "restore_from_bytes_pipelined_zerocopy", None)
+        zerocopy_enabled = os.environ.get("THAW_ZEROCOPY_MMAP", "0") == "1"
+        used_zerocopy = False
         t0 = time.perf_counter()
-        result = _thaw.restore_from_bytes_pipelined(
-            mm, mapping, chunk_size_mb=chunk_size_mb,
-        )
+        if zerocopy_fn is not None and zerocopy_enabled:
+            try:
+                result = zerocopy_fn(mm, mapping)
+                backend_label = "rust_pipelined_mmap_zerocopy"
+                used_zerocopy = True
+            except RuntimeError as e:
+                _log.warning(
+                    "zero-copy restore failed (%s); falling back to "
+                    "chunked memcpy path. Check `ulimit -l` on this host.",
+                    e,
+                )
+        if not used_zerocopy:
+            result = _thaw.restore_from_bytes_pipelined(
+                mm, mapping, chunk_size_mb=chunk_size_mb,
+            )
         dma_time = time.perf_counter() - t0
         mm.close()
 
@@ -324,6 +376,7 @@ def restore_model_from_ram(
             for i, (name, param) in enumerate(params):
                 nbytes = param.data.nbytes
                 pinned = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+                check_pinned(pinned, f"restore_model_from_ram region {i} ({name})")
                 np_buf = pinned.numpy()
                 bytes_read = f.readinto(np_buf)
                 if bytes_read != nbytes:
@@ -336,7 +389,7 @@ def restore_model_from_ram(
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - t0
     num_regions = result['regions_restored'] if use_rust else len(params)
-    backend = "rust_pipelined_mmap" if use_rust else "python_region_copy"
+    backend = backend_label if use_rust else "python_region_copy"
     stats = {
         "num_regions": num_regions,
         "total_bytes": total_bytes,
@@ -366,7 +419,11 @@ def restore_model_pipelined(
         import thaw as _thaw
         if not hasattr(_thaw, 'restore_from_file_pipelined'):
             raise ImportError("restore_from_file_pipelined not found")
-    except ImportError:
+    except ImportError as e:
+        fallback_warning("restore_model_pipelined (rust ext not loaded)", e,
+                         dst="restore_model (pure python)")
+        if strict_mode():
+            raise
         return restore_model(model, path)
 
     params = []

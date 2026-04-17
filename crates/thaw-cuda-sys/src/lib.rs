@@ -27,6 +27,9 @@
 //     - `cudaFree`              — device free.
 //     - `cudaMallocHost`        — pinned host allocation.
 //     - `cudaFreeHost`          — pinned host free.
+//     - `cudaHostAlloc`         — pinned host alloc with flags (WC).
+//     - `cudaHostRegister`      — pin an existing host range in place.
+//     - `cudaHostUnregister`    — unpin a previously-registered range.
 //     - `cudaMemcpy`            — synchronous device<->host copy.
 //     - `cudaMemcpyAsync`       — asynchronous copy on a named stream.
 //     - `cudaStreamCreate`      — create a named CUDA stream.
@@ -123,6 +126,25 @@ pub const CUDA_HOST_ALLOC_WRITE_COMBINED: c_uint = 0x04;
 /// Flag for `cudaHostAlloc`: default allocation (same as `cudaMallocHost`).
 #[cfg(feature = "cuda")]
 pub const CUDA_HOST_ALLOC_DEFAULT: c_uint = 0x00;
+
+/// Flag for `cudaHostRegister`: default (same as no flags).
+#[cfg(feature = "cuda")]
+pub const CUDA_HOST_REGISTER_DEFAULT: c_uint = 0x00;
+
+/// Flag for `cudaHostRegister`: the memory returned by this call will be
+/// considered pinned memory by all CUDA contexts, not just the one that
+/// performed the allocation. Required for memory shared across processes
+/// (mmap on /dev/shm, etc.) to be DMA-able without re-registration.
+#[cfg(feature = "cuda")]
+pub const CUDA_HOST_REGISTER_PORTABLE: c_uint = 0x01;
+
+/// Flag for `cudaHostRegister`: maps the allocation into the CUDA
+/// address space. Required if callers want to use the mapped device
+/// pointer via `cudaHostGetDevicePointer`. thaw does not use this
+/// today — our flow uses the host pointer directly via
+/// `cudaMemcpyAsync` — but it is cheap to expose.
+#[cfg(feature = "cuda")]
+pub const CUDA_HOST_REGISTER_MAPPED: c_uint = 0x02;
 
 // =============================================================================
 // SAFE RUST-LEVEL HELPERS
@@ -328,6 +350,42 @@ extern "C" {
     /// Free a previously-allocated pinned host buffer. Same null-is-
     /// no-op semantics as `cudaFree`.
     pub fn cudaFreeHost(ptr: *mut c_void) -> c_int;
+
+    /// Page-lock an existing host memory range so the GPU can DMA
+    /// into or out of it without the driver's hidden-copy fallback.
+    ///
+    /// Unlike `cudaMallocHost`/`cudaHostAlloc`, the memory is *not*
+    /// owned by CUDA — the caller retains ownership (it was
+    /// `malloc`'d, `mmap`'d, etc.). The runtime pins the pages in
+    /// place for the duration of registration and unpins them on
+    /// `cudaHostUnregister`. Registering an `mmap`'d region of a
+    /// large snapshot file lets the pipelined restore path issue
+    /// `cudaMemcpyAsync` directly from the mapped pages — no
+    /// intermediate memcpy through a `cudaHostAlloc`'d staging
+    /// buffer, which is how we get PCIe-saturating throughput for
+    /// the `thaw serve` pre-staged-RAM path.
+    ///
+    /// `ptr` must be page-aligned on most kernels; `size` should
+    /// cover the contiguous byte range the caller intends to DMA
+    /// from. `flags` is one of the `CUDA_HOST_REGISTER_*` constants
+    /// above — thaw uses `CUDA_HOST_REGISTER_DEFAULT` because our
+    /// flow does not need portable or mapped semantics.
+    ///
+    /// Failure modes to expect in production:
+    ///   - `cudaErrorHostMemoryAlreadyRegistered` — an earlier call
+    ///     forgot to `cudaHostUnregister`. The safe wrapper treats
+    ///     this as a hard error; it is a logic bug.
+    ///   - `cudaErrorInvalidValue` — often a sign the container's
+    ///     `ulimit -l` (locked-memory limit) is too low for the
+    ///     requested size. The Python-side fallback path handles
+    ///     this by retrying with the non-registered memcpy path.
+    pub fn cudaHostRegister(ptr: *mut c_void, size: usize, flags: c_uint) -> c_int;
+
+    /// Release a previously-registered host memory range. Must be
+    /// called exactly once per successful `cudaHostRegister` before
+    /// the underlying memory is freed or unmapped. The safe wrapper
+    /// enforces this via an RAII guard in `thaw_runtime::backend`.
+    pub fn cudaHostUnregister(ptr: *mut c_void) -> c_int;
 
     /// Copy `count` bytes from `src` to `dst`. `kind` selects the
     /// direction — see `CudaMemcpyKind`.

@@ -53,13 +53,13 @@ use core::ffi::c_void;
 use core::ptr;
 
 use thaw_cuda_sys::{
-    cudaFree, cudaMalloc, cudaMallocHost, cudaMemcpy, cudaMemcpyAsync,
-    cudaStreamCreate, cudaStreamDestroy, cudaStreamSynchronize,
-    CudaMemcpyKind, CudaStatus, CudaStream,
+    cudaFree, cudaGetLastError, cudaHostRegister, cudaMalloc, cudaMallocHost, cudaMemcpy,
+    cudaMemcpyAsync, cudaStreamCreate, cudaStreamDestroy, cudaStreamSynchronize,
+    CudaMemcpyKind, CudaStatus, CudaStream, CUDA_HOST_REGISTER_DEFAULT,
 };
 
 use crate::backend::{
-    BackendError, CudaBackend, DevicePtr, DeviceRegion, PinnedBuffer,
+    BackendError, CudaBackend, DevicePtr, DeviceRegion, HostRegistration, PinnedBuffer,
     PipelinedBackend, StreamHandle,
 };
 
@@ -409,6 +409,83 @@ impl PipelinedBackend for RealCuda {
         status.ok().map_err(|status| BackendError::Cuda {
             status,
             op: "cudaMemcpyAsync(d2h)",
+        })
+    }
+
+    unsafe fn host_register(
+        &self,
+        ptr: *mut u8,
+        size: usize,
+    ) -> Result<HostRegistration, BackendError> {
+        if size == 0 {
+            // Registering a zero-byte range is explicitly undefined
+            // in the runtime docs. A zero-byte guard is a no-op both
+            // ways — the caller's `memcpy_h2d_async_raw` loop will
+            // have nothing to do anyway.
+            return Ok(HostRegistration::noop(ptr, 0));
+        }
+
+        // SAFETY: the caller's contract on `host_register` requires
+        // `ptr` to be a live, contiguous host range of `size` bytes.
+        // `cudaHostRegister` itself will return `cudaErrorInvalidValue`
+        // for a misaligned pointer or a range it cannot pin — we
+        // surface that error unchanged so the Python-side fallback
+        // can retry via the staging-buffer path.
+        let status = CudaStatus(cudaHostRegister(
+            ptr as *mut c_void,
+            size,
+            CUDA_HOST_REGISTER_DEFAULT,
+        ));
+        if !status.is_ok() {
+            // CUDA errors are sticky per-thread. If we return the error
+            // without clearing it, the next unrelated CUDA call (e.g.
+            // a torch tensor op during model warmup) will observe the
+            // same error and crash — even though the fallback restore
+            // path succeeded. Calling `cudaGetLastError` here consumes
+            // the sticky state so the caller's fallback can proceed on
+            // a clean context.
+            let _ = cudaGetLastError();
+            return Err(BackendError::Cuda {
+                status,
+                op: "cudaHostRegister",
+            });
+        }
+
+        // SAFETY: `cudaHostRegister` just returned success; the
+        // guard's Drop will match it with exactly one
+        // `cudaHostUnregister` call.
+        Ok(HostRegistration::registered_cuda(ptr, size))
+    }
+
+    unsafe fn memcpy_h2d_async_raw(
+        &self,
+        region: &DeviceRegion,
+        src_ptr: *const u8,
+        size: usize,
+        stream: &StreamHandle,
+    ) -> Result<(), BackendError> {
+        if size as u64 > region.size {
+            return Err(BackendError::SizeMismatch {
+                region: region.size,
+                host: size,
+            });
+        }
+
+        // SAFETY: both `region.ptr` and `src_ptr` are caller-trusted
+        // per the trait's Safety contract. The stream handle came
+        // from `stream_create`. `cudaMemcpyAsync` reads the source
+        // bytes asynchronously on the GPU's DMA engine; the caller
+        // promised not to mutate them until `stream_sync`.
+        let status = CudaStatus(cudaMemcpyAsync(
+            region.ptr.0 as *mut c_void,
+            src_ptr as *const c_void,
+            size,
+            CudaMemcpyKind::HostToDevice.as_raw(),
+            stream.0 as CudaStream,
+        ));
+        status.ok().map_err(|status| BackendError::Cuda {
+            status,
+            op: "cudaMemcpyAsync(h2d raw)",
         })
     }
 }

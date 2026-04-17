@@ -429,6 +429,135 @@ pub trait CudaBackend: Send + Sync {
 }
 
 // =============================================================================
+// HOST REGISTRATION — ZERO-COPY DMA FROM EXTERNAL HOST MEMORY
+// =============================================================================
+//
+// `HostRegistration` is the RAII guard returned by
+// `PipelinedBackend::host_register`. While it is alive, the pinned byte
+// range is DMA-addressable: callers can pass sub-slices of the range
+// to `memcpy_h2d_async_raw` without any intermediate `cudaHostAlloc`
+// staging buffer.
+//
+// This is what turns a `mmap`'d snapshot file into a zero-copy DMA
+// source. The runtime pins the mapped pages in place for the lifetime
+// of the guard; on drop we unpin them. The caller is responsible for
+// keeping the underlying memory allocation alive at least as long as
+// the registration — the guard holds a raw pointer, not a lifetime
+// reference, because the memory usually comes from Python's mmap
+// object whose lifetime we cannot express in Rust.
+//
+// The guard is deliberately concrete (not a trait object) so that it
+// compiles on Mac builds with no CUDA toolchain. The `is_real` flag
+// distinguishes the cuda path (drop calls `cudaHostUnregister`) from
+// the mock path (drop is a no-op). Both paths construct the same
+// `HostRegistration` type, so orchestration code does not care which
+// backend it came from.
+
+/// RAII guard for a `cudaHostRegister`'d host memory range.
+///
+/// Obtain one via `PipelinedBackend::host_register`. While it is
+/// alive, the underlying byte range is page-locked by the CUDA
+/// runtime and can be passed to `memcpy_h2d_async_raw` as a DMA
+/// source. Drop unpins the range.
+///
+/// The guard is `Send` but not `Sync`: a single registration can
+/// move between threads (the restore pipeline runs on a worker
+/// thread) but should not be shared across threads that issue
+/// concurrent DMAs from overlapping sub-slices — the caller is in
+/// a better position to serialize that than the guard is.
+pub struct HostRegistration {
+    /// Base pointer of the registered range. Stored as raw bytes
+    /// instead of a typed `*mut c_void` so the struct compiles on
+    /// non-cuda builds without pulling in FFI types.
+    ptr: *mut u8,
+    /// Length in bytes.
+    size: usize,
+    /// True iff this guard actually called `cudaHostRegister`. The
+    /// mock backend returns a no-op guard (the pointer is just a
+    /// byte slice we are pretending to pin); dropping that must NOT
+    /// call `cudaHostUnregister`.
+    is_real: bool,
+}
+
+impl HostRegistration {
+    /// Construct a no-op guard. Used by the mock backend and by
+    /// non-cuda builds of the real backend. Drop does nothing.
+    ///
+    /// The caller still receives a valid `HostRegistration` with
+    /// working `as_ptr`/`size` accessors, so orchestration code can
+    /// exercise the zero-copy pipeline path against the mock.
+    pub(crate) fn noop(ptr: *mut u8, size: usize) -> Self {
+        HostRegistration {
+            ptr,
+            size,
+            is_real: false,
+        }
+    }
+
+    /// Construct a real guard. Only called from the `real` module
+    /// after `cudaHostRegister` returns success. Drop will call
+    /// `cudaHostUnregister` exactly once.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been passed to a successful
+    ///   `cudaHostRegister(ptr, size, ...)` call that has not yet
+    ///   been matched by a `cudaHostUnregister`.
+    /// - The underlying memory must remain valid for the lifetime
+    ///   of the guard.
+    #[cfg(feature = "cuda")]
+    pub(crate) unsafe fn registered_cuda(ptr: *mut u8, size: usize) -> Self {
+        HostRegistration {
+            ptr,
+            size,
+            is_real: true,
+        }
+    }
+
+    /// Raw pointer to the base of the registered range. Used by
+    /// `PipelinedBackend::memcpy_h2d_async_raw` callers to compute
+    /// sub-slice source pointers.
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    /// Length in bytes.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+}
+
+// SAFETY: see the `Send` impl on `PinnedBuffer` for the argument. A
+// `HostRegistration` is a raw pointer plus a size; moving ownership
+// across threads is allowed by the CUDA runtime (the pinning is
+// process-wide, not thread-local). `!Sync` by omission because two
+// threads issuing overlapping async DMAs from the same guard is the
+// caller's responsibility to coordinate, not the guard's.
+unsafe impl Send for HostRegistration {}
+
+impl Drop for HostRegistration {
+    fn drop(&mut self) {
+        if !self.is_real {
+            return;
+        }
+        #[cfg(feature = "cuda")]
+        {
+            // SAFETY: the `registered_cuda` constructor's contract
+            // requires `ptr` to be a successfully-registered,
+            // not-yet-unregistered pointer. We drop exactly once.
+            // Best-effort: if unregister fails (e.g. context teardown)
+            // there is nothing a destructor can do about it — the
+            // same rationale as `PinnedBuffer`'s Drop.
+            unsafe {
+                let _ = thaw_cuda_sys::cudaHostUnregister(
+                    self.ptr as *mut core::ffi::c_void,
+                );
+            }
+        }
+    }
+}
+
+// =============================================================================
 // PIPELINED BACKEND — ASYNC STREAMS FOR THE HOT PATH
 // =============================================================================
 
@@ -510,6 +639,79 @@ pub trait PipelinedBackend: CudaBackend {
         dst: &mut PinnedBuffer,
         dst_offset: usize,
         region: &DeviceRegion,
+        stream: &StreamHandle,
+    ) -> Result<(), BackendError>;
+
+    /// Pin an existing host memory range in place for DMA.
+    ///
+    /// The returned `HostRegistration` is a RAII guard: while it is
+    /// alive, `memcpy_h2d_async_raw` can DMA from any sub-slice of
+    /// `[ptr, ptr+size)` without an intermediate staging buffer.
+    /// Drop the guard to unpin.
+    ///
+    /// This is the zero-copy restore hot path: the Python-side mmap
+    /// of a snapshot file is registered once, then each region's
+    /// bytes are DMA'd directly from the mapped pages. For the
+    /// pre-staged-RAM path this eliminates the memcpy-into-pinned-
+    /// buffer hop that currently dominates the critical path.
+    ///
+    /// Failure modes:
+    ///   - The system's locked-memory rlimit (`ulimit -l`) is too
+    ///     low to pin `size` bytes. Surfaces as `BackendError::Cuda`.
+    ///     Callers should fall back to the staging-buffer path.
+    ///   - The range overlaps an already-registered range. Ditto.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must point to a contiguous, readable byte range of
+    ///   at least `size` bytes that remains valid and unmodified by
+    ///   other threads for the lifetime of the returned guard.
+    /// - The caller must not free, unmap, or shrink the underlying
+    ///   allocation while the guard is alive.
+    /// - For real CUDA, `ptr` must typically be page-aligned; the
+    ///   runtime will return `cudaErrorInvalidValue` otherwise and
+    ///   the error is surfaced to the caller.
+    ///
+    /// The mock backend ignores alignment and always succeeds,
+    /// returning a no-op guard whose Drop does nothing.
+    unsafe fn host_register(
+        &self,
+        ptr: *mut u8,
+        size: usize,
+    ) -> Result<HostRegistration, BackendError>;
+
+    /// Asynchronous host-to-device copy from a raw host pointer.
+    ///
+    /// Unlike `memcpy_h2d_async`, the source is a raw pointer into
+    /// caller-managed host memory (typically a slice of a
+    /// `HostRegistration`'s range). Used by the zero-copy pipelined
+    /// restore path to DMA directly from `mmap`'d snapshot pages.
+    ///
+    /// Copies `size` bytes from `src_ptr` into `region.ptr`. The
+    /// caller must not mutate the `size` bytes at `src_ptr` between
+    /// this call and the next `stream_sync` on the same stream.
+    ///
+    /// # Safety
+    ///
+    /// - `src_ptr` must point to at least `size` bytes of readable,
+    ///   page-locked host memory (page-locked via a live
+    ///   `HostRegistration`, or allocated via `alloc_pinned` /
+    ///   `cudaHostAlloc`).
+    /// - The memory at `src_ptr` must remain valid and unmutated
+    ///   until `stream_sync` on `stream` completes.
+    /// - `region.ptr` must be a valid device pointer in the
+    ///   current CUDA context, with at least `size` bytes of
+    ///   allocated device memory at that offset.
+    ///
+    /// If the source is not actually page-locked, the CUDA runtime
+    /// silently falls back to a synchronous transfer — the single
+    /// worst performance trap in the CUDA API. The `unsafe` marker
+    /// is a reminder that this function does not check for that.
+    unsafe fn memcpy_h2d_async_raw(
+        &self,
+        region: &DeviceRegion,
+        src_ptr: *const u8,
+        size: usize,
         stream: &StreamHandle,
     ) -> Result<(), BackendError>;
 }

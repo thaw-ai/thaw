@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::backend::{
-    BackendError, CudaBackend, DevicePtr, DeviceRegion, PinnedBuffer,
+    BackendError, CudaBackend, DevicePtr, DeviceRegion, HostRegistration, PinnedBuffer,
     PipelinedBackend, StreamHandle,
 };
 
@@ -377,6 +377,49 @@ impl PipelinedBackend for MockCuda {
         }
 
         Err(BackendError::UnknownDevicePtr(region.ptr))
+    }
+
+    unsafe fn host_register(
+        &self,
+        ptr: *mut u8,
+        size: usize,
+    ) -> Result<HostRegistration, BackendError> {
+        // The mock has nothing to pin. The caller still gets a
+        // valid guard so orchestration code can exercise the
+        // zero-copy pipeline against the mock backend — we just
+        // won't issue any actual FFI call when the guard drops.
+        Ok(HostRegistration::noop(ptr, size))
+    }
+
+    unsafe fn memcpy_h2d_async_raw(
+        &self,
+        region: &DeviceRegion,
+        src_ptr: *const u8,
+        size: usize,
+        stream: &StreamHandle,
+    ) -> Result<(), BackendError> {
+        if size as u64 > region.size {
+            return Err(BackendError::SizeMismatch {
+                region: region.size,
+                host: size,
+            });
+        }
+
+        // Snapshot the source bytes now, mirroring what real CUDA
+        // would do at DMA start. The `unsafe` signature is the
+        // caller's promise that `src_ptr..src_ptr+size` is valid,
+        // readable host memory.
+        let data = core::slice::from_raw_parts(src_ptr, size).to_vec();
+
+        let mut pending = self.pending.lock().expect("lock poisoned");
+        let queue = pending.get_mut(&stream.0).ok_or(BackendError::StreamError {
+            op: "memcpy_h2d_async_raw: unknown stream handle",
+        })?;
+        queue.push(PendingCopy {
+            dst_ptr: region.ptr,
+            data,
+        });
+        Ok(())
     }
 }
 
