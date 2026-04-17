@@ -44,36 +44,18 @@ logger = logging.getLogger("thaw.pool")
 
 @dataclass
 class EngineSlot:
-    """A single pre-warmed vLLM engine slot."""
+    """A single pre-warmed vLLM engine slot.
+
+    Slot-persistent pinned-mmap state lives inside the vLLM worker
+    process (see thaw_vllm._pool_worker), not on this dataclass. Under
+    V1 MP, cudaHostRegister state cannot cross the IPC boundary, so all
+    DMA work dispatches through llm.collective_rpc.
+    """
     id: int
     llm: object  # vllm.LLM instance
     model_name: Optional[str] = None
     snapshot_path: Optional[str] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    _model_ref: object = field(default=None, repr=False)
-    # Slot-persistent pinned mmap for the currently loaded snapshot.
-    # Populated on first successful load of `snapshot_path`, reused on
-    # subsequent same-path reloads, dropped + rebuilt when the slot's
-    # snapshot_path changes. `None` on cold slots and when the zero-
-    # copy path is unavailable on this host.
-    _pinned_mmap: object = field(default=None, repr=False)
-
-    @property
-    def model(self):
-        """Cached reference to the underlying nn.Module for DMA ops."""
-        if self._model_ref is None:
-            from thaw_vllm.snapshot import _get_engine_core_from_llm
-            ec = _get_engine_core_from_llm(self.llm)
-            self._model_ref = ec.model_executor.driver_worker.model_runner.model
-        return self._model_ref
-
-    def _drop_pinned_mmap(self):
-        """Release any slot-persistent pinned registration.
-
-        Runs `cudaHostUnregister` and frees the mmap. Call before
-        rebuilding for a different snapshot path, or at slot teardown.
-        """
-        self._pinned_mmap = None
 
 
 class EnginePool:
@@ -183,94 +165,47 @@ class EnginePool:
     def _swap_model(self, slot: EngineSlot, model_name: str):
         """DMA weights from snapshot into engine slot (blocking).
 
-        Tries restore strategies in order of speed:
-          1. Slot-pinned mmap (persistent cudaHostRegister, reused across reloads)
-          2. RAM restore (Rust, mmap + pipelined DMA — per-call pin)
-          3. Pipelined file restore (Rust, double-buffered DMA + O_DIRECT)
-          4. Pure Python region-by-region (fallback)
+        Dispatches to each TP worker via llm.collective_rpc. The worker
+        maintains the slot-persistent pinned mmap (fast path) and
+        falls back through RAM restore → pipelined DMA → pure Python.
+        Works transparently under V0, V1 inproc, and V1 MP.
         """
-        snapshot_path = self.snapshots[model_name]
+        base_path = self.snapshots[model_name]
         logger.info(
             "Slot %d: swapping '%s' -> '%s'",
             slot.id, slot.model_name or "(empty)", model_name,
         )
         t0 = time.perf_counter()
 
-        if self.tp_size > 1:
-            from thaw_vllm.snapshot import restore_model_tp
-            stats = restore_model_tp(slot.llm, snapshot_path)
-            resolved_path = snapshot_path
+        from thaw_common.cloud import resolve_snapshot_path
+        from thaw_vllm._pool_worker import swap_model as _worker_swap
+
+        # Resolve the top-level path (S3 → local cache) in the parent;
+        # each worker applies rank_snapshot_path on top for TP > 1.
+        resolved_path = resolve_snapshot_path(base_path)
+
+        results = slot.llm.collective_rpc(
+            _worker_swap, args=(slot.id, resolved_path),
+        )
+
+        # TP=1 → single-entry list; TP>1 → per-rank stats.
+        if len(results) == 1:
+            stats = results[0]
         else:
-            from thaw_vllm.snapshot import (
-                restore_model_pipelined,
-                restore_model_from_ram,
-                restore_model,
-            )
-            from thaw_common.cloud import resolve_snapshot_path
-            from thaw_common.telemetry import fallback_warning, strict_mode
-            from thaw_common.snapshot import (
-                make_pinned_mmap,
-                restore_model_from_pinned_mmap,
-            )
-
-            local_path = resolve_snapshot_path(snapshot_path)
-            resolved_path = local_path
-            stats = None
-
-            # Path 1: slot-persistent pinned mmap. Drop any stale
-            # registration (different snapshot) before building a new
-            # one. On the reuse path `_pinned_mmap` is already correct
-            # and we skip straight to restore_from_pinned_mmap.
-            if slot.snapshot_path != local_path and slot._pinned_mmap is not None:
-                slot._drop_pinned_mmap()
-
-            if slot._pinned_mmap is None:
-                try:
-                    slot._pinned_mmap = make_pinned_mmap(local_path)
-                except Exception as e_pin:
-                    fallback_warning(
-                        f"EnginePool.slot{slot.id}.make_pinned_mmap", e_pin,
-                        dst="restore_model_from_ram",
-                    )
-                    if strict_mode():
-                        raise
-
-            if slot._pinned_mmap is not None:
-                try:
-                    stats = restore_model_from_pinned_mmap(
-                        slot.model, slot._pinned_mmap,
-                    )
-                except Exception as e_reuse:
-                    fallback_warning(
-                        f"EnginePool.slot{slot.id}.restore_model_from_pinned_mmap",
-                        e_reuse,
-                        dst="restore_model_from_ram",
-                    )
-                    slot._drop_pinned_mmap()
-                    if strict_mode():
-                        raise
-
-            if stats is None:
-                try:
-                    stats = restore_model_from_ram(slot.model, local_path)
-                except Exception as e_ram:
-                    fallback_warning(
-                        f"EnginePool.slot{slot.id}.restore_model_from_ram", e_ram,
-                        dst="restore_model_pipelined",
-                    )
-                    if strict_mode():
-                        raise
-                    try:
-                        stats = restore_model_pipelined(slot.model, local_path)
-                    except Exception as e_pipe:
-                        fallback_warning(
-                            f"EnginePool.slot{slot.id}.restore_model_pipelined",
-                            e_pipe,
-                            dst="restore_model (pure python)",
-                        )
-                        if strict_mode():
-                            raise
-                        stats = restore_model(slot.model, local_path)
+            total_bytes = sum(r['total_bytes'] for r in results)
+            total_elapsed = max(r['elapsed_s'] for r in results)
+            stats = {
+                'num_regions': sum(r['num_regions'] for r in results),
+                'total_bytes': total_bytes,
+                'elapsed_s': total_elapsed,
+                'throughput_gb_s': (
+                    (total_bytes / 1e9) / total_elapsed
+                    if total_elapsed > 0 else 0
+                ),
+                'tensor_parallel_size': self.tp_size,
+                'per_rank': results,
+                'backend': results[0].get('backend', 'unknown'),
+            }
 
         elapsed = time.perf_counter() - t0
         slot.model_name = model_name

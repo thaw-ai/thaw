@@ -1,3 +1,11 @@
+import os as _os
+
+# vLLM 0.19+ defaults to msgspec for engine IPC, which rejects function
+# callables. `collective_rpc(fn, args=...)` relies on passing worker
+# callables by reference, so opt into the cloudpickle fallback. Setdefault
+# so callers can still override if they need hardened serialization.
+_os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
 # thaw_vllm — GPU snapshot/restore for vLLM model weights.
 #
 # This module provides two operations:
@@ -55,7 +63,16 @@ def load(model: str, snapshot: str, kv_snapshot: str = None, **kwargs):
     Multi-GPU:
         llm = thaw_vllm.load("meta-llama/Meta-Llama-3-70B", "/path/to/weights.thaw",
                              tensor_parallel_size=4)
+
+    KV-cache restore requires V1-inproc mode because it touches scheduler
+    state that isn't reachable across V1 MP's IPC. Weights-only loads run
+    under V1 MP default.
     """
+    import os
+
+    if kv_snapshot:
+        os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
     from vllm import LLM
 
     kwargs.setdefault("enforce_eager", True)
