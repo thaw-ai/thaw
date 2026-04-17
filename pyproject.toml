@@ -27,9 +27,10 @@ dependencies = [
 [project.optional-dependencies]
 native = ["thaw-native>=0.1.2"]
 vllm = ["vllm>=0.18"]
-sglang = ["sglang>=0.4"]
+sglang = ["sglang>=0.4,<0.6"]
 serve = ["vllm>=0.18", "fastapi", "uvicorn"]
 cloud = ["boto3>=1.26"]
+test = ["pytest>=7.0", "httpx", "moto>=5.0"]
 all = ["vllm>=0.18", "fastapi", "uvicorn", "thaw-native>=0.1.2", "boto3>=1.26"]
 
 [project.scripts]

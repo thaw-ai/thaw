@@ -109,8 +109,16 @@ class EnginePool:
             self.slots.append(EngineSlot(id=i, llm=llm))
 
     def register(self, model_name: str, snapshot_path: str):
-        """Register a model snapshot for hot-loading."""
-        if not os.path.exists(snapshot_path):
+        """Register a model snapshot for hot-loading.
+
+        Accepts local paths and remote URIs (s3://...). Remote URIs are
+        not verified at registration time; the download happens lazily
+        inside _swap_model via resolve_snapshot_path, so S3 errors
+        surface at load time with a typed exception.
+        """
+        from thaw_common.cloud import is_remote
+
+        if not is_remote(snapshot_path) and not os.path.exists(snapshot_path):
             raise FileNotFoundError(f"Snapshot not found: {snapshot_path}")
         self.snapshots[model_name] = snapshot_path
         logger.info("Registered '%s' -> %s", model_name, snapshot_path)
@@ -298,7 +306,12 @@ def create_pool_app(pool: EnginePool) -> "FastAPI":
                 _tokenizer_cache[model_name] = AutoTokenizer.from_pretrained(
                     pool.base_model
                 )
-            except Exception:
+            except Exception as e:
+                from thaw_common.telemetry import fallback_warning
+                fallback_warning(
+                    f"tokenizer_load({pool.base_model})", e,
+                    dst="manual_prompt_formatting",
+                )
                 _tokenizer_cache[model_name] = None
         return _tokenizer_cache[model_name]
 
