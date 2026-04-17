@@ -42,13 +42,14 @@ pub mod real;
 pub mod restore;
 
 pub use backend::{
-    BackendError, CudaBackend, DevicePtr, DeviceRegion, PinnedBuffer,
+    BackendError, CudaBackend, DevicePtr, DeviceRegion, HostRegistration, PinnedBuffer,
     PipelinedBackend, StreamHandle,
 };
 pub use freeze::{freeze, FreezeConfig, FreezeError, FreezeRequest};
 pub use mock::MockCuda;
 pub use pipeline::{
-    freeze_pipelined, restore_pipelined, restore_pipelined_from_bytes, FreezeStats, PipelineConfig,
+    freeze_pipelined, restore_pipelined, restore_pipelined_from_bytes,
+    restore_pipelined_from_registered_bytes, FreezeStats, PipelineConfig,
 };
 #[cfg(feature = "cuda")]
 pub use real::{OwnedDeviceRegion, RealCuda};

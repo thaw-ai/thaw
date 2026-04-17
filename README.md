@@ -22,13 +22,13 @@ vLLM cold-starts Llama-3-70B on 2x A100 in 546 seconds. thaw restores it in **31
 
 | Method | Time | Throughput | Speedup |
 |--------|------|-----------|---------|
-| Normal vLLM cold start | 25.0s | — | 1x |
-| **thaw (cold-cache NVMe)** | **2.7s** | 13.0 GB/s | **9.2x** |
-| thaw (pre-staged RAM) | 3.5s | 10.69 GB/s | 5.9x<sup>†</sup> |
+| Normal vLLM cold start | 24.8s | — | 1x |
+| **thaw (cold-cache NVMe)** | **2.6s** | 14.12 GB/s | **9.7x** |
+| thaw (warm-cache) | 2.5s | 13.99 GB/s | 9.9x |
 
-> Cold-cache measurement verified with `vmtouch -e` (0% resident pages before restore, checked via `mincore`). fio parallel read on the same file confirms the NVMe ceiling at 11.9 GB/s — thaw's Rust reader saturates it. Reproducible: 9.1× / 9.2× / 9.4× across 3 back-to-back runs. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology.
+> Cold-cache measurement verified with `vmtouch -e` (0% resident pages before restore, checked via `mincore`). fio parallel read on the same file confirms the NVMe ceiling — thaw's Rust reader saturates it. Reproducible across back-to-back runs. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology.
 >
-> <sup>†</sup> The 5.9× pre-staged RAM row is from an earlier H100 SXM pod. On the 2026-04-17 verification pod the pre-staged path regressed to ~2 GB/s due to an `madvise(MADV_HUGEPAGE)` failure (container/kernel mismatch); cold-cache NVMe is unaffected. Tracking.
+> A pre-staged RAM path (mmap + `cudaHostRegister`) is implemented but gated off by default (`THAW_ZEROCOPY_MMAP=1` to enable). `cudaHostRegister` is O(pages) — pinning a 16 GB mmap costs ~7s, which dominates one-shot restore. The path exists for `thaw serve`, where registration is amortized across many restores. Tracking proper amortization in a follow-up.
 
 **Agent fork — clone a running AI session (Llama-3-8B-Instruct, H100 SXM):**
 
@@ -49,7 +49,7 @@ All paths produce **bit-identical** inference output. KV cache restore preserves
 | GPU | Model | Normal | thaw | Speedup |
 |-----|-------|--------|------|---------|
 | 2x A100 SXM 80GB | Llama-3-70B (TP=2) | 546.5s | 31.8s | **17.2x** |
-| H100 SXM 80GB | Llama-3-8B | 25.0s | 2.7s | **9.2x** |
+| H100 SXM 80GB | Llama-3-8B | 24.8s | 2.6s | **9.7x** |
 | RTX PRO 6000 (Blackwell) | Llama-3-8B | 28.6s | 3.2s | **8.9x** |
 | RTX A6000 | Llama-3-8B | 73.2s | 5.8s | **12.6x** |
 
@@ -62,11 +62,11 @@ Larger models show bigger speedups because weight loading dominates more of the 
 ```
 Normal vLLM cold start:
   Download weights → deserialize safetensors → copy to GPU → init KV cache → ready
-  [======================================] 25.0s
+  [======================================] 24.8s
 
 thaw restore (cold-cache NVMe):
   Dummy init → parallel NVMe read → pipelined DMA to GPU
-  [====] 2.7s
+  [====] 2.6s
 ```
 
 **Freeze** captures all GPU state into binary snapshots — model weights (`.thaw`) and KV cache blocks (`.thawkv`).
@@ -74,8 +74,8 @@ thaw restore (cold-cache NVMe):
 **Restore** initializes vLLM with dummy weights (fast — no disk I/O), then overwrites them from the snapshot using double-buffered pipelined DMA through pinned host memory. Two CUDA streams overlap PCIe transfers with disk reads. KV cache blocks are restored separately with their prefix cache hash mappings, so new requests immediately get cache hits.
 
 Two restore modes:
-- **Disk**: reads snapshot from NVMe with O_DIRECT, bypassing the kernel page cache. Throughput limited by NVMe bandwidth (5–7 GB/s on typical container overlay storage, more on local PCIe Gen5 SSDs).
-- **Pre-staged RAM**: snapshot already in memory (tmpfs, shared memory, or mmapped with page cache warm). Pure PCIe DMA — 10.69 GB/s on H100. This is what `thaw serve` uses to hit sub-second hot swaps.
+- **Disk**: reads snapshot from NVMe with O_DIRECT, bypassing the kernel page cache. Throughput limited by NVMe bandwidth — on H100 SXM NVMe this hits 14 GB/s with the Rust pipelined path, saturating the drive.
+- **Pre-staged RAM**: snapshot already in memory (tmpfs, shared memory, or mmapped with page cache warm). The full zero-copy path (mmap + `cudaHostRegister`) is implemented behind `THAW_ZEROCOPY_MMAP=1`, but the registration cost makes it a win only when amortized across many restores — the `thaw serve` use case. A default-on implementation that registers once at slot warm-up is in development.
 
 **KV cache snapshots** capture the prefix-cached blocks that vLLM retains after generation. On restore, block data is DMA'd back to GPU and the prefix cache hash table is reconstructed. Requests with matching prefixes skip prefill — the most expensive part of inference.
 
@@ -292,7 +292,7 @@ See [docs/LANDSCAPE.md](./docs/LANDSCAPE.md) for detailed analysis.
 
 - [x] Weight snapshot/restore (pure Python path)
 - [x] Rust+CUDA pipelined freeze/restore (double-buffered DMA, O_DIRECT)
-- [x] RAM-backed restore path (PCIe-saturating, 10.69 GB/s)
+- [x] RAM-backed restore path (mmap + chunked pinned staging; zero-copy mmap variant gated behind `THAW_ZEROCOPY_MMAP` for `thaw serve`)
 - [x] PyO3 bindings + vLLM integration shim
 - [x] H100 / A6000 / Blackwell benchmarks
 - [x] **KV cache snapshot/restore** — the moat (freeze/restore prefix-cached blocks, verified on Llama-3-8B)
