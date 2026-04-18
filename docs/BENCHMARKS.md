@@ -37,13 +37,26 @@ python python/vllm_demo.py --model meta-llama/Meta-Llama-3-8B --snapshot /tmp/sn
 | Phase | Time | Throughput | Notes |
 |-------|------|-----------|-------|
 | Normal vLLM cold start | 25.0s | — | Includes download check, safetensors deserialization, KV cache init |
-| Freeze (pipelined) | 4.2s | 3.82 GB/s | Double-buffered D2H DMA + disk write |
+| Freeze (v0.1.2, pre-rewrite) | 4.2s | 3.82 GB/s | Old BufWriter path — kept for comparison |
+| **Freeze (v0.2.1, pipelined)** | **1.7s** | **9.57 GB/s** | New `freeze_pipelined_to_file` — WC-pinned double-buffer + O_DIRECT |
 | **Restore (cold-cache NVMe)** | **1.2s** | **13.0 GB/s** | vmtouch-verified 0% resident; Rust pipelined reader saturates RAID10 parallel reads |
 | Dummy init (model skeleton) | 1.5s | — | vLLM `load_format="dummy"` |
 | **Total thaw cold start** | **2.7s** | — | 1.5s init + 1.2s cold restore |
 
 **Headline speedup (cold-cache NVMe): 9.2×** (25.0s → 2.7s, averaged over 3 runs: 9.1× / 9.2× / 9.4×)  
+**Freeze speedup (v0.1.2 → v0.2.1): 2.4×** (3.82 → 9.57 GB/s, end-to-end through `thaw freeze --model`)  
 **Correctness:** PASS (bit-identical greedy output, all 3 runs)
+
+### Pure-Rust freeze ceiling (synthetic 16 GiB buffer)
+
+The `thaw-bench-freeze` binary exercises `freeze_pipelined_to_file` with synthetic data to measure the Rust pipeline without Python-side overhead (`named_parameters()` iteration, per-region PyO3 boundary crossings):
+
+| Path | Time | Throughput | Notes |
+|------|------|-----------|-------|
+| Old `freeze_pipelined` + BufWriter | 84.5s | 0.19 GB/s | v0.1.2 baseline |
+| **New `freeze_pipelined_to_file` + O_DIRECT** | **0.82s** | **19.62 GB/s** | 78% of PCIe Gen5 x16 practical peak, 104× over old |
+
+The ~2× gap between the synthetic 19.62 GB/s and the end-to-end 9.57 GB/s is Python overhead; batching the region enumeration into Rust is a future sprint. Repro: `bash scripts/pod-bench-freeze.sh`.
 
 Why 13.0 GB/s beats single-threaded `dd iflag=direct` (≈7.2 GB/s on the same file): the Rust pipelined reader issues parallel I/Os across the 6-disk RAID10 stripe; single-threaded `dd` can't extract that parallelism and underestimates the true NVMe ceiling.
 
