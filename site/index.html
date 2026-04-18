@@ -1480,6 +1480,11 @@
         <h3>Slot-Warm Hot-Swap</h3>
         <p><code>thaw serve</code> pins a snapshot mmap once per slot, then reuses it for every reload. <strong style="color:var(--text)">0.29s swap at 55 GB/s</strong> for an 8B model — extrapolates to ~2.5s for 70B. OpenAI-compatible API.</p>
       </div>
+      <div class="feature">
+        <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9"/><path d="M16 21h5"/><path d="M18.5 18.5 21 21"/><ellipse cx="12" cy="9" rx="8" ry="3"/></svg>
+        <h3>Cloud Snapshots</h3>
+        <p>Freeze and serve directly from <code>s3://</code> URIs. <strong style="color:var(--text)">2.88 GB/s freeze+upload</strong> on H100 SXM (validated 2026-04-17). GCS coming. Parallel ranged-GET download path in progress.</p>
+      </div>
     </div>
   </div>
 </section>

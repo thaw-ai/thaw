@@ -1,6 +1,6 @@
 # thaw — Project State & Roadmap
 
-*Updated 2026-04-17 (post-issue-#5). This file is for Claude Code sessions — start here before suggesting work.*
+*Updated 2026-04-18 (launch day — videos live, site redesigned, first investor inbound). This file is for Claude Code sessions — start here before suggesting work.*
 
 ## What thaw is
 
@@ -47,6 +47,10 @@ python/
 8. **Pre-built wheels** on PyPI (`pip install thaw-vllm`)
 9. **Stress-tested** — 8/8 models across 5 architectures, bit-identical on 2× H100 SXM
 10. **V1 MP default support** — weights freeze/restore/load/pool/TP all work under vLLM's default multiprocessing mode. No more `VLLM_ENABLE_V1_MULTIPROCESSING=0` env-var hack for users (validated 2×A40 2026-04-17). Only KV cache path still needs V1 MP=0 — that's auto-set internally when `--kv-output`/`kv_snapshot` is used.
+11. **S3 end-to-end** — `thaw freeze --output s3://...` and `thaw serve --snapshot s3://...` both work. Freeze+upload 2.88 GB/s on H100 SXM (validated 2026-04-17). Download path is still boto3 single-stream — slow but functional. TP round-trip validated: `weights.thaw` + `weights.rank1.thaw` derived automatically.
+12. **Pipelined freeze rewrite (v0.2.1)** — `freeze_pipelined_to_file` matches restore architecture (WC-pinned double buffers, O_DIRECT, two CUDA streams). 9.57 GB/s end-to-end on H100 SXM (2.4× over v0.1.2), 19.62 GB/s pure Rust on synthetic buffer (104× over old BufWriter path).
+13. **Slot-warm hot-swap validated** — 2026-04-17 H100 SXM: 55 GB/s sustained, 0.29s per 8B reload after one-time pin. Extrapolates to ~2.5s for 70B (140 GB).
+14. **Launch assets (2026-04-18)** — Three production YouTube videos live (Public): Video 1 hero (75s), Video 2 how-it-works (4m), Video 3 agent fork (2m20s). Site redesigned with Team section (Nils founder, Matt + Karan co-founders), embedded videos, SGLang + S3 features surfaced. First investor inbound: [REDACTED].
 
 ## What's NOT built (the gaps)
 
@@ -109,5 +113,5 @@ Open-source library (shipped) → `thaw serve` daemon (shipped) → `s3://` roun
 - `README.md` — public-facing pitch + benchmarks
 - `docs/STRATEGY.md` — full business plan, pricing, YC narrative
 - `docs/LANDSCAPE.md` — competitive analysis
-- `plans/2026-04-15_sprint-plan.md` — week-by-week YC countdown
+- `plans/2026-04-18_launch-readiness.md` — current source of truth for YC countdown (supersedes 2026-04-15 sprint plan)
 - `.claude/projects/-Users-nils-Desktop-projects-thaw/memory/` — persistent memory across sessions
