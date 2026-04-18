@@ -5,7 +5,11 @@
 `thaw serve` hot-swaps a Llama-3-8B-class model in **0.29 seconds** at **55 GB/s** — PCIe Gen5-saturating, bit-identical output. Cold-start Llama-3-70B on 2x A100 drops from 546s to **31.8s** (17.2x). Rust+CUDA pipelined DMA, pinned-memory persistence, and KV cache snapshots that no other tool offers.
 
 <p align="center">
-  <img src="site/terminal.gif" alt="thaw demo — pip install, freeze, serve, chat completions on RunPod A40" width="800">
+  <a href="https://youtu.be/zPmuvSKWrSY">
+    <img src="https://img.youtube.com/vi/zPmuvSKWrSY/maxresdefault.jpg" alt="Watch: thaw hot-swaps a Llama-3-8B in 0.29s (75-second demo)" width="720">
+  </a>
+  <br>
+  <sub><b>▶ 75-second demo</b> — <a href="https://youtu.be/zPmuvSKWrSY">Hot-swap LLMs in 0.29s</a> · <a href="https://youtu.be/aLF3lIuBeBY">How it works (4m)</a> · <a href="https://youtu.be/Fzk8sVGgi1g">Fork a running agent (2m 20s)</a></sub>
 </p>
 
 ## Benchmarks
