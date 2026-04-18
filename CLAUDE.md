@@ -50,7 +50,7 @@ python/
 11. **S3 end-to-end** — `thaw freeze --output s3://...` and `thaw serve --snapshot s3://...` both work. Freeze+upload 2.88 GB/s on H100 SXM (validated 2026-04-17). Download path is still boto3 single-stream — slow but functional. TP round-trip validated: `weights.thaw` + `weights.rank1.thaw` derived automatically.
 12. **Pipelined freeze rewrite (v0.2.1)** — `freeze_pipelined_to_file` matches restore architecture (WC-pinned double buffers, O_DIRECT, two CUDA streams). 9.57 GB/s end-to-end on H100 SXM (2.4× over v0.1.2), 19.62 GB/s pure Rust on synthetic buffer (104× over old BufWriter path).
 13. **Slot-warm hot-swap validated** — 2026-04-17 H100 SXM: 55 GB/s sustained, 0.29s per 8B reload after one-time pin. Extrapolates to ~2.5s for 70B (140 GB).
-14. **Launch assets (2026-04-18)** — Three production YouTube videos live (Public): Video 1 hero (75s), Video 2 how-it-works (4m), Video 3 agent fork (2m20s). Site redesigned with Team section (Nils founder, Matt + Karan co-founders), embedded videos, SGLang + S3 features surfaced. First investor inbound: Caroline McManus, Hyde Park Venture Partners.
+14. **Launch assets (2026-04-18)** — Three production YouTube videos live (Public): Video 1 hero (75s), Video 2 how-it-works (4m), Video 3 agent fork (2m20s). Site redesigned with Team section (Nils founder, Matt + Karan co-founders), embedded videos, SGLang + S3 features surfaced. First investor inbound same day (details tracked in `plans/2026-04-18_launch-readiness.md`, which is git-ignored).
 
 ## What's NOT built (the gaps)
 
