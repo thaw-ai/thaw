@@ -1142,6 +1142,14 @@
       font-size: 13.5px;
       line-height: 1.6;
       color: var(--text-3);
+      margin-bottom: 10px;
+    }
+
+    .team-school {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      color: var(--text-dim);
       margin-bottom: 22px;
     }
 
@@ -1677,8 +1685,7 @@ Is there something I can help you with?"}}],
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         Team
       </span>
-      <h2>Built by three engineers who like GPUs a little too much</h2>
-      <p class="section-sub">Shipping from a private repo, a shared Linear, and a lot of H100 rentals.</p>
+      <h2>Team</h2>
     </div>
     <div class="team-grid reveal reveal-d1">
 
@@ -1686,7 +1693,8 @@ Is there something I can help you with?"}}],
         <div class="team-avatar">NM</div>
         <div class="team-role">Founder</div>
         <h3 class="team-name">Nils Matteson</h3>
-        <p class="team-bio">Runs product and the Python integration layer. Wrote the vLLM and SGLang loaders, the engine pool, and the OpenAI-compatible server. UW&ndash;Madison CS &amp; Data Science.</p>
+        <p class="team-bio">vLLM and SGLang integration, engine pool, OpenAI-compatible server.</p>
+        <p class="team-school">UW&ndash;Madison, CS &amp; Data Science. Class of 2026.</p>
         <div class="team-links">
           <a href="https://www.linkedin.com/in/nilsmatteson/" target="_blank" rel="noopener" class="team-link" aria-label="LinkedIn">
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.063 2.063 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
@@ -1698,7 +1706,8 @@ Is there something I can help you with?"}}],
         <div class="team-avatar">MY</div>
         <div class="team-role">Co-founder &middot; Engineering</div>
         <h3 class="team-name">Matthew Yu</h3>
-        <p class="team-bio">Owns Rust throughput: pinned memory, O_DIRECT, CUDA streams, and the pipelined freeze that hits 19.6 GB/s on H100. OS &amp; systems background.</p>
+        <p class="team-bio">Rust and CUDA throughput. Pinned memory, O_DIRECT, pipelined DMA.</p>
+        <p class="team-school">UW&ndash;Madison, CS. Class of 2026.</p>
         <div class="team-links">
           <a href="https://www.linkedin.com/in/matthewyu-dev/" target="_blank" rel="noopener" class="team-link" aria-label="LinkedIn">
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.063 2.063 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
@@ -1710,7 +1719,8 @@ Is there something I can help you with?"}}],
         <div class="team-avatar">KK</div>
         <div class="team-role">Co-founder &middot; Engineering</div>
         <h3 class="team-name">Karan Kapur</h3>
-        <p class="team-bio">Building the <code style="font-family:var(--font-mono);font-size:12px;color:var(--cyan);">thaw-cloud</code> crate &mdash; parallel ranged GETs into pinned rings for NIC-saturating S3 &amp; GCS restore. Algorithms &amp; distributed systems background.</p>
+        <p class="team-bio">Rust cloud storage. Parallel ranged S3 and GCS restore for NIC-saturating throughput.</p>
+        <p class="team-school">UW&ndash;Madison, CS. Class of 2026.</p>
         <div class="team-links">
           <a href="https://www.linkedin.com/in/karankapur5/" target="_blank" rel="noopener" class="team-link" aria-label="LinkedIn">
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.063 2.063 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
