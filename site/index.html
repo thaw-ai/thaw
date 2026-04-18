@@ -1123,7 +1123,7 @@
       <div class="feature">
         <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
         <h3>Pipelined DMA</h3>
-        <p>Double-buffered CUDA streams with pinned memory. Overlaps disk reads with PCIe transfers. Rust hot path hits 14.4 GB/s on H100.</p>
+        <p>Double-buffered CUDA streams with write-combining pinned memory. Symmetric freeze &amp; restore pipelines &mdash; both hit double-digit GB/s on H100, with the pure-Rust freeze ceiling at 19.6 GB/s (78% of PCIe Gen5).</p>
       </div>
       <div class="feature">
         <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M20 9h2M20 14h2M2 9h2M2 14h2"/></svg>
@@ -1220,19 +1220,19 @@ llm <span class="hl-op">=</span> LLM(
     tensor_parallel_size<span class="hl-op">=</span><span class="hl-num">2</span>,
     model_loader_extra_config<span class="hl-op">=</span>{<span class="hl-str">"snapshot"</span>: <span class="hl-str">"/snapshots/llama-70b.thaw"</span>}
 )</pre></div>
-      <div class="code-panel" id="tab-demo"><pre><span class="hl-cmt"># Fresh RunPod A40 — zero source builds, just pip</span>
+      <div class="code-panel" id="tab-demo"><pre><span class="hl-cmt"># Fresh RunPod H100 SXM — zero source builds, just pip</span>
 $ pip install thaw-vllm[all]
-<span class="hl-str">Successfully installed thaw-native-0.1.2 thaw-vllm-0.1.5 vllm-0.19.0</span>
+<span class="hl-str">Successfully installed thaw-native-0.2.1 thaw-vllm-0.2.1 vllm-0.19.0</span>
 
 $ huggingface-cli login
 <span class="hl-str">Login successful.</span>
 
 $ thaw freeze --model meta-llama/Llama-3.1-8B-Instruct -o weights.thaw
-<span class="hl-str">[thaw] Weights: 195 regions, 16.06 GB in 35.5s (0.45 GB/s)</span>
+<span class="hl-str">[thaw] Weights: 195 regions, 16.06 GB in 1.7s (9.57 GB/s)</span>
 
 $ thaw serve --model meta-llama/Llama-3.1-8B-Instruct --snapshot weights.thaw
 <span class="hl-str">[thaw] Slot 0 ready in 7.9s</span>
-<span class="hl-str">[thaw] Slot 0: loaded in 1.71s (9.4 GB/s, 16.06 GB)</span>
+<span class="hl-str">[thaw] Slot 0: loaded in 0.29s (55.1 GB/s, 16.06 GB)</span>
 <span class="hl-str">[thaw] Serving on http://0.0.0.0:8000/v1</span>
 
 $ curl localhost:8000/v1/chat/completions \

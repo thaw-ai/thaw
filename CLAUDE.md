@@ -52,7 +52,7 @@ python/
 
 | Gap | Why it matters | Owner |
 |-----|----------------|-------|
-| **Cloud snapshot storage (S3/GCS streaming)** | The actual managed-service hook. `thaw restore s3://...` is the Databricks-playbook moment. | Karan |
+| **Fast S3/GCS restore (ranged-GET pinned ring)** | `s3://` URIs work end-to-end (shipped 2026-04-17; freeze+upload 2.88 GB/s). But boto3 single-stream caps restore at ~67 MB/s → 229s ready on 8B. Rust `thaw-cloud` crate with parallel ranged GETs into pinned ring is the unlock. | Karan |
 | **GPUDirect Storage (GDS)** | NVMe → GPU without CPU bounce. Required to beat fastsafetensors' 26 GB/s. | Matt |
 | **vLLM upstream PR for `load_format="thaw"`** | Distribution + credibility. Even unmerged shows intent for YC. | Nils |
 | **Multi-GPU freeze throughput** | Currently ~1.4 GB/s (restore is 10+ GB/s). Wire Rust pipelined freeze through `collective_rpc`. | — |
@@ -67,7 +67,7 @@ python/
 
 **Tier 1 — before YC deadline 2026-05-04:**
 
-1. **Cloud snapshot storage** — `thaw freeze s3://bucket/model.thaw`, `thaw restore s3://...`. New crate `thaw-cloud`. This is the wedge from "free tool" to "managed service." Without it, there is no business model to demo; with it, the YC pitch writes itself ("Databricks for GPU state"). Karan owns.
+1. **Rust `thaw-cloud` ranged-GET crate** — S3 freeze+upload ships at 2.88 GB/s (validated H100 2026-04-17). Restore still single-stream boto3: ~67 MB/s, 229s ready on 8B. Parallel ranged GETs into a pinned ring should saturate the NIC and close the "managed service demo is slow" gap. Karan owns.
 2. **vLLM upstream PR** — Even if not merged by 2026-05-04, the PR link in the YC app proves ecosystem traction. Low effort, high signal.
 3. **EnginePool 10-model demo + video** — Directly matches InferX's claim. 30 seconds of screen recording = the YC money shot.
 4. **Agent fork demo polish + video** — Already works; needs a narrative recording. This is the differentiator nobody can match.
@@ -86,7 +86,7 @@ python/
 
 ## Business progression
 
-Open-source library (shipped) → `thaw serve` daemon (shipped) → **thaw Cloud CDN (tier 1 gap)** → universal GPU state layer (endgame). Databricks started with Spark → Delta Lake → platform. Same playbook.
+Open-source library (shipped) → `thaw serve` daemon (shipped) → `s3://` round-trip (shipped) → **fast S3 restore + managed CDN (tier 1 gap)** → universal GPU state layer (endgame). Databricks started with Spark → Delta Lake → platform. Same playbook.
 
 ## Critical constraints
 

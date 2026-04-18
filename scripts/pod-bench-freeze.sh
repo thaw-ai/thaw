@@ -3,9 +3,9 @@
 # RunPod H100 (or any CUDA box). Compares three freeze paths at Rust
 # level (no Python / vLLM / model loading):
 #
-#   A   old freeze_pipelined (BufWriter<File>)        — current 2.88 GB/s baseline
+#   A   old freeze_pipelined (BufWriter<File>)        — pre-rewrite baseline (~0.19 GB/s)
 #   B'  new freeze_pipelined_to_file, buffered pwrite  — isolates pipeline wins
-#   B   new freeze_pipelined_to_file, O_DIRECT pwrite  — full new path
+#   B   new freeze_pipelined_to_file, O_DIRECT pwrite  — full new path (~19.62 GB/s H100)
 #
 # All three paths write identical bytes (verified inline). The bench
 # allocates `SIZE_MB` of device memory, seeds it with a deterministic
