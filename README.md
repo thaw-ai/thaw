@@ -37,11 +37,12 @@
 | Normal vLLM cold start | 24.8s | — | 1x |
 | **thaw restore (cold-cache NVMe)** | **2.6s** | 14.12 GB/s | **9.7x** |
 | thaw restore (warm-cache) | 2.5s | 13.99 GB/s | 9.9x |
-| thaw freeze (D2H + NVMe write) | 5.6s | 2.88 GB/s | — |
+| **thaw freeze (end-to-end, v0.2.1)** | **1.7s** | **9.57 GB/s** | 2.4x over v0.1.2 |
+| Freeze (pure Rust, 16 GiB synthetic) | 0.82s | 19.62 GB/s | — |
 
 > Cold-cache measurement verified with `vmtouch -e` (0% resident pages before restore, checked via `mincore`). fio parallel read on the same file confirms the NVMe ceiling — thaw's Rust reader saturates it. Reproducible across back-to-back runs. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology.
 >
-> **Freeze is currently slower than restore** (2.88 GB/s vs 14 GB/s on the same hardware). Our restore path is chunked/O_DIRECT/write-combining pinned memory; the freeze path still allocates one pinned buffer per region and writes through the page cache. This is a Rust-side pipeline asymmetry, not a hardware limit — the rewrite to mirror restore's architecture is the next perf target. Tracked in [`plans/2026-04-17_pipelined-freeze-rewrite.md`](plans/2026-04-17_pipelined-freeze-rewrite.md).
+> **Freeze now runs on the same pipelined path as restore** (v0.2.1, 2026-04-17). Rewrote `freeze_pipelined_to_file` with double-buffered WC-pinned memory, two CUDA streams, and O_DIRECT writes — same architecture as restore. End-to-end (`thaw freeze --model`) hits 9.57 GB/s on H100 SXM; the pure-Rust pipeline on a synthetic 16 GiB buffer hits 19.62 GB/s (78% of PCIe Gen5 line rate). The ~2× gap is Python-side overhead (`named_parameters()` iteration + per-region PyO3 boundary); future batching work.
 >
 > A pre-staged RAM path (mmap + `cudaHostRegister`) is implemented but gated off by default (`THAW_ZEROCOPY_MMAP=1` to enable). `cudaHostRegister` is O(pages) — pinning a 16 GB mmap costs ~7s, which dominates one-shot restore. The path exists for `thaw serve`, where registration is amortized across many restores. Tracking proper amortization in a follow-up.
 
@@ -104,18 +105,21 @@ thaw/
     thaw-cuda-sys/   Rust. FFI bindings to CUDA runtime (cudaMallocHost,
                      cudaMemcpyAsync, streams). Built via build.rs.
     thaw-runtime/    Rust. Orchestration: freeze/restore pipelines, double-
-                     buffered DMA, O_DIRECT, MockCuda for Mac testing.
+                     buffered DMA, O_DIRECT, thread-local WC-buffer cache,
+                     unified zero-copy/staging restore. MockCuda for Mac.
     thaw-py/         Rust. PyO3 bindings exposing pipelined freeze/restore
                      to Python. Builds a native .so via maturin.
-    thaw-cli/        Rust. GPU benchmark binary.
+    thaw-cli/        Rust. thaw-bench-freeze binary + internal tooling.
   python/
-    thaw_vllm/       Python package (pip install thaw-vllm).
-      snapshot.py    Freeze/restore weights, Rust backend fallback.
-      kv_snapshot.py KV cache freeze/restore.
+    thaw_common/     Engine-agnostic freeze/restore primitives (shared).
+    thaw_vllm/       vLLM integration + engine pool + OpenAI server.
+      snapshot.py    vLLM TP freeze/restore via collective_rpc.
+      kv_snapshot.py KV cache freeze/restore (pipelined path, .meta sidecar).
       loader.py      vLLM ModelLoader: load_format="thaw".
-      pool.py        Engine pool: pre-warmed slots, model hot-swap, OpenAI API.
-      server.py      Single-engine OpenAI-compatible API server.
+      pool.py        Engine pool: pre-warmed slots, model hot-swap.
+      server.py      OpenAI-compatible API server.
       cli.py         CLI: thaw freeze, thaw serve, thaw info.
+    thaw_sglang/     SGLang integration (class-passthrough loader).
     vllm_demo.py     End-to-end benchmark: normal vs thaw cold start.
     kv_cache_demo.py KV cache snapshot/restore demo with correctness test.
   demos/
@@ -323,7 +327,7 @@ See [docs/LANDSCAPE.md](./docs/LANDSCAPE.md) for detailed analysis.
 - [x] **SGLang integration** — class-passthrough loader, freeze + restore, validated on H100 TP=2 (5.0 GB/s)
 - [x] **Slot-warm hot-swap** — persistent `cudaHostRegister` per pool slot, 0.29s / 55 GB/s model swap on H100 SXM (`thaw serve`)
 - [x] **Cloud snapshot storage (S3)** — `thaw freeze --output s3://...` and `thaw serve --snapshot s3://...`, validated H100 SXM 2026-04-17 (15 GiB freeze+upload in 5.6s, 229s single-stream S3 download — ranged-GET crate is next)
-- [ ] Pipelined-freeze parity with restore — rewrite freeze to use chunked WC-pinned buffers + O_DIRECT, target 10-14 GB/s (3-4x current)
+- [x] **Pipelined-freeze parity with restore** — `freeze_pipelined_to_file` with chunked WC-pinned buffers + O_DIRECT lands in v0.2.1 (2026-04-17). End-to-end 9.57 GB/s on H100 SXM (vs 3.82 GB/s in v0.1.2); pure-Rust 19.62 GB/s on synthetic buffer.
 - [ ] Rust `thaw-cloud` crate — concurrent ranged GETs for S3 restore at NIC line-rate
 - [ ] GPUDirect Storage support
 
