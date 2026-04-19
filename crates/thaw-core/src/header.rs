@@ -117,7 +117,7 @@ pub const HEADER_SIZE: u64 = 4096;
 /// `new_header_has_version_one` test to match the new number (and rename
 /// it), and add a migration branch in the reader. Do all three in the
 /// same commit so the history is easy to bisect.
-pub const CURRENT_VERSION: u32 = 1;
+pub const CURRENT_VERSION: u32 = 2;
 
 /// The fixed-size on-disk header of a `.thaw` snapshot file.
 ///
@@ -587,9 +587,9 @@ mod tests {
     ///   (b) broken the constructor so it no longer stamps the version.
     /// Both are worth knowing about immediately.
     #[test]
-    fn new_header_has_version_one() {
+    fn new_header_has_current_version() {
         let header = SnapshotHeader::new();
-        assert_eq!(header.version(), 1);
+        assert_eq!(header.version(), CURRENT_VERSION);
     }
 
     /// The third test: the `Display` impl mentions both the magic bytes
@@ -620,9 +620,10 @@ mod tests {
             rendered.contains("THAW"),
             "Display output should mention the magic bytes, got: {rendered}"
         );
+        let expected = format!("version={}", CURRENT_VERSION);
         assert!(
-            rendered.contains("version=1"),
-            "Display output should mention version=1, got: {rendered}"
+            rendered.contains(&expected),
+            "Display output should mention {expected}, got: {rendered}"
         );
     }
 
@@ -729,7 +730,7 @@ mod tests {
     fn to_bytes_encodes_version_little_endian_at_offset_four() {
         let header = SnapshotHeader::new();
         let bytes = header.to_bytes();
-        assert_eq!(&bytes[4..8], &1u32.to_le_bytes());
+        assert_eq!(&bytes[4..8], &CURRENT_VERSION.to_le_bytes());
     }
 
     /// The eighth test: a header survives a round trip through bytes
@@ -782,12 +783,12 @@ mod tests {
     #[test]
     fn from_bytes_rejects_wrong_version() {
         let mut bytes = SnapshotHeader::new().to_bytes();
-        // Stamp version 2 (LE) over the version slot.
-        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+        // Stamp a version we do not support over the version slot.
+        bytes[4..8].copy_from_slice(&99u32.to_le_bytes());
         let err = SnapshotHeader::from_bytes(&bytes).expect_err("should reject bad version");
         assert!(matches!(
             err,
-            HeaderError::UnsupportedVersion { found: 2, supported: 1 }
+            HeaderError::UnsupportedVersion { found: 99, supported: 2 }
         ));
     }
 

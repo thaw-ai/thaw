@@ -32,6 +32,10 @@ description = "Core types and file format for thaw — pure Rust, no CUDA."
 # `thiserror` gives us ergonomic error types without the boilerplate of
 # hand-written Display and From impls. Standard choice for library crates.
 thiserror = "1.0"
+# `crc32c` is hardware-accelerated (SSE4.2 / ARMv8 CRC) Castagnoli CRC-32C.
+# Used for per-region integrity check in the file format. Fast enough to
+# run inline on the freeze/restore hot paths.
+crc32c = "0.6"
 
 [dev-dependencies]
 # `tempfile` creates temp directories that clean themselves up. Used in
