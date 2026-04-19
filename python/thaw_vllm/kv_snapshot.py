@@ -167,13 +167,23 @@ def _collect_kv_slab_requests(kv_caches, block_ids):
     mapping = []
     for layer_idx in range(num_layers):
         kv_layer = kv_caches[layer_idx]
+        # Per-layer pointer + stride query. Indexing kv_layer[kv_idx, bid]
+        # in the inner loop would create ~10k Tensor views and call
+        # .data_ptr() just as many times — microsecond overhead that
+        # adds up to ~10-20 ms per mapping build. Here we query once
+        # per layer and compute slab pointers with plain byte arithmetic.
+        base_ptr = kv_layer.data_ptr()
+        strides = kv_layer.stride()
+        esize = kv_layer.element_size()
+        kv_stride_b = strides[0] * esize     # bytes between K and V halves
+        block_stride_b = strides[1] * esize  # bytes between consecutive blocks
         base = layer_idx * num_slots * 2
         for slot_idx, bid in enumerate(block_ids):
-            for kv_idx in (0, 1):
-                slab = kv_layer[kv_idx, bid]
-                ptr = slab.data_ptr()
-                logical_id = base + slot_idx * 2 + kv_idx
-                mapping.append(("kv_live_block", logical_id, ptr, slab_nbytes))
+            k_ptr = base_ptr + bid * block_stride_b
+            v_ptr = k_ptr + kv_stride_b
+            logical_id_k = base + slot_idx * 2
+            mapping.append(("kv_live_block", logical_id_k, k_ptr, slab_nbytes))
+            mapping.append(("kv_live_block", logical_id_k + 1, v_ptr, slab_nbytes))
     return mapping, slab_nbytes
 
 
