@@ -1104,20 +1104,15 @@
     .team-card:hover::before { opacity: 1; }
 
     .team-avatar {
-      width: 56px;
-      height: 56px;
+      width: 72px;
+      height: 72px;
       border-radius: 50%;
       background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
       border: 1px solid var(--border-light);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-family: var(--font-display);
-      font-size: 18px;
-      font-weight: 600;
-      color: var(--cyan-soft);
+      object-fit: cover;
+      object-position: center;
       margin-bottom: 20px;
-      letter-spacing: 0.02em;
+      display: block;
     }
 
     .team-role {
@@ -1695,7 +1690,8 @@ Is there something I can help you with?"}}],
     <div class="team-grid reveal reveal-d1">
 
       <div class="team-card">
-        <div class="team-avatar">NM</div>
+        <img class="team-avatar" src="pfps/nils.jpg" alt="Nils Matteson">
+
         <div class="team-role">Founder &middot; Engineering</div>
         <h3 class="team-name">Nils Matteson</h3>
         <p class="team-bio">vLLM and SGLang integration, engine pool, OpenAI-compatible server.</p>
@@ -1708,7 +1704,8 @@ Is there something I can help you with?"}}],
       </div>
 
       <div class="team-card">
-        <div class="team-avatar">MY</div>
+        <img class="team-avatar" src="pfps/matt.JPG" alt="Matthew Yu">
+
         <div class="team-role">Co-founder &middot; Engineering</div>
         <h3 class="team-name">Matthew Yu</h3>
         <p class="team-bio">Rust and CUDA throughput. Pinned memory, O_DIRECT, pipelined DMA.</p>
@@ -1721,7 +1718,8 @@ Is there something I can help you with?"}}],
       </div>
 
       <div class="team-card">
-        <div class="team-avatar">KK</div>
+        <img class="team-avatar" src="pfps/karan.JPG" alt="Karan Kapur">
+
         <div class="team-role">Co-founder &middot; Engineering</div>
         <h3 class="team-name">Karan Kapur</h3>
         <p class="team-bio">Rust cloud storage. Parallel ranged S3 and GCS restore for NIC-saturating throughput.</p>
