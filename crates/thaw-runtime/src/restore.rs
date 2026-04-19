@@ -136,6 +136,50 @@ pub enum RestoreError {
         file_size: usize,
         payload_end: usize,
     },
+
+    /// The CRC32C recorded in the region table does not match the
+    /// CRC32C computed over the bytes we just read. This means the
+    /// on-disk payload has been corrupted (bit-rot, truncated S3
+    /// upload, cosmic ray) since the freeze that produced it.
+    /// Loading corrupted weights into the GPU would silently
+    /// produce wrong model output, so we refuse.
+    ///
+    /// An expected value of `0` means the freeze side did not
+    /// record a CRC for this region; the restore side skips the
+    /// check in that case and this error is not produced.
+    #[error(
+        "region checksum mismatch: kind={kind:?}, logical_id={logical_id}, \
+         expected={expected:#010x}, actual={actual:#010x}"
+    )]
+    ChecksumMismatch {
+        kind: RegionKind,
+        logical_id: u32,
+        expected: u32,
+        actual: u32,
+    },
+
+    /// The caller passed a `PipelineConfig` value the restore path
+    /// can't honor — e.g. `chunk_size == 0`, or a non-4 KiB-multiple
+    /// `chunk_size` on the O_DIRECT path. Typed so callers can
+    /// surface it as a real error rather than unwinding.
+    #[error("invalid restore config: {message}")]
+    InvalidConfig { message: String },
+}
+
+/// True if the running process has opted out of CRC verification
+/// on restore via `THAW_VERIFY=0`.
+///
+/// The escape hatch exists for two narrow cases:
+///   - A corrupted snapshot that an operator genuinely wants to
+///     load anyway (forensic debugging).
+///   - Zero-copy DMA paths where re-reading bytes through the CPU
+///     just to CRC them would defeat the point of the zero copy.
+///
+/// Any other setting (including unset) leaves verification on. No
+/// other env-var spelling is accepted — we want the knob visible in
+/// logs and ops runbooks.
+pub fn crc_verification_disabled() -> bool {
+    std::env::var_os("THAW_VERIFY").as_deref() == Some(std::ffi::OsStr::new("0"))
 }
 
 /// Restore a `.thaw` file onto a GPU backend.
@@ -236,6 +280,25 @@ where
         // direct pread into pinned memory.
         let mut pinned = backend.alloc_pinned(size as usize)?;
         pinned.as_mut_slice().copy_from_slice(&file_bytes[offset..end]);
+
+        // Verify the region's CRC *before* pushing to the device.
+        // A zero CRC on the file side means "writer did not record
+        // one" (old test fixture, metadata-only push), so we skip.
+        // An explicit THAW_VERIFY=0 also skips — see
+        // `crc_verification_disabled`.
+        let expected = entry.crc32c();
+        if expected != 0 && !crc_verification_disabled() {
+            let actual = crc32c::crc32c(pinned.as_slice());
+            if actual != expected {
+                return Err(RestoreError::ChecksumMismatch {
+                    kind,
+                    logical_id,
+                    expected,
+                    actual,
+                });
+            }
+        }
+
         backend.memcpy_h2d(&device_region, &pinned)?;
 
         stats.regions_restored += 1;
@@ -453,6 +516,55 @@ mod tests {
             }
             other => panic!("expected Backend(UnknownDevicePtr), got {other:?}"),
         }
+    }
+
+    /// Flipping a single payload byte after freeze makes restore
+    /// return `ChecksumMismatch` instead of silently loading wrong
+    /// weights onto the GPU.
+    ///
+    /// This is the single most load-bearing test in the format:
+    /// without it, bit-rot on a long-lived snapshot file would
+    /// produce silently-wrong model output at inference time.
+    #[test]
+    fn restore_detects_single_byte_payload_corruption() {
+        let src = MockCuda::new();
+        let ptr = DevicePtr(0x1000);
+        let weights: Vec<u8> = (0..256).map(|i| (i & 0xFF) as u8).collect();
+        src.register_region(ptr, weights.clone());
+        let requests = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(ptr, weights.len() as u64),
+        )];
+        let mut file: Vec<u8> = Vec::new();
+        freeze(&src, &requests, &FreezeConfig::default(), &mut file).expect("freeze");
+
+        // Corrupt one payload byte. The region's file_offset is past
+        // the prelude; offset 0x1500 sits comfortably inside the 256-
+        // byte payload region regardless of prelude size changes.
+        let snapshot = Snapshot::from_prelude_bytes(&file).expect("parse prelude");
+        let payload_start = snapshot.table().get(0).unwrap().file_offset() as usize;
+        file[payload_start + 10] ^= 0xFF;
+
+        let dst = MockCuda::new();
+        let dst_ptr = DevicePtr(0xA000);
+        dst.register_region(dst_ptr, vec![0u8; weights.len()]);
+
+        let err = restore(&dst, &file, |_, _| {
+            Some(DeviceRegion::new(dst_ptr, weights.len() as u64))
+        })
+        .expect_err("corruption must be detected");
+        match err {
+            RestoreError::ChecksumMismatch { kind, expected, actual, .. } => {
+                assert_eq!(kind, RegionKind::Weights);
+                assert_ne!(expected, actual);
+            }
+            other => panic!("expected ChecksumMismatch, got {other:?}"),
+        }
+
+        // The destination device memory must not have been
+        // overwritten — CRC check happens before memcpy_h2d.
+        assert_eq!(dst.read_region(dst_ptr).unwrap(), vec![0u8; weights.len()]);
     }
 
     /// Full three-region round-trip including a `KvLiveBlock`

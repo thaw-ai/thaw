@@ -310,8 +310,6 @@ The model loading space is active. Here's how thaw compares:
 2. **Single NVMe performance** — most deployments don't have RAID0. thaw already matches or beats multi-threaded alternatives on one drive.
 3. **No special hardware** — no GDS, no RAID, no driver patches. Works on any CUDA 12+ GPU.
 
-See [docs/LANDSCAPE.md](./docs/LANDSCAPE.md) for detailed analysis.
-
 ## Roadmap
 
 - [x] Weight snapshot/restore (pure Python path)

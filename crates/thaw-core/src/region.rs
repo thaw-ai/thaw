@@ -68,10 +68,10 @@ use thiserror::Error;
 ///     whole pages without awkward padding.
 ///
 /// Why 32 bytes specifically:
-///   - Current fields add up to 24 bytes (kind + logical_id + size +
-///     file_offset). An extra 8 reserved bytes at the tail leave room
-///     for one future u64 field (think: checksum, flags, compression
-///     tag) without having to bump the on-disk format version.
+///   - Current fields add up to 28 bytes (kind + logical_id + size +
+///     file_offset + crc32c). The final 4 bytes are reserved and
+///     zero-filled for forward compatibility (flags, compression tag,
+///     etc.) without needing another format-version bump.
 ///   - 32 is cache-line-friendly (half a typical x86 line) and
 ///     matches the size of an AVX2 register, which is irrelevant for
 ///     correctness but does not hurt.
@@ -235,6 +235,12 @@ pub struct RegionEntry {
     /// Absolute byte offset into the `.thaw` file where this
     /// region's payload starts.
     file_offset: u64,
+    /// CRC32C (Castagnoli) of the region's payload bytes. Zero on
+    /// fresh entries and stamped by the writer once the payload is
+    /// known. Restore code compares this against the CRC computed
+    /// while reading to detect bit-rot, truncated uploads, or partial
+    /// S3 PUTs that passed Content-Length but lost bytes in flight.
+    crc32c: u32,
 }
 
 impl RegionEntry {
@@ -246,6 +252,7 @@ impl RegionEntry {
             logical_id: 0,
             size: 0,
             file_offset: 0,
+            crc32c: 0,
         }
     }
 
@@ -265,6 +272,12 @@ impl RegionEntry {
     /// regions; ignored by readers for Weights and Metadata.
     pub fn with_logical_id(mut self, id: u32) -> Self {
         self.logical_id = id;
+        self
+    }
+
+    /// Builder: set the CRC32C of the region's payload bytes.
+    pub fn with_crc32c(mut self, crc: u32) -> Self {
+        self.crc32c = crc;
         self
     }
 
@@ -288,6 +301,13 @@ impl RegionEntry {
         self.logical_id
     }
 
+    /// Read-only access to the CRC32C stamp. Zero means "not computed"
+    /// (freshly-constructed entry that has not been through the
+    /// writer's stamping pass).
+    pub fn crc32c(&self) -> u32 {
+        self.crc32c
+    }
+
     /// Serialize this entry to its fixed-size on-disk byte form.
     ///
     /// Layout (pinned by tests in the module below):
@@ -296,20 +316,20 @@ impl RegionEntry {
     ///   4..8   logical_id        (u32 LE)
     ///   8..16  size              (u64 LE)
     ///   16..24 file_offset       (u64 LE)
-    ///   24..32 reserved, zero-filled for forward compatibility
+    ///   24..28 crc32c            (u32 LE) — Castagnoli over payload
+    ///   28..32 reserved, zero-filled for forward compatibility
     ///
     /// The reserved tail is load-bearing: when we eventually add a
-    /// new field (checksum, flags, compression tag), we bump the
-    /// header's `CURRENT_VERSION` and repurpose one of these reserved
-    /// slots. Old files still parse as "reserved == 0, treat as
-    /// default" and new files round-trip cleanly.
+    /// new field (flags, compression tag), we bump the header's
+    /// `CURRENT_VERSION` and repurpose one of these reserved bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0u8; REGION_ENTRY_SIZE as usize];
         buf[0..4].copy_from_slice(&(self.kind as u32).to_le_bytes());
         buf[4..8].copy_from_slice(&self.logical_id.to_le_bytes());
         buf[8..16].copy_from_slice(&self.size.to_le_bytes());
         buf[16..24].copy_from_slice(&self.file_offset.to_le_bytes());
-        // Bytes 24..32 stay at zero — see doc comment above.
+        buf[24..28].copy_from_slice(&self.crc32c.to_le_bytes());
+        // Bytes 28..32 stay at zero — see doc comment above.
         buf
     }
 
@@ -337,14 +357,15 @@ impl RegionEntry {
         let logical_id = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
         let size = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
         let file_offset = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
-        // Bytes 24..32 ignored on the read path — they are the
-        // forward-compat reserved slots described on `to_bytes`.
+        let crc32c = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+        // Bytes 28..32 ignored on the read path — reserved slot.
 
         Ok(RegionEntry {
             kind,
             logical_id,
             size,
             file_offset,
+            crc32c,
         })
     }
 }
@@ -436,22 +457,25 @@ mod tests {
     ///   4..8   logical_id        (u32 LE)
     ///   8..16  size              (u64 LE)
     ///   16..24 file_offset       (u64 LE)
-    ///   24..32 reserved, zeroed
+    ///   24..28 crc32c            (u32 LE)
+    ///   28..32 reserved, zeroed
     #[test]
     fn region_entry_layout_is_pinned() {
         let e = RegionEntry::new(RegionKind::KvLiveBlock)
             .with_logical_id(7)
             .with_size(0x11_22_33_44_55_66_77_88)
-            .with_file_offset(0x99_AA_BB_CC_DD_EE_FF_01);
+            .with_file_offset(0x99_AA_BB_CC_DD_EE_FF_01)
+            .with_crc32c(0xDEAD_BEEF);
 
         let bytes = e.to_bytes();
         assert_eq!(&bytes[0..4], &1u32.to_le_bytes());
         assert_eq!(&bytes[4..8], &7u32.to_le_bytes());
         assert_eq!(&bytes[8..16], &0x11_22_33_44_55_66_77_88u64.to_le_bytes());
         assert_eq!(&bytes[16..24], &0x99_AA_BB_CC_DD_EE_FF_01u64.to_le_bytes());
-        // Reserved tail must be zero — future-self depends on it
+        assert_eq!(&bytes[24..28], &0xDEAD_BEEFu32.to_le_bytes());
+        // Last reserved slot must be zero — future-self depends on it
         // being safe to compare two serialized entries byte-for-byte.
-        assert_eq!(&bytes[24..32], &[0u8; 8]);
+        assert_eq!(&bytes[28..32], &[0u8; 4]);
     }
 
     /// Round-trip: parse(serialize(x)) == x.
@@ -460,10 +484,12 @@ mod tests {
         let original = RegionEntry::new(RegionKind::Metadata)
             .with_logical_id(0)
             .with_size(1234)
-            .with_file_offset(999_999);
+            .with_file_offset(999_999)
+            .with_crc32c(0xC0FF_EE42);
         let bytes = original.to_bytes();
         let parsed = RegionEntry::from_bytes(&bytes).expect("should parse");
         assert_eq!(parsed, original);
+        assert_eq!(parsed.crc32c(), 0xC0FF_EE42);
     }
 
     /// Parser rejects short input with a typed error, not a panic.

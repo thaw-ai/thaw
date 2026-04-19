@@ -78,6 +78,11 @@ struct PendingRegion {
     logical_id: u32,
     size: u64,
     bytes: Vec<u8>,
+    /// CRC32C of the region's payload bytes. For `push_region` this is
+    /// computed from `bytes` on insertion. For `push_region_metadata`
+    /// it starts at zero; orchestrators that stream payload themselves
+    /// should use `push_region_metadata_with_crc` to supply it.
+    crc32c: u32,
 }
 
 /// Builds a complete `.thaw` file (prelude + payload) from a list
@@ -150,11 +155,13 @@ impl ByteRegionWriter {
     /// callers should pass 0 for `Weights` and `Metadata`.
     pub fn push_region(&mut self, kind: RegionKind, logical_id: u32, bytes: Vec<u8>) {
         let size = bytes.len() as u64;
+        let crc32c = crc32c::crc32c(&bytes);
         self.pending.push(PendingRegion {
             kind,
             logical_id,
             size,
             bytes,
+            crc32c,
         });
     }
 
@@ -175,11 +182,26 @@ impl ByteRegionWriter {
         logical_id: u32,
         size: u64,
     ) {
+        self.push_region_metadata_with_crc(kind, logical_id, size, 0);
+    }
+
+    /// Same as `push_region_metadata`, but also records a CRC32C that
+    /// the orchestrator has already computed (e.g. while streaming
+    /// payload from pinned memory). Zero means "CRC not available" —
+    /// readers treat a zero CRC as "skip verification for this entry."
+    pub fn push_region_metadata_with_crc(
+        &mut self,
+        kind: RegionKind,
+        logical_id: u32,
+        size: u64,
+        crc32c: u32,
+    ) {
         self.pending.push(PendingRegion {
             kind,
             logical_id,
             size,
             bytes: Vec::new(),
+            crc32c,
         });
     }
 
@@ -210,7 +232,8 @@ impl ByteRegionWriter {
             let entry = RegionEntry::new(region.kind)
                 .with_logical_id(region.logical_id)
                 .with_size(region.size)
-                .with_file_offset(next_offset);
+                .with_file_offset(next_offset)
+                .with_crc32c(region.crc32c);
             table.push(entry);
             next_offset += region.size;
         }
@@ -427,6 +450,35 @@ mod tests {
         w.push_region(RegionKind::Weights, 0, vec![1, 2, 3, 4]);
         let s = w.build_snapshot();
         assert_eq!(s.header().vllm_commit(), &[0u8; 40]);
+    }
+
+    /// `push_region` computes and stamps a CRC32C over the payload
+    /// bytes onto the resulting snapshot entry.
+    ///
+    /// Pinning this behavior means a future refactor that forgets to
+    /// propagate the CRC through `build_snapshot` will fail here
+    /// immediately, not silently on a restore at 3am.
+    #[test]
+    fn push_region_stamps_crc32c() {
+        let payload = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        let expected = crc32c::crc32c(&payload);
+        let mut w = ByteRegionWriter::new();
+        w.push_region(RegionKind::Weights, 0, payload);
+        let s = w.build_snapshot();
+        let entry = s.table().get(0).unwrap();
+        assert_eq!(entry.crc32c(), expected);
+        assert_ne!(expected, 0, "non-empty payload must have non-zero CRC");
+    }
+
+    /// `push_region_metadata_with_crc` records the caller-supplied
+    /// CRC verbatim (for orchestrators that compute the CRC while
+    /// streaming from pinned host memory).
+    #[test]
+    fn push_region_metadata_with_crc_records_verbatim() {
+        let mut w = ByteRegionWriter::new();
+        w.push_region_metadata_with_crc(RegionKind::Weights, 0, 1024, 0xFEED_BEEF);
+        let s = w.build_snapshot();
+        assert_eq!(s.table().get(0).unwrap().crc32c(), 0xFEED_BEEF);
     }
 
     /// Round-trip: write a complete file into a `Vec<u8>`, parse

@@ -27,10 +27,11 @@ use thaw_core::{ByteRegionWriter, RegionKind, Snapshot, SnapshotError, HEADER_SI
 
 use crate::backend::{DeviceRegion, PipelinedBackend};
 use crate::direct_io::{
-    open_direct, open_direct_write, pread_exact, pwrite_exact, truncate,
+    fsync_dir, fsync_file, open_direct, open_direct_write, pread_exact, pwrite_exact,
+    truncate,
 };
 use crate::freeze::{FreezeConfig, FreezeError, FreezeRequest};
-use crate::restore::{RestoreError, RestoreStats};
+use crate::restore::{crc_verification_disabled, RestoreError, RestoreStats};
 
 // =============================================================================
 // WRITE-COMBINING PINNED BUFFER CACHE (per-thread, amortized across calls)
@@ -178,6 +179,11 @@ pub struct FreezeStats {
 /// algorithm, they just flip the copy direction and the I/O
 /// direction.
 struct FreezePlan {
+    /// Region kind — needed at the end of the freeze to rebuild the
+    /// region table with the computed CRCs stamped on it.
+    kind: RegionKind,
+    /// Logical id (meaningful for KV blocks).
+    logical_id: u32,
     /// Absolute byte offset in the output file where this region's
     /// payload starts. Determined by the region table layout.
     file_offset: u64,
@@ -222,6 +228,8 @@ fn build_freeze_plan(
             .get(i)
             .expect("region_table entry for freeze request");
         plan.push(FreezePlan {
+            kind: request.kind,
+            logical_id: request.logical_id,
             file_offset: entry.file_offset(),
             size: entry.size(),
             device_region: request.device_region.clone(),
@@ -283,6 +291,153 @@ fn launch_dumps<B: PipelinedBackend>(
     Ok(())
 }
 
+/// Per-region CRC state while reading a chunked restore. Carries the
+/// running CRC32C and the number of bytes folded in so the restore
+/// loop can tell when a region is complete and ready to check.
+#[derive(Debug, Clone, Copy)]
+struct RestoreCrcState {
+    crc: u32,
+    bytes_seen: u64,
+}
+
+impl RestoreCrcState {
+    fn new() -> Self {
+        Self { crc: 0, bytes_seen: 0 }
+    }
+}
+
+/// Verify every region's CRC32C from the full in-memory `data` slice
+/// in a single sequential pass before any DMA starts. Used by the
+/// in-memory restore paths where we can afford an upfront scan — in
+/// exchange we get atomic "verify then DMA" semantics: a corrupt
+/// snapshot never touches device memory. Skipped when `THAW_VERIFY=0`
+/// or a region records CRC 0 (forward compat with older snapshots).
+fn verify_plan_crcs_from_bytes(
+    data: &[u8],
+    plan: &[CopyEntry],
+) -> Result<(), RestoreError> {
+    if crc_verification_disabled() {
+        return Ok(());
+    }
+    for entry in plan.iter() {
+        if entry.expected_crc32c == 0 {
+            continue;
+        }
+        let start = entry.file_offset as usize;
+        let end = start + entry.size as usize;
+        let actual = crc32c::crc32c(&data[start..end]);
+        if actual != entry.expected_crc32c {
+            return Err(RestoreError::ChecksumMismatch {
+                kind: entry.kind,
+                logical_id: entry.logical_id,
+                expected: entry.expected_crc32c,
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Extend each region's running CRC by the overlap between a chunk
+/// and the region, reading the bytes from `src`. `src_base` is the
+/// file coordinate of `src[0]` so overlap math works regardless of
+/// whether the buffer is a pread target (chunk_start == src_base) or
+/// an absolute file slice (src_base == 0).
+///
+/// Verifies and returns `ChecksumMismatch` the instant a region
+/// finishes (its last chunk is folded in) and its accumulated CRC
+/// disagrees with the expected one.
+fn fold_and_verify_chunk_crc(
+    src: &[u8],
+    src_base: u64,
+    chunk_start: u64,
+    chunk_end: u64,
+    plan: &[CopyEntry],
+    state: &mut [RestoreCrcState],
+) -> Result<(), RestoreError> {
+    debug_assert_eq!(state.len(), plan.len());
+    if crc_verification_disabled() {
+        return Ok(());
+    }
+    for (i, entry) in plan.iter().enumerate() {
+        if entry.expected_crc32c == 0 {
+            continue;
+        }
+        let region_start = entry.file_offset;
+        let region_end = entry.file_offset + entry.size;
+        if region_end <= chunk_start || region_start >= chunk_end {
+            continue;
+        }
+        let overlap_start = region_start.max(chunk_start);
+        let overlap_end = region_end.min(chunk_end);
+        let overlap_len = (overlap_end - overlap_start) as usize;
+        let src_offset = (overlap_start - src_base) as usize;
+        let slice = &src[src_offset..src_offset + overlap_len];
+        state[i].crc = crc32c::crc32c_append(state[i].crc, slice);
+        state[i].bytes_seen += overlap_len as u64;
+
+        if state[i].bytes_seen == entry.size && state[i].crc != entry.expected_crc32c {
+            return Err(RestoreError::ChecksumMismatch {
+                kind: entry.kind,
+                logical_id: entry.logical_id,
+                expected: entry.expected_crc32c,
+                actual: state[i].crc,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Rebuild the on-disk region-table bytes from the freeze plan with
+/// per-region CRCs stamped in. Produces exactly
+/// `plan.len() * REGION_ENTRY_SIZE` bytes that overwrite the initial
+/// CRC-zero table written at prelude time.
+fn region_table_bytes_with_crcs(plan: &[FreezePlan], crcs: &[u32]) -> Vec<u8> {
+    debug_assert_eq!(crcs.len(), plan.len());
+    let mut table = thaw_core::RegionTable::new();
+    for (entry, crc) in plan.iter().zip(crcs.iter()) {
+        let rec = thaw_core::RegionEntry::new(entry.kind)
+            .with_logical_id(entry.logical_id)
+            .with_size(entry.size)
+            .with_file_offset(entry.file_offset)
+            .with_crc32c(*crc);
+        table.push(rec);
+    }
+    table.to_bytes()
+}
+
+/// After D2H for a chunk has landed in the pinned buffer, extend the
+/// per-region running CRC32C by the overlap slice in file order. This
+/// is called once the chunk's stream has synced, so the bytes are
+/// fully materialized in the buffer.
+///
+/// Panics if `crcs.len() != plan.len()` — caller bug. Returns the
+/// file region of pinned-buffer bytes covered so the freeze loop can
+/// compute write offsets consistently.
+fn accumulate_freeze_crcs(
+    buf: &crate::backend::PinnedBuffer,
+    chunk_start: u64,
+    chunk_end: u64,
+    chunk_buf_base: u64,
+    plan: &[FreezePlan],
+    crcs: &mut [u32],
+) {
+    debug_assert_eq!(crcs.len(), plan.len());
+    for (i, entry) in plan.iter().enumerate() {
+        let region_start = entry.file_offset;
+        let region_end = entry.file_offset + entry.size;
+        if region_end <= chunk_start || region_start >= chunk_end {
+            continue;
+        }
+        let overlap_start = region_start.max(chunk_start);
+        let overlap_end = region_end.min(chunk_end);
+        let overlap_len = (overlap_end - overlap_start) as usize;
+        let buf_offset = (overlap_start - chunk_buf_base) as usize;
+        let slice = &buf.as_slice()[buf_offset..buf_offset + overlap_len];
+        crcs[i] = crc32c::crc32c_append(crcs[i], slice);
+    }
+}
+
 /// Pipelined freeze: double-buffered async D2H with overlapped
 /// writes (generic writer).
 ///
@@ -308,24 +463,35 @@ where
 {
     let (plan, prelude_bytes, total_file_size) = build_freeze_plan(requests, config)?;
 
-    // Phase 1: write prelude directly. For the writer-based path we
-    // don't need to carry the prelude in the chunk 0 buffer — we can
-    // just write it and then write payload chunks in order.
-    sink.write_all(&prelude_bytes)
-        .map_err(|e| FreezeError::Snapshot(SnapshotError::from(e)))?;
-
     if requests.is_empty() {
+        // Prelude-only file — nothing to CRC, write and return.
+        sink.write_all(&prelude_bytes)
+            .map_err(|e| FreezeError::Snapshot(SnapshotError::from(e)))?;
         return Ok(FreezeStats::default());
     }
 
-    // Phase 2: chunked double-buffered D2H + write.
+    // The region table carries per-region CRCs, but the CRCs are only
+    // known after D2H completes. Since the generic `Write` sink isn't
+    // seek-able, we buffer the whole file in RAM and patch the table
+    // bytes before handing them to the sink. This path is test- and
+    // bench-only; production freezes use `freeze_pipelined_to_file`
+    // which uses `pwrite` to avoid the RAM buffer.
+    let mut file_buf: Vec<u8> = vec![0u8; total_file_size as usize];
+    file_buf[..prelude_bytes.len()].copy_from_slice(&prelude_bytes);
+
     let chunk_size = config.chunk_size;
-    assert!(chunk_size > 0, "chunk_size must be > 0");
+    if chunk_size == 0 {
+        return Err(FreezeError::InvalidConfig {
+            message: "chunk_size must be > 0".to_string(),
+        });
+    }
 
     let payload_start = prelude_bytes.len() as u64;
     let payload_end = total_file_size;
     let payload_len = (payload_end - payload_start) as usize;
     if payload_len == 0 {
+        sink.write_all(&file_buf)
+            .map_err(|e| FreezeError::Snapshot(SnapshotError::from(e)))?;
         return Ok(FreezeStats {
             regions_frozen: requests.len(),
             bytes_copied: 0,
@@ -341,6 +507,9 @@ where
     let mut bufs = acquire_wc_bufs(backend, chunk_size)?;
     let streams = [backend.stream_create()?, backend.stream_create()?];
 
+    // Per-region CRC accumulators. Index-aligned with `plan`.
+    let mut crcs: Vec<u32> = vec![0u32; plan.len()];
+
     // Helper: compute this chunk's [start, end) in file coordinates.
     let chunk_range = |idx: usize| -> (u64, u64) {
         let start = payload_start + (idx as u64) * (chunk_size as u64);
@@ -348,14 +517,18 @@ where
         (start, end)
     };
 
-    // Helper: write `len` bytes from the buffer into the sink.
-    let write_chunk_to_sink = |buf: &crate::backend::PinnedBuffer,
-                               len: usize,
-                               sink: &mut W|
-     -> Result<(), FreezeError> {
-        sink.write_all(&buf.as_slice()[..len])
-            .map_err(|e| FreezeError::Snapshot(SnapshotError::from(e)))?;
-        Ok(())
+    // Helper: copy the first `len` pinned-buffer bytes into the
+    // in-memory file buffer at `file_offset`, and extend per-region
+    // CRCs by the overlap slices.
+    let commit_chunk = |buf: &crate::backend::PinnedBuffer,
+                        file_offset: u64,
+                        chunk_end: u64,
+                        len: usize,
+                        file_buf: &mut [u8],
+                        crcs: &mut [u32]| {
+        let dst_start = file_offset as usize;
+        file_buf[dst_start..dst_start + len].copy_from_slice(&buf.as_slice()[..len]);
+        accumulate_freeze_crcs(buf, file_offset, chunk_end, file_offset, &plan, crcs);
     };
 
     // Prime: D2H chunk 0 into bufs[0], sync.
@@ -368,9 +541,9 @@ where
     if num_chunks == 1 {
         let (c0_start, c0_end) = chunk_range(0);
         let len = (c0_end - c0_start) as usize;
-        write_chunk_to_sink(&bufs[0], len, sink)?;
+        commit_chunk(&bufs[0], c0_start, c0_end, len, &mut file_buf, &mut crcs);
     } else {
-        // Steady state: D2H(chunk i) overlaps write(chunk i-1).
+        // Steady state: D2H(chunk i) overlaps memcpy(chunk i-1).
         for chunk_idx in 1..num_chunks {
             let prev = (chunk_idx - 1) % 2;
             let curr = chunk_idx % 2;
@@ -390,20 +563,34 @@ where
                 &plan,
             )?;
 
-            // While D2H is in flight on streams[curr], write the
-            // previous chunk to the sink.
-            write_chunk_to_sink(&bufs[prev], prev_len, sink)?;
+            // While D2H is in flight on streams[curr], commit the
+            // previous chunk to the in-memory buffer.
+            commit_chunk(
+                &bufs[prev],
+                prev_start,
+                prev_end,
+                prev_len,
+                &mut file_buf,
+                &mut crcs,
+            );
 
             // Wait for the current chunk's D2H to complete before
             // the next iteration reuses its buffer.
             backend.stream_sync(&streams[curr])?;
         }
 
-        // Write the final chunk.
+        // Commit the final chunk.
         let last = (num_chunks - 1) % 2;
         let (last_start, last_end) = chunk_range(num_chunks - 1);
         let last_len = (last_end - last_start) as usize;
-        write_chunk_to_sink(&bufs[last], last_len, sink)?;
+        commit_chunk(
+            &bufs[last],
+            last_start,
+            last_end,
+            last_len,
+            &mut file_buf,
+            &mut crcs,
+        );
     }
 
     // Cleanup streams.
@@ -417,7 +604,15 @@ where
     // Return WC buffers to the per-thread cache.
     release_wc_bufs(bufs, chunk_size);
 
-    let _ = total_file_size; // silence unused on non-file path
+    // Patch the region-table bytes with computed CRCs, then flush the
+    // whole file to the sink in one `write_all`.
+    let table_bytes = region_table_bytes_with_crcs(&plan, &crcs);
+    let table_start = HEADER_SIZE as usize;
+    file_buf[table_start..table_start + table_bytes.len()].copy_from_slice(&table_bytes);
+
+    sink.write_all(&file_buf)
+        .map_err(|e| FreezeError::Snapshot(SnapshotError::from(e)))?;
+
     Ok(FreezeStats {
         regions_frozen: requests.len(),
         bytes_copied: total_bytes,
@@ -435,6 +630,13 @@ where
 /// chunk 0 so the first pwrite can start at offset 0. Final chunk
 /// is padded up to 4 KiB for O_DIRECT and then the file is
 /// truncated down to the exact size afterward.
+///
+/// The write is atomic from the caller's perspective: bytes land in
+/// `{path}.thaw-incomplete` and are renamed over `path` only after
+/// fsync succeeds. Any error, panic, or early return unlinks the
+/// tmp file via `TmpFileGuard`. A process-level SIGKILL orphans the
+/// tmp but cannot produce a partially-valid `path`, so `thaw
+/// restore` will never observe torn state.
 pub fn freeze_pipelined_to_file<B>(
     backend: &B,
     requests: &[FreezeRequest],
@@ -446,31 +648,59 @@ where
 {
     let (plan, prelude_bytes, total_file_size) = build_freeze_plan(requests, config)?;
 
-    // Open both fds: O_DIRECT for aligned middle chunks, buffered
-    // for ragged final chunk or when O_DIRECT isn't supported.
     let io_err = |e: std::io::Error| {
         FreezeError::Snapshot(SnapshotError::Io {
             kind: e.kind(),
             message: e.to_string(),
         })
     };
-    let file_direct = open_direct_write(path, config.try_direct_io).map_err(io_err)?;
-    let file_buffered = open_direct_write(path, false).map_err(io_err)?;
+
+    // Derive the tmp path (`{path}.thaw-incomplete`). The suffix
+    // is deliberately distinct from `.tmp` so users cannot confuse
+    // it with their own scratch files, and distinct from `.thaw`
+    // so glob patterns over snapshot dirs won't pick it up.
+    let tmp_path = tmp_path_for(path);
+
+    // RAII guard: unlinks tmp_path on drop unless `disarm()` is
+    // called. Covers early returns, panics, and `?` propagation
+    // from any of the open/write/fsync/rename calls below.
+    let mut guard = TmpFileGuard::arm(&tmp_path);
+
+    // Open both fds on the tmp path. The first creates+truncates;
+    // the second attaches without disturbing length (both fds
+    // view the same inode).
+    let file_direct =
+        open_direct_write(&tmp_path, config.try_direct_io, true).map_err(io_err)?;
+    let file_buffered = open_direct_write(&tmp_path, false, false).map_err(io_err)?;
 
     let chunk_size = config.chunk_size;
-    assert!(chunk_size > 0, "chunk_size must be > 0");
-    assert!(
-        chunk_size % 4096 == 0,
-        "chunk_size must be a multiple of 4096 for O_DIRECT"
-    );
+    if chunk_size == 0 {
+        return Err(FreezeError::InvalidConfig {
+            message: "chunk_size must be > 0".to_string(),
+        });
+    }
+    if chunk_size % 4096 != 0 {
+        return Err(FreezeError::InvalidConfig {
+            message: format!(
+                "chunk_size must be a multiple of 4096 for O_DIRECT, got {}",
+                chunk_size
+            ),
+        });
+    }
 
     // In the file-based path we write starting at offset 0 and
     // the prelude lives at the head of chunk 0. So "chunks" here
     // span the entire file, not just the payload region.
     let file_len = total_file_size;
     if file_len == 0 {
-        // Empty snapshot — just write the prelude (prelude-only file).
+        // Empty snapshot — just write the prelude (prelude-only file),
+        // fsync, then atomically rename tmp → path.
         pwrite_exact(&file_buffered, &prelude_bytes, 0).map_err(io_err)?;
+        fsync_file(&file_buffered).map_err(io_err)?;
+        drop(file_direct);
+        drop(file_buffered);
+        commit_tmp_to_final(&tmp_path, path).map_err(io_err)?;
+        guard.disarm();
         return Ok(FreezeStats::default());
     }
 
@@ -488,6 +718,10 @@ where
     // successive freeze calls (e.g. thaw serve hot-swap).
     let mut bufs = acquire_wc_bufs(backend, chunk_size)?;
     let streams = [backend.stream_create()?, backend.stream_create()?];
+
+    // Per-region CRC accumulators. The initial table written in chunk
+    // 0 has zero CRCs; we pwrite a corrected table at the end.
+    let mut crcs: Vec<u32> = vec![0u32; plan.len()];
 
     // Helper: chunk range in absolute file coordinates.
     let chunk_range = |idx: usize| -> (u64, u64) {
@@ -568,6 +802,7 @@ where
     if num_chunks == 1 {
         let (c0_start, c0_end) = chunk_range(0);
         let len = (c0_end - c0_start) as usize;
+        accumulate_freeze_crcs(&bufs[0], c0_start, c0_end, c0_start, &plan, &mut crcs);
         write_chunk_to_file(&mut bufs[0], c0_start, len)?;
     } else {
         for chunk_idx in 1..num_chunks {
@@ -589,22 +824,63 @@ where
                 &plan,
             )?;
 
-            // Write previous chunk (overlaps D2H).
+            // Accumulate CRC for the just-synced previous chunk, then
+            // write it to disk (overlaps the current chunk's D2H).
+            accumulate_freeze_crcs(
+                &bufs[prev],
+                prev_start,
+                prev_end,
+                prev_start,
+                &plan,
+                &mut crcs,
+            );
             write_chunk_to_file(&mut bufs[prev], prev_start, prev_len)?;
 
             // Wait for current chunk's D2H before reuse.
             backend.stream_sync(&streams[curr])?;
         }
 
-        // Write final chunk.
+        // Accumulate CRC for + write final chunk.
         let last = (num_chunks - 1) % 2;
         let (last_start, last_end) = chunk_range(num_chunks - 1);
         let last_len = (last_end - last_start) as usize;
+        accumulate_freeze_crcs(
+            &bufs[last],
+            last_start,
+            last_end,
+            last_start,
+            &plan,
+            &mut crcs,
+        );
         write_chunk_to_file(&mut bufs[last], last_start, last_len)?;
     }
 
+    // Patch the region-table bytes on disk with the computed CRCs,
+    // then fsync so the patched table is durable before the rename.
+    // Uses the buffered fd because the table is only 32 bytes per
+    // region and pwrite doesn't care about O_DIRECT alignment.
+    let table_bytes = region_table_bytes_with_crcs(&plan, &crcs);
+    pwrite_exact(&file_buffered, &table_bytes, HEADER_SIZE).map_err(io_err)?;
+
     // Truncate to exact file size (strips O_DIRECT 4 KiB padding).
     truncate(&file_direct, file_len).map_err(io_err)?;
+
+    // fsync data + metadata before the rename so the bytes are
+    // durable. Both fds reference the same inode; one fsync covers
+    // the file.
+    fsync_file(&file_direct).map_err(io_err)?;
+
+    // Release fds before renaming — some filesystems (e.g. AFS,
+    // older NFS) are finicky about renaming an open file.
+    drop(file_direct);
+    drop(file_buffered);
+
+    // Atomic rename tmp → path, then fsync the parent dir so the
+    // new name survives a power loss.
+    commit_tmp_to_final(&tmp_path, path).map_err(io_err)?;
+
+    // Write succeeded — don't unlink tmp in Drop (already renamed).
+    guard.disarm();
 
     // Cleanup streams.
     backend
@@ -623,6 +899,60 @@ where
     })
 }
 
+/// Derive the intermediate-write path for an atomic freeze. The
+/// `.thaw-incomplete` suffix is deliberate: distinct from generic
+/// `.tmp` and from `.thaw` so glob patterns over snapshot
+/// directories won't see partial writes as valid snapshots.
+fn tmp_path_for(path: &Path) -> std::path::PathBuf {
+    let mut os = path.as_os_str().to_owned();
+    os.push(".thaw-incomplete");
+    std::path::PathBuf::from(os)
+}
+
+/// Commit a completed tmp file to its final path. Performs an
+/// atomic `rename` then fsyncs the parent directory so the new
+/// name is durable. Caller must have already fsynced the tmp's
+/// contents before calling this.
+fn commit_tmp_to_final(tmp: &Path, final_path: &Path) -> std::io::Result<()> {
+    std::fs::rename(tmp, final_path)?;
+    if let Some(parent) = final_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            // Best-effort: some filesystems (e.g. tmpfs) don't need
+            // or support dir fsync. Swallow ENOTSUP-style errors.
+            let _ = fsync_dir(parent);
+        }
+    }
+    Ok(())
+}
+
+/// RAII guard that unlinks a tmp file on drop unless `disarm()` is
+/// called first. Covers the "freeze errored or panicked before
+/// rename" case so callers don't leak half-written `.thaw-incomplete`
+/// files into the snapshot directory.
+struct TmpFileGuard {
+    path: Option<std::path::PathBuf>,
+}
+
+impl TmpFileGuard {
+    fn arm(path: &Path) -> Self {
+        TmpFileGuard {
+            path: Some(path.to_path_buf()),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TmpFileGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
 // =============================================================================
 // PIPELINED RESTORE
 // =============================================================================
@@ -630,6 +960,11 @@ where
 /// A single entry in the copy plan: which region of the file maps
 /// to which device region.
 struct CopyEntry {
+    /// Region kind — preserved so a checksum-mismatch error can
+    /// report "which region" to the operator.
+    kind: RegionKind,
+    /// Logical id (meaningful for KV blocks).
+    logical_id: u32,
     /// Absolute byte offset in the file where this region's payload
     /// starts.
     file_offset: u64,
@@ -637,6 +972,10 @@ struct CopyEntry {
     size: u64,
     /// Where on the device to put it.
     device_region: DeviceRegion,
+    /// CRC32C recorded by the freeze writer. Zero if the file was
+    /// produced before CRCs existed; restore skips verification in
+    /// that case.
+    expected_crc32c: u32,
 }
 
 /// Pipelined restore from a `.thaw` file.
@@ -714,6 +1053,7 @@ where
         let logical_id = entry.logical_id();
         let size = entry.size();
         let file_offset = entry.file_offset();
+        let expected_crc32c = entry.crc32c();
 
         let device_region =
             resolve(kind, logical_id).ok_or(RestoreError::UnmappedRegion {
@@ -732,9 +1072,12 @@ where
 
         total_bytes += size;
         plan.push(CopyEntry {
+            kind,
+            logical_id,
             file_offset,
             size,
             device_region,
+            expected_crc32c,
         });
     }
 
@@ -755,7 +1098,14 @@ where
     let file = open_direct(path, config.try_direct_io).map_err(io_err)?;
 
     let chunk_size = config.chunk_size;
-    assert!(chunk_size % 4096 == 0, "chunk_size must be a multiple of 4096");
+    if chunk_size == 0 || chunk_size % 4096 != 0 {
+        return Err(RestoreError::InvalidConfig {
+            message: format!(
+                "chunk_size must be a positive multiple of 4096, got {}",
+                chunk_size
+            ),
+        });
+    }
 
     // Determine the byte range we need to read from the file.
     let payload_start = plan.first().unwrap().file_offset;
@@ -855,14 +1205,25 @@ where
             .map_err(io_err)
         };
 
+    // Per-region CRC verification state.
+    let mut crc_state: Vec<RestoreCrcState> = vec![RestoreCrcState::new(); plan.len()];
+
     // Prime the pump: read chunk 0.
     let chunk0_start = read_start;
     let chunk0_len = chunk_size.min(read_len);
     read_chunk(&mut bufs[0], chunk0_start, chunk0_len)?;
 
     if num_chunks == 1 {
-        // Single chunk: upload and done.
+        // Single chunk: verify CRC over the buffer, then upload.
         let chunk_end = chunk0_start + chunk0_len as u64;
+        fold_and_verify_chunk_crc(
+            &bufs[0].as_slice()[..chunk0_len],
+            chunk0_start,
+            chunk0_start,
+            chunk_end,
+            &plan,
+            &mut crc_state,
+        )?;
         launch_uploads(
             backend,
             &bufs[0],
@@ -885,6 +1246,17 @@ where
             let curr_start = read_start + chunk_idx as u64 * chunk_size as u64;
             let curr_len = chunk_size.min(read_len - chunk_idx * chunk_size);
 
+            // Fold previous chunk's bytes into running per-region CRCs
+            // before the buffer is reused for the next round.
+            fold_and_verify_chunk_crc(
+                &bufs[prev].as_slice()[..prev_len],
+                prev_start,
+                prev_start,
+                prev_end,
+                &plan,
+                &mut crc_state,
+            )?;
+
             // Launch async uploads from the previous chunk's buffer.
             launch_uploads(
                 backend,
@@ -906,11 +1278,19 @@ where
                 .map_err(RestoreError::Backend)?;
         }
 
-        // Upload the final chunk.
+        // Fold + upload the final chunk.
         let last = (num_chunks - 1) % 2;
         let last_start = read_start + (num_chunks - 1) as u64 * chunk_size as u64;
         let last_len = chunk_size.min(read_len - (num_chunks - 1) * chunk_size);
         let last_end = last_start + last_len as u64;
+        fold_and_verify_chunk_crc(
+            &bufs[last].as_slice()[..last_len],
+            last_start,
+            last_start,
+            last_end,
+            &plan,
+            &mut crc_state,
+        )?;
         launch_uploads(
             backend,
             &bufs[last],
@@ -1006,6 +1386,7 @@ where
         let logical_id = entry.logical_id();
         let size = entry.size();
         let file_offset = entry.file_offset();
+        let expected_crc32c = entry.crc32c();
 
         let device_region =
             resolve(kind, logical_id).ok_or(RestoreError::UnmappedRegion {
@@ -1024,9 +1405,12 @@ where
 
         total_bytes += size;
         plan.push(CopyEntry {
+            kind,
+            logical_id,
             file_offset,
             size,
             device_region,
+            expected_crc32c,
         });
     }
 
@@ -1037,10 +1421,14 @@ where
     // -- Phase 2: Double-buffered pipelined restore from memory -----
 
     let chunk_size = config.chunk_size;
-    assert!(
-        chunk_size % 4096 == 0,
-        "chunk_size must be a multiple of 4096"
-    );
+    if chunk_size == 0 || chunk_size % 4096 != 0 {
+        return Err(RestoreError::InvalidConfig {
+            message: format!(
+                "chunk_size must be a positive multiple of 4096, got {}",
+                chunk_size
+            ),
+        });
+    }
 
     let payload_start = plan.first().unwrap().file_offset;
     let payload_end = plan
@@ -1114,6 +1502,11 @@ where
             buf.as_mut_slice()[..len].copy_from_slice(&data[src_start..src_end]);
             Ok(())
         };
+
+    // Verify every region's CRC up front — `data` is already resident
+    // in RAM, so a single sequential scan gives atomic "verify then
+    // DMA" semantics: a corrupt snapshot cannot touch device memory.
+    verify_plan_crcs_from_bytes(data, &plan)?;
 
     // Prime: copy chunk 0 into pinned buffer.
     let chunk0_start = read_start;
@@ -1357,6 +1750,7 @@ where
         let logical_id = entry.logical_id();
         let size = entry.size();
         let file_offset = entry.file_offset();
+        let expected_crc32c = entry.crc32c();
 
         let device_region = resolve(kind, logical_id)
             .ok_or(RestoreError::UnmappedRegion { kind, logical_id })?;
@@ -1372,9 +1766,12 @@ where
 
         total_bytes += size;
         plan.push(CopyEntry {
+            kind,
+            logical_id,
             file_offset,
             size,
             device_region,
+            expected_crc32c,
         });
     }
 
@@ -1394,6 +1791,12 @@ fn run_pre_registered_plan<B>(
 where
     B: PipelinedBackend,
 {
+    // Verify every region's CRC32C from the source slice before any
+    // DMA fires. `data` is already resident (mmap or read-through),
+    // so an upfront scan is cheap and buys atomic semantics: a
+    // corrupt snapshot cannot touch device memory.
+    verify_plan_crcs_from_bytes(data, plan)?;
+
     let streams = [
         backend.stream_create().map_err(RestoreError::Backend)?,
         backend.stream_create().map_err(RestoreError::Backend)?,
@@ -2105,6 +2508,75 @@ mod tests {
         }
     }
 
+    /// After a successful freeze, no `.thaw-incomplete` file
+    /// remains next to the final path — the atomic rename and the
+    /// RAII guard both have to agree the write succeeded.
+    #[test]
+    fn freeze_to_file_leaves_no_tmp_on_success() {
+        let backend = MockCuda::new();
+        let ptr = DevicePtr(0x1000);
+        let bytes: Vec<u8> = (0..4096).map(|i| (i & 0xFF) as u8).collect();
+        backend.register_region(ptr, bytes.clone());
+        let requests = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(ptr, bytes.len() as u64),
+        )];
+        let config = FreezeConfig {
+            chunk_size: 4096,
+            try_direct_io: false,
+            ..FreezeConfig::default()
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("snap.thaw");
+        freeze_pipelined_to_file(&backend, &requests, &config, &path).expect("freeze");
+
+        assert!(path.exists(), "final file should exist");
+        let tmp = super::tmp_path_for(&path);
+        assert!(!tmp.exists(), "tmp file should have been renamed away");
+    }
+
+    /// If the freeze fails mid-pipeline (here: unknown device ptr),
+    /// the tmp file is unlinked by the RAII guard and any
+    /// pre-existing file at the final path is untouched. No
+    /// half-written `.thaw` can leak out to confuse `thaw restore`.
+    #[test]
+    fn freeze_to_file_cleans_tmp_on_error_and_preserves_final() {
+        let backend = MockCuda::new();
+        // A request pointing at a DevicePtr that was never registered
+        // triggers UnknownDevicePtr during D2H, after the tmp file
+        // is already open.
+        let bad_requests = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(DevicePtr(0xDEAD), 8192),
+        )];
+        let config = FreezeConfig {
+            chunk_size: 4096,
+            try_direct_io: false,
+            ..FreezeConfig::default()
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("snap.thaw");
+        // Seed a pre-existing "old snapshot" at the final path.
+        std::fs::write(&path, b"OLD_SNAPSHOT_DO_NOT_TOUCH").expect("seed");
+
+        let err = freeze_pipelined_to_file(&backend, &bad_requests, &config, &path)
+            .expect_err("should fail");
+        match err {
+            FreezeError::Backend(_) => {}
+            other => panic!("expected Backend error, got {other:?}"),
+        }
+
+        let tmp = super::tmp_path_for(&path);
+        assert!(!tmp.exists(), "tmp file must be cleaned up on error");
+        assert_eq!(
+            std::fs::read(&path).expect("read final"),
+            b"OLD_SNAPSHOT_DO_NOT_TOUCH",
+            "pre-existing file must not be touched on failure"
+        );
+    }
+
     /// Empty request list via file path: prelude-only file.
     #[test]
     fn freeze_to_file_empty() {
@@ -2275,6 +2747,119 @@ mod tests {
 
         assert_eq!(dst.read_region(dst_ptr).unwrap(), data_region);
         assert_eq!(stats.regions_restored, 1);
+    }
+
+    /// Payload tampering after freeze is caught by per-region
+    /// CRC32C before any bytes hit the device. Mirrors the
+    /// `restore::restore_detects_single_byte_payload_corruption`
+    /// test but against the pipelined-from-bytes path, so a future
+    /// refactor that skips the fold-and-verify call breaks a test.
+    #[test]
+    fn pipelined_from_bytes_detects_payload_corruption() {
+        let src = MockCuda::new();
+        let ptr = DevicePtr(0x5000);
+        let data_region: Vec<u8> = (0..4096).map(|i| ((i * 11) & 0xFF) as u8).collect();
+        src.register_region(ptr, data_region.clone());
+
+        let requests = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(ptr, data_region.len() as u64),
+        )];
+        let mut file_bytes: Vec<u8> = Vec::new();
+        freeze_pipelined(
+            &src,
+            &requests,
+            &FreezeConfig::default(),
+            &mut file_bytes,
+        )
+        .expect("freeze");
+
+        // Flip a byte deep in the payload, past the prelude (header +
+        // 32-byte region-table entry), so we tamper with data bytes,
+        // not table bytes.
+        let pos = file_bytes.len() - 100;
+        file_bytes[pos] ^= 0xFF;
+
+        let dst = MockCuda::new();
+        let dst_ptr = DevicePtr(0xA000);
+        dst.register_region(dst_ptr, vec![0u8; data_region.len()]);
+
+        let config = PipelineConfig {
+            chunk_size: 4096,
+            try_direct_io: false,
+        };
+        let err = restore_pipelined_from_bytes(
+            &dst,
+            &file_bytes,
+            |_, _| Some(DeviceRegion::new(dst_ptr, data_region.len() as u64)),
+            &config,
+        )
+        .expect_err("tampered payload must fail verify");
+
+        match err {
+            RestoreError::ChecksumMismatch { kind, .. } => {
+                assert_eq!(kind, RegionKind::Weights);
+            }
+            other => panic!("expected ChecksumMismatch, got {:?}", other),
+        }
+
+        // Device memory must be untouched — verify runs before DMA.
+        assert_eq!(dst.read_region(dst_ptr).unwrap(), vec![0u8; data_region.len()]);
+    }
+
+    /// Zero-copy path: tampered payload must fail verify before any
+    /// DMA fires. Uses the mock's `host_register`-noop path so the
+    /// exact function under test is `run_pre_registered_plan`.
+    #[test]
+    fn pipelined_from_registered_bytes_detects_payload_corruption() {
+        let src = MockCuda::new();
+        let ptr = DevicePtr(0x6000);
+        let data_region: Vec<u8> = (0..2048).map(|i| ((i * 13) & 0xFF) as u8).collect();
+        src.register_region(ptr, data_region.clone());
+
+        let requests = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(ptr, data_region.len() as u64),
+        )];
+        let mut file_bytes: Vec<u8> = Vec::new();
+        freeze_pipelined(
+            &src,
+            &requests,
+            &FreezeConfig::default(),
+            &mut file_bytes,
+        )
+        .expect("freeze");
+
+        // Corrupt a byte deep in the payload, past the prelude.
+        let pos = file_bytes.len() - 50;
+        file_bytes[pos] ^= 0x5A;
+
+        let dst = MockCuda::new();
+        let dst_ptr = DevicePtr(0xB000);
+        dst.register_region(dst_ptr, vec![0u8; data_region.len()]);
+
+        let config = PipelineConfig {
+            chunk_size: 4096,
+            try_direct_io: false,
+        };
+        let err = restore_pipelined_from_registered_bytes(
+            &dst,
+            &file_bytes,
+            |_, _| Some(DeviceRegion::new(dst_ptr, data_region.len() as u64)),
+            &config,
+        )
+        .expect_err("tampered payload must fail verify on zero-copy path");
+
+        match err {
+            RestoreError::ChecksumMismatch { kind, .. } => {
+                assert_eq!(kind, RegionKind::Weights);
+            }
+            other => panic!("expected ChecksumMismatch, got {:?}", other),
+        }
+
+        assert_eq!(dst.read_region(dst_ptr).unwrap(), vec![0u8; data_region.len()]);
     }
 
     /// Empty data restores with zero stats (from bytes).
@@ -2652,5 +3237,71 @@ mod tests {
 
         clear_wc_buf_cache();
         assert_eq!(cached_chunk_size(), None);
+    }
+
+    /// Invalid freeze config surfaces as `InvalidConfig`, not a panic.
+    /// The CLI and Python layer need a recoverable error here; an
+    /// assert would unwind the process with no context.
+    #[test]
+    fn freeze_rejects_invalid_chunk_size() {
+        let backend = MockCuda::new();
+        let w_ptr = DevicePtr(0x1_000);
+        backend.register_region(w_ptr, vec![0u8; 1024]);
+        let requests = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(w_ptr, 1024),
+        )];
+
+        let bad = FreezeConfig {
+            chunk_size: 0,
+            ..FreezeConfig::default()
+        };
+        let mut sink: Vec<u8> = Vec::new();
+        let err = freeze_pipelined(&backend, &requests, &bad, &mut sink)
+            .expect_err("chunk_size=0 must fail");
+        assert!(matches!(err, FreezeError::InvalidConfig { .. }), "got {err:?}");
+
+        let bad_align = FreezeConfig {
+            chunk_size: 1234,
+            ..FreezeConfig::default()
+        };
+        let tmp = NamedTempFile::new().expect("tmp");
+        let err = freeze_pipelined_to_file(&backend, &requests, &bad_align, tmp.path())
+            .expect_err("non-4KiB chunk_size must fail on O_DIRECT path");
+        assert!(matches!(err, FreezeError::InvalidConfig { .. }), "got {err:?}");
+    }
+
+    /// Invalid restore config surfaces as `InvalidConfig`, not a panic.
+    /// With a non-empty plan the validation path is reached before the
+    /// `.first().unwrap()` payload math, so the error is the config one.
+    #[test]
+    fn restore_rejects_invalid_chunk_size() {
+        let backend = MockCuda::new();
+        let w_ptr = DevicePtr(0x1_000);
+        backend.register_region(w_ptr, vec![1u8; 1024]);
+        let reqs = vec![FreezeRequest::new(
+            RegionKind::Weights,
+            0,
+            DeviceRegion::new(w_ptr, 1024),
+        )];
+        let file_bytes = freeze_to_bytes(&backend, &reqs);
+
+        let dst = MockCuda::new();
+        let dst_ptr = DevicePtr(0x2_000);
+        dst.register_region(dst_ptr, vec![0u8; 1024]);
+
+        let cfg = PipelineConfig {
+            chunk_size: 1234,
+            try_direct_io: false,
+        };
+        let err = restore_pipelined_from_bytes(
+            &dst,
+            &file_bytes,
+            |_, _| Some(DeviceRegion::new(dst_ptr, 1024)),
+            &cfg,
+        )
+        .expect_err("non-4KiB chunk_size must fail");
+        assert!(matches!(err, RestoreError::InvalidConfig { .. }), "got {err:?}");
     }
 }

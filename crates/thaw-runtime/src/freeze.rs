@@ -129,6 +129,14 @@ pub enum FreezeError {
     /// whole freeze.
     #[error("snapshot error during freeze: {0}")]
     Snapshot(#[from] SnapshotError),
+
+    /// The caller passed a `FreezeConfig` value the pipeline can't
+    /// honor — e.g. `chunk_size == 0`, or a non-4 KiB-multiple
+    /// `chunk_size` on the O_DIRECT path. Surfaced as a typed error
+    /// instead of an assert so callers (CLI, Python bindings, the
+    /// pool) can report it cleanly instead of unwinding the process.
+    #[error("invalid freeze config: {message}")]
+    InvalidConfig { message: String },
 }
 
 /// The freeze configuration.
@@ -187,40 +195,48 @@ where
     B: CudaBackend + ?Sized,
     W: Write,
 {
-    // Phase 1: register every region's metadata (kind, logical_id,
-    // size) with the writer so it can compute the prelude layout.
-    // No payload bytes are copied yet.
-    let mut writer = ByteRegionWriter::new();
-    if let Some(commit) = config.vllm_commit {
-        writer.set_vllm_commit(commit);
-    }
-    for request in requests {
-        writer.push_region_metadata(
-            request.kind,
-            request.logical_id,
-            request.device_region.size,
-        );
-    }
-
-    // Phase 2: write the prelude (header + region table). The
-    // offsets in the table already account for every region's
-    // declared size, so when we stream payload bytes next the
-    // file's internal pointers will be correct.
-    let snapshot = writer.build_snapshot();
-    let mut written = snapshot.write_to(sink)?;
-
-    // Phase 3: for each region, DMA from device into a pinned
-    // buffer and write the pinned buffer directly to the sink.
-    // No intermediate Vec<u8> copy -- the bytes go straight from
-    // pinned memory into the writer, which is the difference
-    // between ~1 GB/s and ~12 GB/s on PCIe 4.
+    // Phase 1: DMA every device region into its own pinned host
+    // buffer and compute a CRC32C over the bytes. The CRC has to
+    // be known *before* the prelude is written, because the
+    // region-table entries carry the per-region CRC and the
+    // prelude sits at the head of the file.
+    let mut pinned_bufs = Vec::with_capacity(requests.len());
+    let mut crcs = Vec::with_capacity(requests.len());
     for request in requests {
         let size = request.device_region.size as usize;
         let mut pinned = backend.alloc_pinned(size)?;
         backend.memcpy_d2h(&mut pinned, &request.device_region)?;
+        let crc = crc32c::crc32c(pinned.as_slice());
+        pinned_bufs.push(pinned);
+        crcs.push(crc);
+    }
+
+    // Phase 2: register every region's metadata (kind, logical_id,
+    // size, crc32c) with the writer so it can compute the prelude
+    // layout and stamp the CRCs onto the table.
+    let mut writer = ByteRegionWriter::new();
+    if let Some(commit) = config.vllm_commit {
+        writer.set_vllm_commit(commit);
+    }
+    for (request, crc) in requests.iter().zip(crcs.iter()) {
+        writer.push_region_metadata_with_crc(
+            request.kind,
+            request.logical_id,
+            request.device_region.size,
+            *crc,
+        );
+    }
+
+    // Phase 3: write the prelude (header + region table).
+    let snapshot = writer.build_snapshot();
+    let mut written = snapshot.write_to(sink)?;
+
+    // Phase 4: stream each pinned buffer to the sink in push
+    // order. Offsets in the table already match this order.
+    for pinned in &pinned_bufs {
         sink.write_all(pinned.as_slice())
             .map_err(|e| FreezeError::Snapshot(SnapshotError::from(e)))?;
-        written += size as u64;
+        written += pinned.as_slice().len() as u64;
     }
 
     Ok(written)

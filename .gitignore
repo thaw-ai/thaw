@@ -107,7 +107,7 @@ perf.data.old
 # Golden-file test fixtures. These are committed on purpose so that
 # format drift shows up as a diff in CI. The `*.bin` rule above is
 # for model weights; our own test goldens are the exception.
-!crates/**/tests/goldens/**dist/
+!crates/**/tests/goldens/**
 claudes_corner/
 
 dist/

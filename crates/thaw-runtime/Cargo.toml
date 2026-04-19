@@ -67,6 +67,10 @@ thiserror = "1.0"
 # pread and O_DIRECT support for the pipelined restore path.
 libc = "0.2"
 
+# Hardware-accelerated Castagnoli CRC-32C, used for per-region
+# integrity checks on freeze/restore. Same crate thaw-core pulls in.
+crc32c = "0.6"
+
 [dev-dependencies]
 # tempfile for any future integration tests that want a real
 # filesystem. Parity with thaw-core's dev-dep set.
