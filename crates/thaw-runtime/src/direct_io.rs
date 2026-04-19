@@ -59,16 +59,27 @@ pub fn open_direct(path: &Path, try_direct: bool) -> io::Result<DirectFile> {
     })
 }
 
-/// Open a file for writing (create+truncate), attempting O_DIRECT
-/// if `try_direct` is true. Falls back silently to buffered I/O if
-/// the platform or filesystem does not support it.
+/// Open a file for writing, attempting O_DIRECT if `try_direct`
+/// is true. Falls back silently to buffered I/O if the platform or
+/// filesystem does not support it.
+///
+/// When `truncate` is true the file is created+truncated; when
+/// false the file is expected to exist and is opened write-only
+/// without length change. The `freeze_pipelined_to_file` path opens
+/// a single underlying file twice (one O_DIRECT fd, one buffered
+/// fallback for ragged edges) — the first call truncates, the
+/// second attaches without disturbing the first.
 ///
 /// Used by `freeze_pipelined` to write `.thaw` files without
 /// thrashing the page cache — the bytes come straight out of pinned
 /// host memory that the CPU will never touch again.
-pub fn open_direct_write(path: &Path, try_direct: bool) -> io::Result<DirectFile> {
+pub fn open_direct_write(
+    path: &Path,
+    try_direct: bool,
+    truncate: bool,
+) -> io::Result<DirectFile> {
     if try_direct {
-        if let Some(f) = try_open_direct_write(path) {
+        if let Some(f) = try_open_direct_write(path, truncate) {
             return Ok(DirectFile {
                 file: f,
                 direct: true,
@@ -77,8 +88,8 @@ pub fn open_direct_write(path: &Path, try_direct: bool) -> io::Result<DirectFile
     }
     let file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create(truncate)
+        .truncate(truncate)
         .open(path)?;
     Ok(DirectFile {
         file,
@@ -99,14 +110,16 @@ fn try_open_direct(path: &Path) -> Option<File> {
         .ok()
 }
 
-/// O_DIRECT for write: create+truncate with the direct flag.
+/// O_DIRECT for write with the direct flag. When `truncate` is
+/// true the file is created+truncated; otherwise the existing file
+/// is opened without length change.
 #[cfg(target_os = "linux")]
-fn try_open_direct_write(path: &Path) -> Option<File> {
+fn try_open_direct_write(path: &Path, truncate: bool) -> Option<File> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create(truncate)
+        .truncate(truncate)
         .custom_flags(libc::O_DIRECT)
         .open(path)
         .ok()
@@ -124,7 +137,7 @@ fn try_open_direct(_path: &Path) -> Option<File> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn try_open_direct_write(_path: &Path) -> Option<File> {
+fn try_open_direct_write(_path: &Path, _truncate: bool) -> Option<File> {
     None
 }
 
@@ -237,6 +250,30 @@ pub fn truncate(file: &DirectFile, len: u64) -> io::Result<()> {
     file.file.set_len(len)
 }
 
+/// fsync the file — flushes both data and metadata to stable storage.
+/// Required before an atomic rename to guarantee the file's contents
+/// survive a power loss: without fsync, the rename can land on disk
+/// before the data does, producing a valid directory entry pointing
+/// at garbage.
+pub fn fsync_file(file: &DirectFile) -> io::Result<()> {
+    file.file.sync_all()
+}
+
+/// fsync a directory, flushing the directory's metadata (including
+/// any `rename` that just landed inside it) to stable storage. On
+/// Linux the rename call alone is atomic but not durable; the
+/// parent dir must be fsynced to persist the new name.
+#[cfg(unix)]
+pub fn fsync_dir(path: &Path) -> io::Result<()> {
+    let dir = File::open(path)?;
+    dir.sync_all()
+}
+
+#[cfg(not(unix))]
+pub fn fsync_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,7 +310,7 @@ mod tests {
     fn pwrite_roundtrip_via_pread() {
         let f = NamedTempFile::new().expect("tempfile");
 
-        let wf = open_direct_write(f.path(), false).expect("open write");
+        let wf = open_direct_write(f.path(), false, true).expect("open write");
         assert!(!wf.is_direct()); // Mac: always buffered
         pwrite_exact(&wf, b"Hello, pwrite world!", 0).expect("pwrite");
 
@@ -288,7 +325,7 @@ mod tests {
     fn pwrite_at_offset_skips_intervening_bytes() {
         let f = NamedTempFile::new().expect("tempfile");
 
-        let wf = open_direct_write(f.path(), false).expect("open write");
+        let wf = open_direct_write(f.path(), false, true).expect("open write");
         pwrite_exact(&wf, b"HEAD", 0).expect("pwrite head");
         pwrite_exact(&wf, b"TAIL", 100).expect("pwrite tail at 100");
 
@@ -305,7 +342,7 @@ mod tests {
     #[test]
     fn truncate_shrinks_file() {
         let f = NamedTempFile::new().expect("tempfile");
-        let wf = open_direct_write(f.path(), false).expect("open");
+        let wf = open_direct_write(f.path(), false, true).expect("open");
         pwrite_exact(&wf, &[0xAAu8; 8192], 0).expect("pwrite");
         truncate(&wf, 100).expect("truncate");
         drop(wf);
