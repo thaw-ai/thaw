@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>thaw — sub-second LLM hot-swap at 55 GB/s</title>
-  <meta name="description" content="GPU state management for LLM inference. Sub-second hot-swap at 55 GB/s, 17x faster cold starts, KV cache snapshots, agent forking. vLLM + SGLang. Open source MIT.">
+  <meta name="description" content="GPU state management for LLM inference. Sub-second hot-swap at 55 GB/s, 9.7x faster cold starts, KV cache snapshots, agent forking. vLLM + SGLang. Open source MIT.">
   <meta property="og:title" content="thaw — sub-second LLM hot-swap at 55 GB/s">
   <meta property="og:description" content="Hot-swap a Llama-3-8B model in 0.29s at 55 GB/s via pinned-memory DMA. 17.2x cold-start speedup on 70B. vLLM + SGLang. KV cache snapshots. Agent forking. Open source.">
   <meta property="og:type" content="website">
@@ -1236,8 +1236,8 @@
       <span class="badge-dot"></span>
       Open Source &middot; MIT License
     </div>
-    <h1 class="reveal reveal-d2">Hot-swap LLMs in<br><span class="hero-num" data-text="0.29s">0.29s</span> at 55 GB/s</h1>
-    <p class="hero-sub reveal reveal-d3">Snapshot GPU state and restore via pipelined DMA. Pinned-memory hot-swap saturates PCIe Gen5. 17&times; faster cold starts. KV cache snapshots. Bit-identical output on H100.</p>
+    <h1 class="reveal reveal-d2">LLMs cold-start<br><span class="hero-num" data-text="9.7×">9.7&times;</span> faster</h1>
+    <p class="hero-sub reveal reveal-d3">Snapshot GPU state to disk, restore via pipelined DMA. 0.29s hot-swap at 55 GB/s. Bit-identical output. KV cache snapshots.</p>
     <div class="hero-cta reveal reveal-d4">
       <div class="install-cmd" onclick="copyInstall(this)">
         <span class="prompt">$</span>
