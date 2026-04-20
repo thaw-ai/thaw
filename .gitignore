@@ -116,7 +116,7 @@ dist/
 # Internal / strategy docs — not for public repo
 # ============================================================================
 DESIGN.md
-plans/
+/plans/
 docs/STRATEGY.md
 docs/LANDSCAPE.md
 docs/notes/READING_NOTES.md

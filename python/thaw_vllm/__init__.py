@@ -46,8 +46,13 @@ from thaw_vllm.kv_snapshot import (
 from thaw_vllm.pool import EnginePool, create_pool_app
 
 # Register load_format="thaw" with vLLM when available.
+# vLLM also auto-discovers this via the `vllm.general_plugins` entrypoint
+# in pyproject.toml, so `LLM(load_format="thaw", ...)` works without an
+# explicit `import thaw_vllm` once thaw-native is installed. This block
+# preserves the existing `import thaw_vllm` path; register() is idempotent.
 try:
-    from thaw_vllm.loader import ThawModelLoader  # noqa: F401
+    from thaw_vllm.loader import ThawModelLoader, register as _register_loader
+    _register_loader()
 except ImportError:
     # vLLM not installed — loader registration is optional.
     pass
