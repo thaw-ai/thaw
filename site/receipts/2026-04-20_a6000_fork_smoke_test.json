@@ -1,0 +1,78 @@
+{
+  "receipt_version": 1,
+  "timestamp_utc": "2026-04-20T17:19:23+00:00",
+  "demo": "fork_smoke_test",
+  "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+  "trunk_tokens": 56,
+  "timings_s": {
+    "load_s": 24.12,
+    "trunk_warm_s": 0.97,
+    "fork_handle_s": 0.213,
+    "fork_completions_s": 2.29
+  },
+  "modes": {
+    "same_process_fork": {
+      "ran": true,
+      "elapsed_s": 2.29,
+      "count": 4,
+      "per_branch_elapsed_s": [0.57, 0.57, 0.57, 0.57]
+    }
+  },
+  "checks": {
+    "all_nonempty": true,
+    "all_diverge": true,
+    "prefix_cache_enabled": true,
+    "cpu_unit_tests": "25/25 passed (pytest tests/test_fork.py)"
+  },
+  "samples": [
+    {
+      "mode": "same_process",
+      "branch": 0,
+      "prompt_suffix": " Approach 1: use OrderedDict.",
+      "text_preview": "OrderedDict has O(1) lookup and LRU eviction. I can use it and track the TTL in a separate dictionary or set. Approach"
+    },
+    {
+      "mode": "same_process",
+      "branch": 1,
+      "prompt_suffix": " Approach 2: use a doubly-linked list.",
+      "text_preview": "This allows me to maintain a list of keys and values that have been recently accessed and quickly pop the least recentl"
+    },
+    {
+      "mode": "same_process",
+      "branch": 2,
+      "prompt_suffix": " Approach 3: use heapq for TTL.",
+      "text_preview": "This approach is similar to Approach 2, but instead of using a separate dictionary for TTL, we can use the heap to stor"
+    },
+    {
+      "mode": "same_process",
+      "branch": 3,
+      "prompt_suffix": " Approach 4: subclass dict.",
+      "text_preview": "This is the most straightforward way to implement a LRU cache with TTL in Python. Create a subclass of dict with method"
+    }
+  ],
+  "pod": {
+    "gpu_name": "NVIDIA RTX A6000",
+    "gpu_memory_mib": 46068,
+    "driver_version": null,
+    "cuda_version": "12.8"
+  },
+  "software": {
+    "python": "3.11.10",
+    "vllm": "0.19.1",
+    "torch": "2.10.0",
+    "thaw_native": "0.3.0",
+    "thaw_vllm": "0.3.0"
+  },
+  "git": {
+    "commit": "5051112e",
+    "short": "5051112",
+    "dirty": false
+  },
+  "extra": {
+    "branches": 4,
+    "max_tokens_per_branch": 80,
+    "max_model_len": 4096,
+    "provenance": "Reconstructed from stdout of an actual run on 2026-04-20 on RunPod A6000. Pod was terminated before the checked-in fork_smoke_test.py script existed, so this receipt was hand-assembled from the run's real captured metrics (timings, per-branch text, pod info). Re-run demos/fork_smoke_test.py --json-out ... to emit a fresh self-verifying receipt.",
+    "note": "Subprocess-worker path was not validated on A6000 — parent engine (~40 GB) + N workers OOMs on 48 GB. Requires ≥80 GB GPU. See parallel_agents.py / rl_rollout_simulator.py receipts once the H100 run completes."
+  }
+}

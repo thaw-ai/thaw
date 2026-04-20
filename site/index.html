@@ -1272,6 +1272,7 @@
       <a href="#videos">Videos</a>
       <a href="#features">Features</a>
       <a href="#benchmarks">Benchmarks</a>
+      <a href="#receipts">Receipts</a>
       <a href="#quickstart">Quick Start</a>
       <a href="#team">Team</a>
       <a href="https://github.com/thaw-ai/thaw" class="nav-gh" target="_blank" rel="noopener">
@@ -1795,6 +1796,48 @@ Is there something I can help you with?"}}],
   </div>
 </section>
 
+<!-- ── Receipts ── -->
+
+<section class="section receipts-section" id="receipts">
+  <div class="section-inner">
+    <div class="bench-head reveal">
+      <span class="section-tag">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        Receipts
+      </span>
+      <h2>Every number on this page has a JSON receipt behind it</h2>
+      <p class="section-sub">Each demo emits a sanitized receipt: timings, per-branch outputs, pod GPU, software versions, git commit. Re-run the demo and compare your JSON to ours. No doctoring.</p>
+    </div>
+    <div class="bench-wrap reveal reveal-d1">
+      <table class="bench-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Demo</th>
+            <th>Pod</th>
+            <th>Model</th>
+            <th>Headline</th>
+            <th>JSON</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="col-mono">2026-04-20</td>
+            <td class="col-model">fork_smoke_test</td>
+            <td class="col-mono">RTX A6000 48 GB</td>
+            <td class="col-mono">Llama-3-8B</td>
+            <td>fork handle in 0.21s, 4 divergent completions in 2.29s</td>
+            <td class="col-mono"><a href="https://github.com/thaw-ai/thaw/blob/main/site/receipts/2026-04-20_a6000_fork_smoke_test.json">open</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="bench-note reveal reveal-d2">
+      Reproduce any row: <code>pip install thaw-native vllm &amp;&amp; python demos/fork_smoke_test.py --json-out mine.json</code> &mdash; then diff. Full index: <a href="https://github.com/thaw-ai/thaw/blob/main/site/receipts/index.json">receipts/index.json</a>. Schema: <a href="https://github.com/thaw-ai/thaw/blob/main/site/receipts/README.md">receipts/README.md</a>.
+    </p>
+  </div>
+</section>
+
 <!-- ── Team ── -->
 
 <section class="section team-section" id="team">
@@ -1890,6 +1933,7 @@ Is there something I can help you with?"}}],
         <a href="#videos">Videos</a>
         <a href="#features">Features</a>
         <a href="#benchmarks">Benchmarks</a>
+        <a href="#receipts">Receipts</a>
         <a href="#quickstart">Quick Start</a>
         <a href="#team">Team</a>
       </div>
