@@ -4,10 +4,20 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>thaw — the fork primitive for LLM inference</title>
-  <meta name="description" content="Snapshot a running AI agent — weights, KV cache, scheduler state — and fork it into N divergent children. For agent branching, RL rollouts, parallel exploration. Works with vLLM + SGLang. Open source MIT.">
+  <meta name="description" content="thaw is the open-source fork primitive for live LLM inference. fork(llm) → handle: snapshot weights + KV cache + scheduler state, hydrate into N children that skip prefill and diverge from the fork point. For RL rollouts, parallel coding agents, agent branching. vLLM + SGLang. Not a proxy.">
   <meta property="og:title" content="thaw — the fork primitive for LLM inference">
-  <meta property="og:description" content="Fork a live LLM inference session: snapshot weights + KV cache + scheduler state, restore into N parallel children. Skip prefill on every fork. 17.2× cold start on 70B. Open source.">
+  <meta property="og:description" content="fork(llm) → handle. N children skip prefill and diverge from the fork point. The open-source primitive for RL rollouts + parallel coding agents + agent branching. Not a proxy. Not LMCache. vLLM + SGLang. MIT licensed.">
   <meta property="og:type" content="website">
+  <meta property="og:url" content="https://thaw.sh">
+  <meta property="og:site_name" content="thaw">
+  <meta property="og:image" content="https://thaw.sh/og-preview.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="710">
+  <meta property="og:image:alt" content="thaw running on an NVIDIA GPU — terminal showing thaw serve alongside nvidia-smi">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="thaw — the fork primitive for LLM inference">
+  <meta name="twitter:description" content="fork(llm) → handle. N children skip prefill and diverge from the fork point. Not a proxy. Not LMCache. Open source, MIT.">
+  <meta name="twitter:image" content="https://thaw.sh/og-preview.png">
   <meta name="theme-color" content="#000000">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1074,6 +1084,51 @@
       gap: 20px;
     }
 
+    /* ── Compare (thaw vs proxies) ── */
+
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+    }
+
+    .compare-card {
+      padding: 28px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--surface);
+      position: relative;
+    }
+
+    .compare-card.compare-us {
+      border-color: var(--cyan);
+      background: linear-gradient(180deg, rgba(59,130,246,0.04) 0%, var(--surface) 100%);
+    }
+
+    .compare-label {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-3);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 14px;
+    }
+
+    .compare-label.compare-label-us { color: var(--cyan); }
+
+    .compare-card ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      color: var(--text-2);
+      font-size: 14px;
+      line-height: 1.75;
+    }
+
+    .compare-card.compare-us ul { color: var(--text); }
+
+    .compare-card ul li { padding: 4px 0; }
+
     .team-card {
       position: relative;
       background: var(--bg-raised);
@@ -1183,6 +1238,7 @@
       .feature-grid { grid-template-columns: repeat(2, 1fr); }
       .about-grid { grid-template-columns: 1fr; gap: 36px; }
       .use-cases { grid-template-columns: 1fr; }
+      .compare-grid { grid-template-columns: 1fr; }
       .footer-grid { grid-template-columns: 1fr 1fr; gap: 36px; }
       .videos-grid { grid-template-columns: 1fr; gap: 20px; }
       .team-grid { grid-template-columns: 1fr; gap: 16px; }
@@ -1237,7 +1293,7 @@
       Open Source &middot; MIT License
     </div>
     <h1 class="reveal reveal-d2"><span class="hero-num" data-text="Fork">Fork</span><br>a running AI agent</h1>
-    <p class="hero-sub reveal reveal-d3">Snapshot a live LLM inference session — weights, KV cache, scheduler state — and fork it into N divergent children. For agent branching, RL rollouts, and parallel exploration. Also the fastest model loader we know of, because fork requires that.</p>
+    <p class="hero-sub reveal reveal-d3">The open-source <strong style="color: var(--text); font-weight: 500;">fork primitive</strong> for live LLM inference. Snapshot a running session — weights, KV cache, scheduler state — and hydrate it into N divergent children that skip prefill and diverge from the fork point. For RL rollouts, parallel coding agents, agent branching. Not a proxy. Not a cache-tier. A primitive you invoke from user code.</p>
     <div class="hero-cta reveal reveal-d4">
       <div class="install-cmd" onclick="copyInstall(this)">
         <span class="prompt">$</span>
@@ -1424,6 +1480,50 @@
         <p>Move a running inference session between GPUs, pods, or data centers without losing state. Warm handoffs, spot-instance resilience, cross-region failover.</p>
       </div>
     </div>
+
+    <!-- ── Third-party receipt ── -->
+    <figure class="quote-block reveal reveal-d3" style="margin: 64px auto 0; max-width: 820px; padding: 32px 36px; border-left: 2px solid var(--cyan); background: linear-gradient(90deg, rgba(59,130,246,0.04) 0%, transparent 100%);">
+      <blockquote style="font-family: var(--font-display); font-size: 21px; line-height: 1.45; font-weight: 400; color: var(--text); letter-spacing: -0.01em; margin: 0;">
+        &ldquo;No current async library supports <span style="color: var(--cyan);">KV pivot resampling</span> out of the box.&rdquo;
+      </blockquote>
+      <figcaption style="margin-top: 18px; font-family: var(--font-mono); font-size: 12px; color: var(--text-3); letter-spacing: 0.04em;">
+        &mdash; HuggingFace, <em>async RL in 2026</em> &middot; the receipt for the problem <code style="color: var(--text-2); font-size: 12px;">thaw_vllm.fork()</code> solves
+      </figcaption>
+    </figure>
+
+    <!-- ── Not a proxy ── -->
+    <div class="compare-block reveal reveal-d4" style="margin: 72px auto 0; max-width: 980px;">
+      <div style="text-align: center; margin-bottom: 32px;">
+        <span class="section-tag">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          thaw is not LMCache
+        </span>
+        <h3 style="font-family: var(--font-display); font-size: 32px; line-height: 1.2; font-weight: 600; letter-spacing: -0.02em; margin-top: 14px;">Not a proxy. A primitive.</h3>
+        <p style="color: var(--text-2); font-size: 15px; margin-top: 10px; max-width: 640px; margin-left: auto; margin-right: auto;">LMCache and Tensormesh commercialize the <em>cache-tier proxy</em>. thaw ships the <em>fork primitive</em>. Different layer of the stack, different buyer, different API shape.</p>
+      </div>
+      <div class="compare-grid">
+        <div class="compare-card compare-them">
+          <div class="compare-label">LMCache · Tensormesh · proxies</div>
+          <ul style="list-style: none; padding: 0; margin: 0; color: var(--text-2); font-size: 14px; line-height: 1.75;">
+            <li style="padding: 4px 0;">Sidecar <strong style="color: var(--text);">in front of</strong> the engine</li>
+            <li style="padding: 4px 0;"><strong style="color: var(--text);">Passive</strong> &mdash; watches requests, hopes a prefix matches</li>
+            <li style="padding: 4px 0;">No handle, no pivot point, no fan-out API</li>
+            <li style="padding: 4px 0;">Server-side KV cache-tier (HBM &rarr; RAM &rarr; SSD)</li>
+            <li style="padding: 4px 0;">Buyer: infra team cutting inference cost</li>
+          </ul>
+        </div>
+        <div class="compare-card compare-us">
+          <div class="compare-label compare-label-us">thaw &middot; the fork primitive</div>
+          <ul style="list-style: none; padding: 0; margin: 0; color: var(--text); font-size: 14px; line-height: 1.75;">
+            <li style="padding: 4px 0;">Primitive <strong style="color: var(--cyan);">inside</strong> the engine's process</li>
+            <li style="padding: 4px 0;"><strong style="color: var(--cyan);">Imperative</strong> &mdash; user code picks the fork point</li>
+            <li style="padding: 4px 0;"><code style="font-family: var(--font-mono); font-size: 13px; color: var(--cyan);">fork(llm) &rarr; handle</code> hydrates into N children</li>
+            <li style="padding: 4px 0;">Bit-identical divergence across the fork boundary</li>
+            <li style="padding: 4px 0;">Buyer: RL team, agent framework, research platform</li>
+          </ul>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -1506,22 +1606,23 @@
         <button class="tab" onclick="switchTab(event, 'tab-demo')">Live Demo</button>
       </div>
       <div class="code-panel active" id="tab-fork"><pre><span class="hl-kw">import</span> thaw_vllm
-<span class="hl-kw">from</span> vllm <span class="hl-kw">import</span> LLM
+<span class="hl-kw">from</span> vllm <span class="hl-kw">import</span> LLM, SamplingParams
 
-llm <span class="hl-op">=</span> LLM(model<span class="hl-op">=</span><span class="hl-str">"meta-llama/Meta-Llama-3-8B-Instruct"</span>)
-<span class="hl-cmt"># ... agent runs, builds KV state from prompt / tools / history ...</span>
+llm <span class="hl-op">=</span> LLM(<span class="hl-str">"meta-llama/Meta-Llama-3-8B-Instruct"</span>,
+          enable_prefix_caching<span class="hl-op">=</span><span class="hl-kw">True</span>)
 
-<span class="hl-cmt"># Snapshot the full engine state at the fork point</span>
-thaw_vllm.<span class="hl-fn">freeze_model</span>(llm, <span class="hl-str">"fork.thaw"</span>)
-thaw_vllm.<span class="hl-fn">freeze_kv_cache</span>(llm, <span class="hl-str">"fork.thawkv"</span>)
+<span class="hl-cmt"># Agent runs for 200 tokens — builds KV state from prompt / tools / history</span>
+llm.<span class="hl-fn">generate</span>(trunk, SamplingParams(max_tokens<span class="hl-op">=</span><span class="hl-num">200</span>))
 
-<span class="hl-cmt"># In any child process, resume at the fork point with shared state</span>
-child <span class="hl-op">=</span> thaw_vllm.<span class="hl-fn">load</span>(
-    <span class="hl-str">"meta-llama/Meta-Llama-3-8B-Instruct"</span>,
-    <span class="hl-str">"fork.thaw"</span>,
-    kv_snapshot<span class="hl-op">=</span><span class="hl-str">"fork.thawkv"</span>,
+<span class="hl-cmt"># Fork into 8 divergent children. Each skips prefill and diverges from here.</span>
+results <span class="hl-op">=</span> thaw_vllm.<span class="hl-fn">fork_completions</span>(
+    llm,
+    prompts<span class="hl-op">=</span>[trunk <span class="hl-op">+</span> branch <span class="hl-kw">for</span> branch <span class="hl-kw">in</span> branches],
+    sampling_params<span class="hl-op">=</span>SamplingParams(temperature<span class="hl-op">=</span><span class="hl-num">0.9</span>, max_tokens<span class="hl-op">=</span><span class="hl-num">512</span>),
+    workers<span class="hl-op">=</span><span class="hl-num">8</span>,
 )
-<span class="hl-cmt"># child inherits KV state — next request skips prefill and diverges</span></pre></div>
+<span class="hl-cmt"># 8 parallel rollouts · shared prefill · bit-identical divergence from the fork point</span>
+<span class="hl-cmt"># Primitive: thaw_vllm.fork(llm) -> ForkHandle  (move, relocate, hydrate elsewhere)</span></pre></div>
       <div class="code-panel" id="tab-serve"><pre><span class="hl-cmt"># Llama models are gated — authenticate first</span>
 $ huggingface-cli login
 
