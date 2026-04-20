@@ -1,0 +1,114 @@
+{
+  "receipt_version": 1,
+  "timestamp_utc": "2026-04-20T21:55:19+00:00",
+  "demo": "rl_rollout_simulator",
+  "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+  "trunk_tokens": 8000,
+  "timings_s": {
+    "load_s": 19.572,
+    "trunk_s": 1.879
+  },
+  "modes": {
+    "A_native_batch": {
+      "elapsed_s": 5.04,
+      "count": 16,
+      "mean_reward": 0.812,
+      "max_reward": 1.6
+    },
+    "B_fork_subprocess": {
+      "ran": true,
+      "elapsed_s": 389.696,
+      "fork_s": 332.249,
+      "workers_s": 57.409,
+      "count": 16,
+      "mean_reward": 0.812,
+      "max_reward": 1.6
+    },
+    "C_cold_baseline": {
+      "init_s": 12.955051915720105,
+      "prefill_s": 0.22431401256471872,
+      "generation_s": 2.4748116014525294,
+      "per_rollout_cold_s": 2.699125614017248,
+      "sample_text": ".20 = $4.98.\n- The fuel surcharge is $4.98.\n\n**Step 4: Calculate the total shipping cost with fuel surcharge.**\n- The total shipping cost with fuel surcharge is $33.20 + $4.98 = $38.18.\n\n**Step 5: Cal",
+      "sample_tokens": 256
+    }
+  },
+  "checks": {
+    "all_nonempty_a": true,
+    "mode_b_skipped": false
+  },
+  "samples": [
+    {
+      "mode": "A_native",
+      "rollout": 0,
+      "reward": 0.6,
+      "extracted_answer": null,
+      "tokens": 244,
+      "text_preview": "This will make it clearer:     1. The base cost, in this case, is $8.     2. The per-pound cost is $1.40.     3. The surcharges are the fuel surcharge and the tax, both of which are percentages of the\u2026"
+    },
+    {
+      "mode": "A_native",
+      "rollout": 1,
+      "reward": 0.6,
+      "extracted_answer": null,
+      "tokens": 203,
+      "text_preview": "This package exceeds the base weight by 23 - 5 = 18 pounds. So the total rate charged is rate * 18, and the surcharge is this times 1.15. = $4.965. over  $33.20 = $4.965, or $5.00. rounded. - I should\u2026"
+    },
+    {
+      "mode": "A_native",
+      "rollout": 2,
+      "reward": 0.5,
+      "extracted_answer": null,
+      "tokens": 228,
+      "text_preview": "This package had base 5 flat, rate 1.50 per extra pound, fuel 10%, tax 7%. So excess = 18, raw = 5 + 18*1.50 = 31.00, surcharged = 31.00 * 1.10 = 34.10, taxed = 34.10 * 1.07 = 36.577 \u2192 $36.58. - Howev\u2026"
+    },
+    {
+      "mode": "B_fork",
+      "rollout": 0,
+      "reward": 0.6,
+      "extracted_answer": null,
+      "tokens": 244,
+      "text_preview": "This will make it clearer:     1. The base cost, in this case, is $8.     2. The per-pound cost is $1.40.     3. The surcharges are the fuel surcharge and the tax, both of which are percentages of the\u2026"
+    },
+    {
+      "mode": "B_fork",
+      "rollout": 1,
+      "reward": 0.6,
+      "extracted_answer": null,
+      "tokens": 203,
+      "text_preview": "This package exceeds the base weight by 23 - 5 = 18 pounds. So the total rate charged is rate * 18, and the surcharge is this times 1.15. = $4.965. over  $33.20 = $4.965, or $5.00. rounded. - I should\u2026"
+    },
+    {
+      "mode": "B_fork",
+      "rollout": 2,
+      "reward": 0.5,
+      "extracted_answer": null,
+      "tokens": 228,
+      "text_preview": "This package had base 5 flat, rate 1.50 per extra pound, fuel 10%, tax 7%. So excess = 18, raw = 5 + 18*1.50 = 31.00, surcharged = 31.00 * 1.10 = 34.10, taxed = 34.10 * 1.07 = 36.577 \u2192 $36.58. - Howev\u2026"
+    }
+  ],
+  "pod": {
+    "gpu_name": "NVIDIA H100 80GB HBM3",
+    "gpu_memory_mib": 81559,
+    "driver_version": "580.126.09",
+    "cuda_version": "12.8"
+  },
+  "software": {
+    "python": "3.11.10",
+    "vllm": "0.19.1",
+    "torch": "2.10.0",
+    "thaw_native": "0.3.0",
+    "thaw_vllm": "0.3.0"
+  },
+  "git": {
+    "commit": "d18068f381973b0a78fabbe6ed95cc791f43a989",
+    "short": "d18068f",
+    "dirty": true
+  },
+  "extra": {
+    "rollouts": 16,
+    "workers": 1,
+    "max_tokens_per_rollout": 256,
+    "max_model_len": 12288
+  }
+}

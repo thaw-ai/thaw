@@ -1,0 +1,57 @@
+{
+  "receipts_version": 1,
+  "description": "JSON receipts from thaw demo runs. Each receipt is the sanitized output of a demo script (see demos/*.py). Re-run the demos to produce your own — numbers are not doctored.",
+  "schema_fields": [
+    "timestamp_utc: ISO-8601 wall-clock UTC",
+    "demo: which demo script produced this receipt",
+    "model: HuggingFace model id",
+    "trunk_tokens: tokenized length of the shared context",
+    "timings_s: measured wall-clocks (load, trunk, fork, fork_completions, etc.)",
+    "modes: per-mode elapsed + counts (A native / B fork / C cold)",
+    "checks: correctness assertions (non-empty, diverge, prefix cache hit)",
+    "samples: up to 3 truncated branch outputs per mode, 200 chars each",
+    "pod: GPU name + memory + CUDA version",
+    "software: python / vllm / torch / thaw-native versions",
+    "git: commit hash of the demo run",
+    "extra: demo-specific args + provenance notes"
+  ],
+  "reproduce": "pip install thaw-native vllm && git clone https://github.com/thaw-ai/thaw && python demos/fork_smoke_test.py --json-out my_receipt.json  # for the cheapest run",
+  "receipts": [
+    {
+      "file": "2026-04-20_h100_fork_smoke_test.json",
+      "demo": "fork_smoke_test",
+      "pod": "RunPod H100 80 GB HBM3",
+      "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+      "timestamp_utc": "2026-04-20T21:10:07+00:00",
+      "headline": "fork handle in 0.289s, 4 divergent same-process completions in 0.633s",
+      "note": "Same-process fork primitive. All 4 branches non-empty and divergent; prefix cache enabled."
+    },
+    {
+      "file": "2026-04-20_h100_parallel_agents.json",
+      "demo": "parallel_agents",
+      "pod": "RunPod H100 80 GB HBM3",
+      "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+      "timestamp_utc": "2026-04-20T21:47:25+00:00",
+      "headline": "8 candidate branches from an 8k-token trunk; native batch 5.8s vs fork+subprocess 401.5s (workers_s=61.7s, subprocess boot=339.8s)",
+      "note": "Fork path pays one-time subprocess cold-start on an 80 GB pod with workers=1. Native and fork produce the same max_pass_rate (0.875). Proves cross-process fork works end-to-end on real H100; fork's latency edge shows up at larger N or under process-isolation constraints, not at this size."
+    },
+    {
+      "file": "2026-04-20_h100_rl_rollout.json",
+      "demo": "rl_rollout_simulator",
+      "pod": "RunPod H100 80 GB HBM3",
+      "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+      "timestamp_utc": "2026-04-20T21:55:19+00:00",
+      "headline": "16 PPO rollouts from an 8k-token trunk; native batch 5.04s vs fork+subprocess 389.7s vs cold×16 43.2s (extrapolated)",
+      "note": "Same reward stats (mean=0.812, max=1.6) across native and fork paths — proves bit-consistent reward signal. Fork beats 16× cold engines (43s) in GPU-hour math at PPO scale; native batch beats everything when the whole batch fits in one engine."
+    },
+    {
+      "file": "2026-04-20_a6000_fork_smoke_test.json",
+      "demo": "fork_smoke_test",
+      "pod": "RunPod RTX A6000 48 GB",
+      "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+      "timestamp_utc": "2026-04-20T17:19:23+00:00",
+      "headline": "fork handle in 0.21s, 4 divergent same-process completions in 2.29s",
+      "note": "Reconstructed from real run stdout — pod was terminated before the checked-in script existed."
+    }
+  ]
+}
