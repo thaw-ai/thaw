@@ -167,31 +167,43 @@ This installs the Python package, FastAPI server, and pre-built Rust+CUDA native
 
 ### Fork a running AI agent
 
-The core capability, in 10 lines:
+The core capability, in one call:
 
 ```python
 import thaw_vllm
-from vllm import LLM
+from vllm import LLM, SamplingParams
 
-# Load and run an agent until you hit a fork point
-llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
-# ... agent runs, builds KV state from a long prompt / tool calls / history ...
+# Load and run an agent until you hit a pivot point
+llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct",
+          enable_prefix_caching=True)
+llm.generate([reasoning_trunk], SamplingParams(max_tokens=200))
 
-# Snapshot the full engine state at the fork point
-thaw_vllm.freeze_model(llm, "fork.thaw")       # weights
-thaw_vllm.freeze_kv_cache(llm, "fork.thawkv")  # KV blocks + prefix-hash table
-
-# In any child process, restore and continue from the fork point
-child = thaw_vllm.load(
-    "meta-llama/Meta-Llama-3-8B-Instruct",
-    "fork.thaw",
-    kv_snapshot="fork.thawkv",
+# Fan out from that pivot — 8 parallel approaches in subprocess workers,
+# each hydrates from one shared snapshot, zero reprefill of the trunk.
+results = thaw_vllm.fork_completions(
+    llm,
+    prompts=[trunk + hint for hint in branch_hints],
+    sampling_params=SamplingParams(temperature=0.9, max_tokens=512),
+    workers=4,
 )
-# child inherits the parent's KV state — the next request skips prefill
-# and diverges from the fork point with different sampling / prompts
+for r in results:
+    print(r.worker_index, r.text[:200])
 ```
 
-See `demos/agent_fork.py` for a full working example that forks three parallel completions from a 4-turn conversation. One-liner `thaw_vllm.fork(llm, n=3) → [child, child, child]` lands shortly — until then, the pattern above is the public API.
+Prefer the primitive when you want to persist, move, or hand off the
+handle yourself:
+
+```python
+with thaw_vllm.fork(llm, include_weights=True) as handle:
+    handle.save("s3://my-bucket/session-abc123/")       # ship it anywhere
+    stats = handle.hydrate(other_llm)                    # or restore in-place
+```
+
+Working demos ship in the repo:
+
+- [`demos/rl_rollout_simulator.py`](demos/rl_rollout_simulator.py) — Tree-GRPO-style pivot resampling. Builds a reasoning trunk, forks 16 rollouts, scores each. The table it prints is the arithmetic HuggingFace's async-RL survey said no library ships: `num_rollouts × prefill → num_rollouts × memcpy`.
+- [`demos/parallel_agents.py`](demos/parallel_agents.py) — 8 parallel coding approaches from one reasoning trunk, ranked by pytest pass rate. The Cursor/Cognition reframe.
+- [`demos/agent_fork.py`](demos/agent_fork.py) — the original end-to-end session-clone demo used in the launch video.
 
 ### Server mode (OpenAI-compatible)
 
@@ -365,6 +377,8 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 2. **KV cache snapshot with prefix-hash reconstruction.** The moat under the moat. LMCache / Dynamo tier KV blocks for their own cache; they don't let you transport a cache between engines. thaw does.
 3. **Saturates commodity hardware.** 14 GB/s on a single NVMe (no GDS, no RAID) and 55 GB/s slot-warm (no special drivers). The speed is table stakes for the fork primitive to be viable — but it's still faster than fastsafetensors' GDS+RAID ceiling on the setups most people actually have.
 4. **Works with vLLM and SGLang.** Two engines, one `.thaw` file. `load_format="thaw"` for vLLM, class-passthrough loader for SGLang.
+
+**How thaw is not LMCache / Tensormesh.** LMCache (and Tensormesh, which commercializes it) is a *server-side cache-tiering proxy* that sits in front of your engine, watches incoming requests, and serves prefix cache hits from GPU/RAM/NVMe tiers. It's passive: requests come in, matches happen or don't. thaw is an *imperative primitive* your code calls at a specific pivot — `fork(llm) → handle` returns an atomic, portable reference to that session (weights + KV + scheduler state + prefix-hash table) that any other process can hydrate. LMCache can't give you a handle you hand to an RL worker; it's not the API shape. HuggingFace's 2026 async-RL survey documented this gap explicitly: *"no current async library supports [KV pivot resampling] out of the box."* Different product, different buyer — their raise is validation, not overlap.
 
 ## Roadmap
 
