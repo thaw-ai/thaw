@@ -43,6 +43,19 @@ from thaw_vllm.kv_snapshot import (
     restore_kv_cache,
     restore_kv_cache_tp,
 )
+from thaw_vllm.fork import (
+    fork,
+    fork_completions,
+    ForkHandle,
+    ForkCompletionResult,
+    ForkError,
+    ModelMismatchError,
+    BlockShapeMismatchError,
+    BlockPoolTooSmallError,
+    PrefixCachingDisabledError,
+    UnfinishedRequestsError,
+    HandleClosedError,
+)
 from thaw_vllm.pool import EnginePool, create_pool_app
 
 # Register load_format="thaw" with vLLM when available.
@@ -128,4 +141,16 @@ __all__ = [
     "ThawModelLoader",
     "EnginePool",
     "create_pool_app",
+    # Fork primitive — make GPU session state portable.
+    "fork",
+    "fork_completions",
+    "ForkHandle",
+    "ForkCompletionResult",
+    "ForkError",
+    "ModelMismatchError",
+    "BlockShapeMismatchError",
+    "BlockPoolTooSmallError",
+    "PrefixCachingDisabledError",
+    "UnfinishedRequestsError",
+    "HandleClosedError",
 ]
