@@ -290,18 +290,41 @@ def restore_model_from_ram(
         if sys.platform == "linux":
             import ctypes
             import ctypes.util
-            MAP_POPULATE = 0x08000
             MADV_HUGEPAGE = 14
+            MADV_WILLNEED = 3
+            # NOTE: we deliberately DO NOT pass MAP_POPULATE. On a 16 GB
+            # snapshot that's already in the page cache, MAP_POPULATE
+            # *still* spent ~5.6s walking 4M page-table entries single-
+            # threaded in the kernel (measured H100 pod 2026-04-19).
+            # Without MAP_POPULATE the cost moves from mmap_time into
+            # the first-touch memcpy, but it doesn't disappear: file-
+            # backed MAP_PRIVATE cannot use THP regardless of ordering,
+            # so MADV_HUGEPAGE is a no-op here and we still fault every
+            # 4K page once during DMA. Net wall time for this path on
+            # the H100 pod is ~9.6s for 16 GB vs ~3.7s for the O_DIRECT
+            # pread path (`restore_model_pipelined`) — which is why the
+            # vLLM cascade now prefers pread and treats this route as a
+            # fallback + warm-mmap amortization target. WILLNEED still
+            # helps cold-cache scenarios by kicking off async read-ahead.
             mm = mmap.mmap(fd, file_size,
-                           flags=mmap.MAP_PRIVATE | MAP_POPULATE,
+                           flags=mmap.MAP_PRIVATE,
                            prot=mmap.PROT_READ | mmap.PROT_WRITE)
             try:
                 libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
                 buf = (ctypes.c_char * file_size).from_buffer(mm)
-                if libc.madvise(ctypes.addressof(buf), file_size, MADV_HUGEPAGE) != 0:
+                addr = ctypes.addressof(buf)
+                if libc.madvise(addr, file_size, MADV_HUGEPAGE) != 0:
                     _log.debug(
-                        "madvise(MADV_HUGEPAGE) unavailable (errno=%d); "
-                        "zero-copy cudaHostRegister path doesn't need it.",
+                        "madvise(MADV_HUGEPAGE) unavailable (errno=%d)",
+                        ctypes.get_errno(),
+                    )
+                # WILLNEED tells the kernel to kick off async read-ahead
+                # for pages not already resident. Cheap no-op if pages
+                # are already cached; big win for cold files when we
+                # can overlap readahead with the first DMA chunks.
+                if libc.madvise(addr, file_size, MADV_WILLNEED) != 0:
+                    _log.debug(
+                        "madvise(MADV_WILLNEED) unavailable (errno=%d)",
                         ctypes.get_errno(),
                     )
                 del buf

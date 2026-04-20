@@ -36,6 +36,9 @@ all = ["vllm>=0.18", "fastapi", "uvicorn", "thaw-native>=0.1.2", "boto3>=1.26"]
 [project.scripts]
 thaw = "thaw_vllm.cli:main"
 
+[project.entry-points."vllm.general_plugins"]
+thaw = "thaw_vllm.loader:register"
+
 [project.urls]
 Homepage = "https://github.com/thaw-ai/thaw"
 Repository = "https://github.com/thaw-ai/thaw"

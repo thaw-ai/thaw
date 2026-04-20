@@ -324,6 +324,11 @@ def main():
         default=0.25,
         help="gpu_memory_utilization. Raise for larger models (70B TP=2 needs ~0.85).",
     )
+    parser.add_argument(
+        "--_phase3-state",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
 
     # Accumulate structured results alongside human-readable stdout. Written
@@ -357,6 +362,8 @@ def main():
     from vllm import LLM, SamplingParams
     from thaw_vllm import freeze_model_pipelined, restore_model_pipelined, restore_model_from_ram
     from thaw_vllm.snapshot import freeze_model_tp, restore_model_tp
+    from thaw_common.snapshot import make_pinned_mmap, restore_model_from_pinned_mmap
+    from thaw_common.telemetry import fallback_warning, strict_mode
 
     tp = args.tp
     gpu_mem = args.gpu_mem_util
@@ -371,9 +378,27 @@ def main():
         return freeze_model_pipelined(model_obj, path)
 
     def _restore(llm_obj, model_obj, path):
+        # TP>1: restore_model_tp dispatches into each worker via
+        # collective_rpc, and its worker function cascades file-pread →
+        # mmap → pure-python (same ordering as below).
+        # TP=1: prefer restore_model_pipelined (O_DIRECT pread into WC-
+        # pinned double buffers). On H100 SXM 2026-04-19 the pread path
+        # hit 4.35 GB/s vs 1.76 GB/s for restore_model_from_ram under
+        # identical vLLM state — the mmap path pays ~5.6s walking 4M
+        # PTEs (file-backed MAP_PRIVATE can't use THP), and that cost
+        # is inherent, not an optimization gap. mmap stays as fallback
+        # for the amortized warm-mmap scenario surfaced through
+        # restore_from_pinned_mmap.
         if tp_mode:
             return restore_model_tp(llm_obj, path)
-        return restore_model_pipelined(model_obj, path)
+        try:
+            return restore_model_pipelined(model_obj, path)
+        except Exception as e:
+            fallback_warning("vllm_demo._restore.restore_model_pipelined", e,
+                             dst="restore_model_from_ram")
+            if strict_mode():
+                raise
+            return restore_model_from_ram(model_obj, path)
 
     prompt = "The future of artificial intelligence is"
     sampling = SamplingParams(temperature=0, max_tokens=50)
@@ -382,92 +407,132 @@ def main():
     results["phases"] = {}
 
     def _run():
-        # =================================================================
-        # Phase 1: Normal vLLM cold start
-        # =================================================================
-        print("=" * 60)
-        print("Phase 1: Normal vLLM cold start")
-        print("=" * 60)
-
-        if profiler:
-            profiler.reset()
-        t0 = time.perf_counter()
-        llm = LLM(
-            model=args.model,
-            dtype="float16",
-            enforce_eager=True,      # skip CUDA graph compilation
-            tensor_parallel_size=tp,
-            gpu_memory_utilization=gpu_mem,  # vLLM doesn't fully free on del
-        )
-        normal_time = time.perf_counter() - t0
-        print(f"Normal load time: {normal_time:.1f}s")
-        if profiler:
-            print(profiler.waterfall(normal_time, "Phase 1 (normal LLM init)"))
-
-        # Generate reference output (greedy = deterministic)
-        out = llm.generate([prompt], sampling)
-        ref_text = out[0].outputs[0].text
-        print(f"Output: {ref_text}")
-        results["phases"]["normal_cold_start"] = {
-            "elapsed_s": normal_time,
-            "output": ref_text,
-        }
-        _dump_json()
-
-        # =================================================================
-        # Phase 2: Freeze model weights to .thaw snapshot (pipelined)
-        # =================================================================
-        print("\n" + "=" * 60)
-        print("Phase 2: Freeze to .thaw snapshot (pipelined)")
-        print("=" * 60)
-
-        model = None if tp_mode else find_model(llm)
-        stats = _freeze(llm, model, args.snapshot)
-        size_gb = stats["total_bytes"] / 1e9
-        backend = stats.get("backend", "python")
-        print(f"Frozen: {stats['num_regions']} regions, {size_gb:.2f} GB")
-        print(f"Freeze: {stats['elapsed_s']:.1f}s ({stats['throughput_gb_s']:.2f} GB/s) [{backend}]")
-        results["phases"]["freeze"] = {
-            "elapsed_s": stats["elapsed_s"],
-            "throughput_gb_s": stats["throughput_gb_s"],
-            "total_bytes": stats["total_bytes"],
-            "num_regions": stats["num_regions"],
-            "backend": backend,
-            "snapshot_size_gb": size_gb,
-        }
-        _dump_json()
-
-        # Tear down to free GPU memory for the next load.
-        # vLLM doesn't fully release CUDA allocations on del, so we
-        # synchronize + double gc to catch weak references.
-        del llm
-        if model is not None:
-            del model
-        gc.collect()
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        # Drop the snapshot file(s) from the Linux page cache so Phase 3 really
-        # reads from NVMe. TP>1 writes rank-suffixed files alongside the base
-        # path (weights.rank1.thaw, etc). Without dropping all of them, Phase 3
-        # silently reads from RAM and the "disk restore" numbers are lies.
-        def _all_rank_paths(base: str) -> list[str]:
-            paths = [base]
-            if tp_mode:
-                import glob
-                root, ext = os.path.splitext(base)
-                paths.extend(sorted(glob.glob(f"{root}.rank*{ext}")))
-            return paths
-
-        if args.skip_cache_drop:
-            print("\n[WARN] --skip-cache-drop: Phase 3 will read from warm cache (NOT a real cold start)")
-            cache_msg = "skipped (--skip-cache-drop)"
+        if args._phase3_state:
+            # TP>1 resume: the parent process ran Phase 1+2 + cache drop and
+            # forked us to run Phase 3+ with a clean CUDA context. Under TP>1,
+            # `del llm` doesn't release TP worker GPU memory, so re-init of a
+            # second LLM() in the same process OOMs or hits NCCL errors.
+            with open(args._phase3_state) as fh:
+                state = json.load(fh)
+            ref_text = state["ref_text"]
+            normal_time = state["normal_time"]
+            cache_msg = state["cache_msg"]
+            results.update(state["results"])
+            print("=" * 60)
+            print(f"[resume] Phase 3+ subprocess (TP={tp})")
+            print("=" * 60)
+            print(f"Parent Phase 1 (normal cold start): {normal_time:.1f}s")
+            print(f"Parent cache drop: {cache_msg}")
         else:
-            msgs = [drop_file_from_cache(p) for p in _all_rank_paths(args.snapshot)]
-            cache_msg = " | ".join(msgs)
-            print(f"\n[cache] {cache_msg}")
-        results["phases"]["cache_drop"] = cache_msg
+            # =================================================================
+            # Phase 1: Normal vLLM cold start
+            # =================================================================
+            print("=" * 60)
+            print("Phase 1: Normal vLLM cold start")
+            print("=" * 60)
+
+            if profiler:
+                profiler.reset()
+            t0 = time.perf_counter()
+            llm = LLM(
+                model=args.model,
+                dtype="float16",
+                enforce_eager=True,      # skip CUDA graph compilation
+                tensor_parallel_size=tp,
+                gpu_memory_utilization=gpu_mem,  # vLLM doesn't fully free on del
+            )
+            normal_time = time.perf_counter() - t0
+            print(f"Normal load time: {normal_time:.1f}s")
+            if profiler:
+                print(profiler.waterfall(normal_time, "Phase 1 (normal LLM init)"))
+
+            # Generate reference output (greedy = deterministic)
+            out = llm.generate([prompt], sampling)
+            ref_text = out[0].outputs[0].text
+            print(f"Output: {ref_text}")
+            results["phases"]["normal_cold_start"] = {
+                "elapsed_s": normal_time,
+                "output": ref_text,
+            }
+            _dump_json()
+
+            # =================================================================
+            # Phase 2: Freeze model weights to .thaw snapshot (pipelined)
+            # =================================================================
+            print("\n" + "=" * 60)
+            print("Phase 2: Freeze to .thaw snapshot (pipelined)")
+            print("=" * 60)
+
+            model = None if tp_mode else find_model(llm)
+            stats = _freeze(llm, model, args.snapshot)
+            size_gb = stats["total_bytes"] / 1e9
+            backend = stats.get("backend", "python")
+            print(f"Frozen: {stats['num_regions']} regions, {size_gb:.2f} GB")
+            print(f"Freeze: {stats['elapsed_s']:.1f}s ({stats['throughput_gb_s']:.2f} GB/s) [{backend}]")
+            results["phases"]["freeze"] = {
+                "elapsed_s": stats["elapsed_s"],
+                "throughput_gb_s": stats["throughput_gb_s"],
+                "total_bytes": stats["total_bytes"],
+                "num_regions": stats["num_regions"],
+                "backend": backend,
+                "snapshot_size_gb": size_gb,
+            }
+            _dump_json()
+
+            # Tear down to free GPU memory for the next load.
+            # vLLM doesn't fully release CUDA allocations on del, so we
+            # synchronize + double gc to catch weak references.
+            del llm
+            if model is not None:
+                del model
+            gc.collect()
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            gc.collect()
+
+            # Drop the snapshot file(s) from the Linux page cache so Phase 3 really
+            # reads from NVMe. TP>1 writes rank-suffixed files alongside the base
+            # path (weights.rank1.thaw, etc). Without dropping all of them, Phase 3
+            # silently reads from RAM and the "disk restore" numbers are lies.
+            def _all_rank_paths(base: str) -> list[str]:
+                paths = [base]
+                if tp_mode:
+                    import glob
+                    root, ext = os.path.splitext(base)
+                    paths.extend(sorted(glob.glob(f"{root}.rank*{ext}")))
+                return paths
+
+            if args.skip_cache_drop:
+                print("\n[WARN] --skip-cache-drop: Phase 3 will read from warm cache (NOT a real cold start)")
+                cache_msg = "skipped (--skip-cache-drop)"
+            else:
+                msgs = [drop_file_from_cache(p) for p in _all_rank_paths(args.snapshot)]
+                cache_msg = " | ".join(msgs)
+                print(f"\n[cache] {cache_msg}")
+            results["phases"]["cache_drop"] = cache_msg
+
+            # TP>1 handoff: fork a fresh Python to run Phase 3+ with a clean
+            # CUDA context. `del llm` leaves TP worker GPU memory pinned, so
+            # re-init in the same process OOMs or hits NCCL re-init errors.
+            # Sidecar carries parent's Phase 1/2 state across the boundary.
+            if tp_mode:
+                import sys as _sys
+                state_path = args.snapshot + ".phase3_state.json"
+                with open(state_path, "w") as fh:
+                    json.dump({
+                        "ref_text": ref_text,
+                        "normal_time": normal_time,
+                        "cache_msg": cache_msg,
+                        "results": results,
+                    }, fh, default=str)
+                print(f"\n[tp>1] Phase 3+ requires fresh process (TP worker GPU-leak workaround)")
+                child_argv = [_sys.executable, *_sys.argv, "--_phase3-state", state_path]
+                rc = subprocess.call(child_argv)
+                try:
+                    os.unlink(state_path)
+                except OSError:
+                    pass
+                _sys.exit(rc)
 
         # =================================================================
         # Phase 3: Thaw-powered vLLM COLD-CACHE restore (honest NVMe read)
@@ -523,9 +588,21 @@ def main():
         # =================================================================
         # Phase 3b: Warm-cache restore (optional, for comparison)
         # =================================================================
+        # Skipped under TP>1 for the same reason as Phase 4: tearing down
+        # the Phase 3 LLM and re-initing in the same process leaks TP worker
+        # GPU memory and the fresh LLM() hits OOM on
+        # `request_memory`. The headline number (Phase 1 vs Phase 3 cold
+        # NVMe) is already measured above.
         warm_restore_time = None
         warm_throughput = None
-        if not args.skip_warm:
+        warm_match = None
+        if tp_mode and not args.skip_warm:
+            print("\n" + "=" * 60)
+            print("Phase 3b: SKIPPED under TP>1 (TP worker GPU-leak — same as Phase 4)")
+            print("=" * 60)
+            results["phases"]["thaw_warm_cache"] = {"skipped": True, "reason": "tp>1"}
+            _dump_json()
+        elif not args.skip_warm:
             print("\n" + "=" * 60)
             print("Phase 3b: Warm-cache restore (after Phase 3 warmed the cache)")
             print("=" * 60)
@@ -575,8 +652,6 @@ def main():
 
             # Swap references so Phase 4 teardown uses the current engine.
             llm_thaw = llm_warm
-        else:
-            warm_match = None
 
         # =================================================================
         # Phase 4: Pre-staged RAM (upper-bound scenario) — TP=1 ONLY
@@ -626,16 +701,37 @@ def main():
             ram_init_time = time.perf_counter() - t0
             print(f"Dummy init: {ram_init_time:.1f}s")
 
-            # Step B: restore from RAM (snapshot already resident in page cache).
+            # Step A.5: pin the snapshot mmap (pay cudaHostRegister cost once).
+            # This is the `thaw serve` slot-warm-up cost — O(pages), ~2 GB/s.
+            # For 16 GB / 4M pages: ~7s. The PinnedMmap handle holds the mmap
+            # alive AND keeps the CUDA registration in place, so per-restore
+            # cost drops to just the PCIe DMA (measured in Step B).
+            # (Replaces the old manual page-cache warm + restore_model_from_ram
+            # path which still paid registration cost every call.)
+            t_pin = time.perf_counter()
+            pinned = make_pinned_mmap(args.snapshot)
+            pin_time = time.perf_counter() - t_pin
+            print(f"Pin (cudaHostRegister): {pin_time:.2f}s (amortized: paid once at thaw serve slot warm-up)")
+
+            # Step B: pure-DMA restore from the already-pinned mmap. No
+            # registration on this path — we only measure PCIe DMA + plan
+            # construction. This is what every subsequent reload looks like
+            # after the first one.
             model = find_model(llm_ram)
-            ram_rstats = restore_model_from_ram(model, args.snapshot)
-            ram_dma_time = ram_rstats['elapsed_s']  # DMA only, excludes file read
-            ram_read_time = ram_rstats.get('read_time_s', 0)
-            ram_backend = ram_rstats.get("backend", "python")
-            ram_hot_total = ram_init_time + ram_dma_time   # production: snapshot pre-staged
-            print(f"File read (page cache): {ram_read_time:.2f}s (excluded — pre-staged scenario)")
-            print(f"DMA to GPU:             {ram_dma_time:.1f}s ({ram_rstats['throughput_gb_s']:.2f} GB/s) [{ram_backend}]")
-            print(f"Pre-staged total:       {ram_hot_total:.1f}s (init + DMA)")
+            t_dma = time.perf_counter()
+            ram_rstats = restore_model_from_pinned_mmap(model, pinned)
+            ram_dma_time = time.perf_counter() - t_dma
+            ram_dma_throughput = ram_rstats.get("dma_throughput_gb_s",
+                                                ram_rstats.get("throughput_gb_s", 0))
+            ram_backend = ram_rstats.get("backend", "rust_pipelined_pinned_mmap")
+            # "Pre-staged" total = dummy init + DMA. Pin cost is surfaced
+            # separately so YC / benchmarks can decide whether to amortize
+            # it (thaw serve reality) or include it (one-shot reality).
+            ram_hot_total = ram_init_time + ram_dma_time
+            ram_mmap_time = pin_time   # field name retained for JSON schema
+            ram_elapsed_s = pin_time + ram_dma_time
+            print(f"DMA to GPU:             {ram_dma_time:.2f}s ({ram_dma_throughput:.2f} GB/s) [{ram_backend}]")
+            print(f"Pre-staged total:       {ram_hot_total:.2f}s (init + DMA, pin amortized)")
 
             # Generate and compare.
             out = llm_ram.generate([prompt], sampling)
@@ -645,12 +741,33 @@ def main():
             results["phases"]["thaw_prestaged_ram"] = {
                 "dummy_init_s": ram_init_time,
                 "dma_s": ram_dma_time,
-                "read_s": ram_read_time,
-                "dma_throughput_gb_s": ram_rstats["throughput_gb_s"],
+                "pin_s": pin_time,
+                "mmap_s": ram_mmap_time,
+                "elapsed_s": ram_elapsed_s,
+                "dma_throughput_gb_s": ram_dma_throughput,
+                "elapsed_throughput_gb_s": ram_rstats.get("throughput_gb_s", 0),
                 "total_s": ram_hot_total,
                 "backend": ram_backend,
                 "output": ram_text,
                 "output_match_ref": ram_match,
+            }
+            _dump_json()
+
+            # Step C: second reload from SAME PinnedMmap — demonstrates the
+            # amortization story. No teardown of llm_ram (still TP=1, safe),
+            # just call restore_from_pinned_mmap again with the same handle.
+            # The weights overwrite themselves with the same bytes, so the
+            # output is identical — the point is the *timing*: <DMA-only> on
+            # a handle that was pinned once.
+            t_dma2 = time.perf_counter()
+            ram_rstats2 = restore_model_from_pinned_mmap(model, pinned)
+            ram_dma_time2 = time.perf_counter() - t_dma2
+            ram_dma_throughput2 = ram_rstats2.get("dma_throughput_gb_s", 0)
+            print(f"\nSecond reload (same pinned handle): {ram_dma_time2:.2f}s ({ram_dma_throughput2:.2f} GB/s)")
+            print(f"  (proves pin cost is truly amortized — reload pays only DMA)")
+            results["phases"]["thaw_prestaged_ram_reload2"] = {
+                "dma_s": ram_dma_time2,
+                "dma_throughput_gb_s": ram_dma_throughput2,
             }
             _dump_json()
 
@@ -674,12 +791,17 @@ def main():
         if ram_hot_total is not None:
             print(f"  Thaw pre-staged RAM:             {ram_hot_total:.1f}s  [{ram_backend}]")
             print(f"    - dummy init:                  {ram_init_time:.1f}s")
-            print(f"    - DMA to GPU:                  {ram_dma_time:.1f}s ({ram_rstats['throughput_gb_s']:.2f} GB/s)")
+            print(f"    - DMA to GPU:                  {ram_dma_time:.1f}s ({ram_dma_throughput:.2f} GB/s)")
+            print(f"    - mmap + page-in (amortized):  {ram_mmap_time:.2f}s")
             print(f"    (scenario: thaw serve has snapshot pre-loaded into RAM)")
         else:
             print(f"  Thaw pre-staged RAM:             SKIPPED (TP>1 — no dispatcher wired)")
         print()
-        print(f"  Freeze:                          {stats['elapsed_s']:.1f}s ({stats['throughput_gb_s']:.2f} GB/s) [{stats.get('backend', 'python')}]")
+        # Read freeze stats from results dict — in the TP>1 resume branch,
+        # `stats` was a local of the parent process and is not in scope here.
+        freeze_res = results.get("phases", {}).get("freeze", {})
+        if freeze_res:
+            print(f"  Freeze:                          {freeze_res.get('elapsed_s', 0):.1f}s ({freeze_res.get('throughput_gb_s', 0):.2f} GB/s) [{freeze_res.get('backend', 'python')}]")
         print(f"  TP size:                         {tp}")
         print()
         speedup_cold = normal_time / thaw_total

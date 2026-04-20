@@ -58,7 +58,18 @@ use crate::restore::{crc_verification_disabled, RestoreError, RestoreStats};
 // Disable with `THAW_DISABLE_WC_CACHE=1` for debugging.
 
 thread_local! {
+    // WC (write-combined) cache for the one code path that writes to the
+    // pinned buffer and never reads it back on CPU:
+    // `restore_pipelined_from_bytes`, which pre-verifies CRCs against the
+    // source slice.
     static WC_BUF_CACHE: RefCell<Option<WcBufCache>> = const { RefCell::new(None) };
+    // Plain-pinned cache for every path that CPU-reads the pinned buffer —
+    // freeze (CRC + pwrite) and disk-backed `restore_pipelined` (chunked
+    // CRC fold). WC reads are 2-3 orders of magnitude slower on most
+    // hosts; A100 SXM showed ~50x on the freeze side (2026-04-19),
+    // H100 SXM showed similar on the restore side (2026-04-19). Plain
+    // pinned is therefore the default for both directions.
+    static PINNED_BUF_CACHE: RefCell<Option<PinnedBufCache>> = const { RefCell::new(None) };
 }
 
 struct WcBufCache {
@@ -66,8 +77,27 @@ struct WcBufCache {
     bufs: [crate::backend::PinnedBuffer; 2],
 }
 
+struct PinnedBufCache {
+    chunk_size: usize,
+    bufs: [crate::backend::PinnedBuffer; 2],
+}
+
 fn wc_cache_disabled() -> bool {
     std::env::var("THAW_DISABLE_WC_CACHE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Force every CPU-reads-the-buffer path (freeze + disk-backed restore)
+/// back onto WRITE_COMBINED pinned memory. Both paths CPU-read the buffer
+/// (freeze for CRC + pwrite, restore for chunked CRC fold), and WC reads
+/// are 2-3 orders of magnitude slower than plain pinned on most host CPUs
+/// — so plain pinned is the default. This env exists as an opt-in escape
+/// hatch for hardware where WC reads are measurably fast.
+///
+/// Env name kept for back-compat even though it now governs restore too.
+fn freeze_use_wc() -> bool {
+    std::env::var("THAW_FREEZE_USE_WC")
         .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
 }
@@ -123,6 +153,57 @@ fn release_wc_bufs(bufs: [crate::backend::PinnedBuffer; 2], chunk_size: usize) {
 /// tests that need deterministic allocation.
 pub fn clear_wc_buf_cache() {
     WC_BUF_CACHE.with(|c| *c.borrow_mut() = None);
+    PINNED_BUF_CACHE.with(|c| *c.borrow_mut() = None);
+}
+
+/// Acquire a pair of plain (non-WC) pinned buffers for the freeze path.
+/// Cached separately from WC so freeze and restore don't evict each
+/// other. If `THAW_FREEZE_USE_WC=1` is set, routes to the WC cache
+/// instead (see `freeze_use_wc`).
+fn acquire_pinned_bufs<B: PipelinedBackend>(
+    backend: &B,
+    chunk_size: usize,
+) -> Result<[crate::backend::PinnedBuffer; 2], crate::backend::BackendError> {
+    if freeze_use_wc() {
+        return acquire_wc_bufs(backend, chunk_size);
+    }
+    if !wc_cache_disabled() {
+        let cached = PINNED_BUF_CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            match c.take() {
+                Some(cache) if cache.chunk_size == chunk_size => Some(cache.bufs),
+                other => {
+                    drop(other);
+                    None
+                }
+            }
+        });
+        if let Some(bufs) = cached {
+            return Ok(bufs);
+        }
+    }
+    Ok([
+        backend.alloc_pinned(chunk_size)?,
+        backend.alloc_pinned(chunk_size)?,
+    ])
+}
+
+/// Return a pair of plain pinned buffers to the freeze-path cache.
+fn release_pinned_bufs(bufs: [crate::backend::PinnedBuffer; 2], chunk_size: usize) {
+    if freeze_use_wc() {
+        return release_wc_bufs(bufs, chunk_size);
+    }
+    if wc_cache_disabled() {
+        drop(bufs);
+        return;
+    }
+    PINNED_BUF_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() {
+            *c = Some(PinnedBufCache { chunk_size, bufs });
+        }
+        // else: existing cache wins; `bufs` drops here = freed.
+    });
 }
 
 /// Configuration for the pipelined restore.
@@ -501,10 +582,12 @@ where
 
     let total_bytes: u64 = plan.iter().map(|p| p.size).sum();
 
-    // Two pinned buffers (write-combining for faster D2H) + two streams.
-    // Buffers are acquired from a per-thread cache — subsequent calls
-    // with the same chunk_size skip the `cudaHostAlloc` cost entirely.
-    let mut bufs = acquire_wc_bufs(backend, chunk_size)?;
+    // Two plain pinned buffers + two streams. Plain (non-WC) pinned
+    // because the freeze path READS these buffers on the CPU (for CRC
+    // and the write-back to the file buffer), and WC reads are orders
+    // of magnitude slower than plain pinned on most host CPUs. The
+    // per-thread cache amortizes `cudaHostAlloc` across calls.
+    let mut bufs = acquire_pinned_bufs(backend, chunk_size)?;
     let streams = [backend.stream_create()?, backend.stream_create()?];
 
     // Per-region CRC accumulators. Index-aligned with `plan`.
@@ -601,8 +684,8 @@ where
         .stream_destroy(streams[1])
         .map_err(FreezeError::Backend)?;
 
-    // Return WC buffers to the per-thread cache.
-    release_wc_bufs(bufs, chunk_size);
+    // Return plain pinned buffers to the per-thread freeze cache.
+    release_pinned_bufs(bufs, chunk_size);
 
     // Patch the region-table bytes with computed CRCs, then flush the
     // whole file to the sink in one `write_all`.
@@ -713,10 +796,13 @@ where
         (n + 4095) & !4095
     }
 
-    // Two write-combining pinned buffers + two streams. Buffers come
-    // from the per-thread cache, amortizing the allocation cost across
-    // successive freeze calls (e.g. thaw serve hot-swap).
-    let mut bufs = acquire_wc_bufs(backend, chunk_size)?;
+    // Two plain pinned buffers + two streams. Plain (non-WC) pinned is
+    // deliberate: the freeze path reads these buffers on the CPU (for
+    // CRC accumulation and pwrite), and WC reads are orders of
+    // magnitude slower than plain pinned reads on most host CPUs. The
+    // per-thread cache amortizes `cudaHostAlloc` across successive
+    // freeze calls (e.g. `thaw serve` hot-swap).
+    let mut bufs = acquire_pinned_bufs(backend, chunk_size)?;
     let streams = [backend.stream_create()?, backend.stream_create()?];
 
     // Per-region CRC accumulators. The initial table written in chunk
@@ -890,8 +976,8 @@ where
         .stream_destroy(streams[1])
         .map_err(FreezeError::Backend)?;
 
-    // Return WC buffers to the per-thread cache.
-    release_wc_bufs(bufs, chunk_size);
+    // Return plain pinned buffers to the per-thread freeze cache.
+    release_pinned_bufs(bufs, chunk_size);
 
     Ok(FreezeStats {
         regions_frozen: requests.len(),
@@ -1126,11 +1212,19 @@ where
     }
 
     // Allocate two pinned buffers and two streams.
-    // Use write-combining memory: the CPU writes (from pread/mmap) and the
-    // GPU reads (via DMA). WC bypasses cache snooping → up to 40% faster H2D.
-    // Buffers come from the per-thread cache — amortizes `cudaHostAlloc`
-    // across successive restores (critical for thaw serve hot-swap).
-    let mut bufs = acquire_wc_bufs(backend, chunk_size).map_err(RestoreError::Backend)?;
+    //
+    // We use PLAIN pinned (not write-combined) here. Superficially WC
+    // looks right — CPU writes via pread, GPU reads via DMA — but this
+    // path also CPU-READS the buffer to fold it into per-region CRCs
+    // (`fold_and_verify_chunk_crc` below). WC memory is catastrophically
+    // slow for CPU reads (2-3 orders of magnitude), which made TP=1
+    // restore stall at ~0.05 GB/s on H100 SXM even though the DMA itself
+    // was fine. See commit 2de24bf for the matching freeze-side fix.
+    //
+    // The sibling `restore_pipelined_from_bytes` path keeps WC because
+    // it pre-verifies CRCs directly against the input slice and never
+    // CPU-reads the pinned buffer.
+    let mut bufs = acquire_pinned_bufs(backend, chunk_size).map_err(RestoreError::Backend)?;
     let streams = [
         backend.stream_create().map_err(RestoreError::Backend)?,
         backend.stream_create().map_err(RestoreError::Backend)?,
@@ -1315,8 +1409,8 @@ where
         .stream_destroy(streams[1])
         .map_err(RestoreError::Backend)?;
 
-    // Return WC buffers to the per-thread cache.
-    release_wc_bufs(bufs, chunk_size);
+    // Return pinned buffers to the per-thread cache.
+    release_pinned_bufs(bufs, chunk_size);
 
     Ok(RestoreStats {
         regions_restored: plan.len(),
@@ -3139,10 +3233,13 @@ mod tests {
     // WC BUFFER CACHE TESTS
     // =========================================================================
 
-    /// Peek at the current thread's cached chunk_size, if any.
-    /// Test-only helper that touches the module-private thread_local.
+    /// Peek at the current thread's cached chunk_size for the freeze
+    /// path, if any. Test-only helper that touches the module-private
+    /// thread_local. Freeze now routes through PINNED_BUF_CACHE (since
+    /// 2de24bf); WC_BUF_CACHE is only populated by
+    /// `restore_pipelined_from_bytes` these days.
     fn cached_chunk_size() -> Option<usize> {
-        super::WC_BUF_CACHE.with(|c| c.borrow().as_ref().map(|x| x.chunk_size))
+        super::PINNED_BUF_CACHE.with(|c| c.borrow().as_ref().map(|x| x.chunk_size))
     }
 
     /// After a successful pipelined freeze, the cache holds a pair sized

@@ -56,7 +56,6 @@ def _get_tp_size() -> int:
         return 1
 
 
-@register_model_loader("thaw")
 class ThawModelLoader(BaseModelLoader):
     """Load model weights from a .thaw snapshot file."""
 
@@ -128,3 +127,18 @@ class ThawModelLoader(BaseModelLoader):
             stats['num_regions'], size_gb, stats['elapsed_s'],
             stats['throughput_gb_s'], rank_info,
         )
+
+
+_REGISTERED = False
+
+
+def register() -> None:
+    # Called by vLLM's plugin loader when thaw is installed as a
+    # vllm.general_plugins entrypoint, and by thaw_vllm/__init__.py
+    # for the `import thaw_vllm` path. Idempotent across calls in
+    # the same process (vLLM plugin loader may fire it more than once).
+    global _REGISTERED
+    if _REGISTERED:
+        return
+    register_model_loader("thaw")(ThawModelLoader)
+    _REGISTERED = True

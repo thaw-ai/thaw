@@ -105,9 +105,12 @@ def _worker_freeze(worker, base_path, vllm_commit):
 def _worker_restore(worker, base_path, chunk_size_mb):
     """Restore this worker's model shard from its rank-specific snapshot.
 
-    Runs inside a vLLM worker process via collective_rpc. Tries the
-    fast RAM-mmap path first, falls back to pipelined DMA, then to
-    pure-Python region-by-region.
+    Runs inside a vLLM worker process via collective_rpc. Prefers the
+    O_DIRECT pread pipelined path (fastest for one-shot restore under
+    vLLM — 2.5× over mmap on H100 SXM 2026-04-19), falls back to RAM-
+    mmap then pure-Python region-by-region. The mmap path pays a ~5.6s
+    PTE-walk cost for 16 GB that pread skips entirely; keep it as a
+    safety net and for the amortized warm-mmap scenario.
     """
     from vllm.distributed import get_tensor_model_parallel_rank
     from thaw_common.snapshot import (
@@ -124,19 +127,19 @@ def _worker_restore(worker, base_path, chunk_size_mb):
     model = worker.model_runner.model
 
     try:
-        stats = restore_model_from_ram(model, rank_path, chunk_size_mb)
-    except Exception as e_ram:
+        stats = restore_model_pipelined(model, rank_path, chunk_size_mb)
+    except Exception as e_pipe:
         fallback_warning(
-            f"_worker_restore(rank={rank}).restore_model_from_ram", e_ram,
-            dst="restore_model_pipelined",
+            f"_worker_restore(rank={rank}).restore_model_pipelined", e_pipe,
+            dst="restore_model_from_ram",
         )
         if strict_mode():
             raise
         try:
-            stats = restore_model_pipelined(model, rank_path, chunk_size_mb)
-        except Exception as e_pipe:
+            stats = restore_model_from_ram(model, rank_path, chunk_size_mb)
+        except Exception as e_ram:
             fallback_warning(
-                f"_worker_restore(rank={rank}).restore_model_pipelined", e_pipe,
+                f"_worker_restore(rank={rank}).restore_model_from_ram", e_ram,
                 dst="restore_model (pure python)",
             )
             if strict_mode():
@@ -170,12 +173,20 @@ def freeze_model_tp(
     total_regions = sum(r['num_regions'] for r in results)
     total_elapsed = max(r['elapsed_s'] for r in results)
 
+    # Forward the backend label if all ranks agree; otherwise "mixed".
+    # Without this, the aggregate dict lacks `backend` and downstream
+    # reporters default-label it "[python]" even when Rust ran on every
+    # rank — cost us hours of diagnosis on 2026-04-19.
+    backends = {r.get('backend') for r in results if r.get('backend')}
+    agg_backend = backends.pop() if len(backends) == 1 else ('mixed' if backends else 'unknown')
+
     return {
         'num_regions': total_regions,
         'total_bytes': total_bytes,
         'elapsed_s': total_elapsed,
         'throughput_gb_s': (total_bytes / 1e9) / total_elapsed if total_elapsed > 0 else 0,
         'tensor_parallel_size': tp_size,
+        'backend': agg_backend,
         'per_rank': results,
     }
 
@@ -202,11 +213,16 @@ def restore_model_tp(
     total_regions = sum(r['num_regions'] for r in results)
     total_elapsed = max(r['elapsed_s'] for r in results)
 
+    # Forward the backend label if all ranks agree; otherwise "mixed".
+    backends = {r.get('backend') for r in results if r.get('backend')}
+    agg_backend = backends.pop() if len(backends) == 1 else ('mixed' if backends else 'unknown')
+
     return {
         'num_regions': total_regions,
         'total_bytes': total_bytes,
         'elapsed_s': total_elapsed,
         'throughput_gb_s': (total_bytes / 1e9) / total_elapsed if total_elapsed > 0 else 0,
         'tensor_parallel_size': tp_size,
+        'backend': agg_backend,
         'per_rank': results,
     }
