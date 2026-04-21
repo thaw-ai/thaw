@@ -37,6 +37,16 @@ Reproducer: [`demos/fork_pool_rl.py`](demos/fork_pool_rl.py) · Receipt JSON: [`
 - **Parallel coding agents** — turn "8 agents exploring 8 solutions" from an expensive re-prefill tax into a fast primitive.
 - **Session migration** — move a live inference session between GPUs, pods, or data centers without losing state.
 
+### Who this is for
+
+**RL post-training teams.** PPO, DPO, tree-GRPO, and best-of-N loops that fork rollouts from a shared trunk pay for prefill on every branch. The receipt above takes a round from ~340s cold-boot to 0.88s warm-pool. A step with 16 rollouts: ~90 minutes → ~15 seconds. Multiply by steps × epochs. HuggingFace's 2026 async-RL survey documented the gap: *"no current async library supports [KV pivot resampling] out of the box."*
+
+**Coding-agent teams.** Parallel-exploration products — Cursor-style N approaches, SWE-bench agents, test-driven coding loops — pay a prefill tax on every branch. ForkPool turns "explore 8 approaches" from 8× full prefill into an 8-branch fork against one warm KV state. More hypotheses per user request at the same GPU spend.
+
+**Platform + framework teams.** `thaw.fork(llm)` returns a portable, serializable handle you can ship across processes and pods. Session migration, multi-model hot-swap, session replay — without rewriting your inference layer. Drop-in for LangGraph nodes, Modal functions, Ray workers.
+
+**Not for you yet.** Single-prompt serving — one request, one response, no shared trunk, no repeated forking — vLLM / SGLang alone are fine. thaw earns its keep when you fork ≥2 children from shared state or hot-swap between sessions.
+
 Works with vLLM and SGLang. Open source (MIT).
 
 <p align="center">
@@ -457,6 +467,16 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 ## Design
 
 Full technical architecture, file format spec, and rationale: [DESIGN.md](./DESIGN.md)
+
+## Get in touch
+
+thaw is built by a Madison, WI team — Nils Matteson (founder), Matt Yu, Karan Kapur.
+
+- **Evaluating for a real workload?** Email [nils@thaw.sh](mailto:nils@thaw.sh) — include your rollout shape or fork pattern and we'll help you wire it up.
+- **Training RL models or running parallel agents at scale?** DM on LinkedIn: [Nils Matteson](https://www.linkedin.com/in/nilsmatteson/) — happy to screen-share and profile your loop.
+- **Bug, feature request, or question?** [GitHub issues](https://github.com/thaw-ai/thaw/issues).
+
+⭐ [Star on GitHub](https://github.com/thaw-ai/thaw) if you're watching this space.
 
 ## License
 
