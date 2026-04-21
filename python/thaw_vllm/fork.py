@@ -584,44 +584,63 @@ def fork_completions(
     sampling_params,
     *,
     workers: Optional[int] = None,
+    pool: Optional[Any] = None,
     state_dir: Optional[str] = None,
     handle: Optional[ForkHandle] = None,
     extra_env: Optional[dict] = None,
 ) -> list[ForkCompletionResult]:
     """Run N completions from the parent's cached prefix.
 
-    Two modes:
+    Three modes:
 
-      - ``workers=None`` (default) — delegate to ``llm.generate``. vLLM's
-        continuous batching + prefix cache handle N parallel branches
-        inside the same engine. This is the right default — fork is
-        only load-bearing when the parent process can't host them.
+      - ``workers=None`` and ``pool=None`` (default) — delegate to
+        ``llm.generate``. vLLM's continuous batching + prefix cache
+        handle N parallel branches inside the same engine. This is the
+        right default — fork is only load-bearing when the parent
+        process can't host them.
 
-      - ``workers=N`` (N>0) — snapshot the parent, spawn N subprocess
-        workers that each hydrate and run one prompt. Prompts are
-        distributed round-robin across workers; one worker may own
-        multiple prompts.
+      - ``workers=N`` (N>0) — snapshot the parent, spawn N fresh
+        subprocess workers that each hydrate and run one prompt. Each
+        call pays the full vLLM cold-boot (~minutes). Use ``pool=`` for
+        repeated calls.
+
+      - ``pool=<ForkPool>`` — snapshot the parent, hot-swap the snapshot
+        into a pre-warmed pool's workers. Cold-boot is paid once at
+        ``pool.init_pool``; subsequent calls are seconds, not minutes.
 
     Args:
         llm: parent vLLM engine.
         prompts: list of prompt strings. Usually the trunk conversation
                  + N divergent queries.
         sampling_params: ``vllm.SamplingParams``.
-        workers: None for same-process; positive int for subprocess mode.
-        state_dir: override for the snapshot directory (subprocess mode).
-        handle: reuse an already-created handle (subprocess mode); must
-                have ``weights_path`` set.
-        extra_env: extra environment variables to pass to children.
+        workers: None / positive int. Mutually exclusive with ``pool``.
+        pool: a ``thaw_vllm.ForkPool`` instance. Mutually exclusive with
+              ``workers``.
+        state_dir: override for the snapshot directory (subprocess / pool
+                   modes).
+        handle: reuse an already-created handle (subprocess / pool modes);
+                must have ``weights_path`` set.
+        extra_env: extra environment variables to pass to children
+                   (subprocess mode only; pool workers are long-lived
+                   and inherit the env they were booted with).
 
     Returns:
         List of ``ForkCompletionResult`` with the same length as prompts.
 
     Raises:
-        ForkError: TP>1 with ``workers>0`` (not yet supported).
+        ForkError: TP>1 with ``workers>0`` or ``pool=`` (not yet supported);
+                   or both ``workers`` and ``pool`` set.
     """
+    if workers is not None and pool is not None:
+        raise ForkError("pass either workers= or pool=, not both")
     if workers is not None and workers <= 0:
         raise ForkError(
             f"workers must be None (same-process) or a positive int, got {workers!r}"
+        )
+    if pool is not None:
+        return pool.fork_completions(
+            llm, prompts, sampling_params,
+            state_dir=state_dir, handle=handle,
         )
     mode = "same_process" if workers is None else "subprocess"
 

@@ -57,6 +57,13 @@ from thaw_vllm.fork import (
     HandleClosedError,
 )
 from thaw_vllm.pool import EnginePool, create_pool_app
+from thaw_vllm.fork_pool import (
+    ForkPool,
+    ForkPoolError,
+    WorkerBootTimeout,
+    WorkerDead,
+    WorkerProtocolError,
+)
 
 # Register load_format="thaw" with vLLM when available.
 # vLLM also auto-discovers this via the `vllm.general_plugins` entrypoint
@@ -153,4 +160,10 @@ __all__ = [
     "PrefixCachingDisabledError",
     "UnfinishedRequestsError",
     "HandleClosedError",
+    # ForkPool — pre-warmed subprocess workers for repeated forks.
+    "ForkPool",
+    "ForkPoolError",
+    "WorkerBootTimeout",
+    "WorkerDead",
+    "WorkerProtocolError",
 ]
