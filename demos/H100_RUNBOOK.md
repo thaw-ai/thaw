@@ -83,6 +83,20 @@ python demos/rl_rollout_simulator.py \
     --max-model-len 12288 \
     --gpu-memory-utilization 0.25 \
     --json-out /workspace/receipts/2026-XX-XX_h100_rl_rollout.json
+
+# 5d. ForkPool amortization — this is the core claim. Boot one pool,
+# run 5 rounds of fork+generate, show per-round cost stays ~flat after
+# the one-time init_pool cost. Without ForkPool, every round pays
+# ~340s cold-boot (receipts 2026-04-20). With ForkPool, only round 0
+# pays the cost — rounds 1-4 should be seconds each.
+python demos/fork_pool_rl.py \
+    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --workers 1 --rounds 5 --branches-per-round 4 \
+    --trunk-tokens 4000 --max-tokens 64 \
+    --max-model-len 12288 \
+    --gpu-memory-utilization 0.25 \
+    --worker-gpu-memory 0.55 --worker-max-model-len 12288 \
+    --json-out /workspace/receipts/2026-XX-XX_h100_fork_pool_rl.json
 ```
 
 The worker subprocess's own memory budget is controlled by
@@ -97,8 +111,9 @@ Replace `2026-XX-XX` with today's date.
 
 Expected wall-clocks on H100 80 GB (ballpark):
 - `fork_smoke_test`: ~30s after model download.
-- `parallel_agents` with 20K trunk: ~3-5 min (worker model loads dominate).
-- `rl_rollout_simulator` with 8K trunk: ~3-5 min.
+- `parallel_agents` with 8K trunk, 1 worker: ~5-7 min (workers=1 cold-boot dominates).
+- `rl_rollout_simulator` with 8K trunk, 1 worker: ~5-7 min.
+- `fork_pool_rl` with 5 rounds, 1 worker: init_pool ~5-6 min (one-time), then rounds are seconds each. Total ~7-8 min. **The key receipt:** compare round 0 vs round 4 elapsed_s — both should be under 10s. If both are ~340s, the pool isn't swapping weights (regression).
 
 ---
 

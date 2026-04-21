@@ -1,0 +1,145 @@
+{
+  "receipt_version": 1,
+  "timestamp_utc": "2026-04-21T02:09:05+00:00",
+  "demo": "fork_pool_rl",
+  "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+  "trunk_tokens": 4001,
+  "timings_s": {
+    "load_s": 17.11,
+    "trunk_warm_s": 0.313,
+    "init_pool_s": 22.326,
+    "first_round_s": 1.157,
+    "median_round_s": 0.885,
+    "mean_round_s": 0.885,
+    "total_loop_s": 4.695
+  },
+  "modes": {
+    "fork_pool": {
+      "workers": 1,
+      "rounds": 5,
+      "branches_per_round": 4,
+      "per_round": [
+        {
+          "round": 0,
+          "elapsed_s": 1.157,
+          "branches": 4,
+          "nonempty": 4,
+          "all_diverge": true,
+          "sample_worker_indices": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "round": 1,
+          "elapsed_s": 0.891,
+          "branches": 4,
+          "nonempty": 4,
+          "all_diverge": true,
+          "sample_worker_indices": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "round": 2,
+          "elapsed_s": 0.878,
+          "branches": 4,
+          "nonempty": 4,
+          "all_diverge": true,
+          "sample_worker_indices": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "round": 3,
+          "elapsed_s": 0.889,
+          "branches": 4,
+          "nonempty": 4,
+          "all_diverge": true,
+          "sample_worker_indices": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "round": 4,
+          "elapsed_s": 0.88,
+          "branches": 4,
+          "nonempty": 4,
+          "all_diverge": true,
+          "sample_worker_indices": [
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "per_worker_boot_s": [
+        22.3
+      ]
+    }
+  },
+  "checks": {
+    "all_rounds_nonempty": true,
+    "all_rounds_diverge": true,
+    "amortization_visible": true
+  },
+  "samples": [
+    {
+      "round": 0,
+      "branch": 0,
+      "text_preview": "Let's explore the trade-offs for each strategy first.  ## Step 1: Strategy (a) OrderedDict + sidecar deadline dict, prune lazily This approach uses an OrderedDict for LRU eviction and a separate dicti\u2026"
+    },
+    {
+      "round": 0,
+      "branch": 1,
+      "text_preview": "To address the user's concerns, let's first enumerate the requirements and potential corner cases for this design:  ## Step 1: Requirement Recap The cache should have the following properties: - Bound\u2026"
+    },
+    {
+      "round": 0,
+      "branch": 2,
+      "text_preview": "Let's explore the trade-offs for each strategy:  Strategy (a): `OrderedDict` + sidecar deadline dict, prune lazily.  *   The `OrderedDict` will have a time complexity of O(1) for `get()` and `put()`,\u2026"
+    }
+  ],
+  "pod": {
+    "gpu_name": "NVIDIA H100 80GB HBM3",
+    "gpu_memory_mib": 81559,
+    "driver_version": "580.126.09",
+    "cuda_version": "12.8"
+  },
+  "software": {
+    "python": "3.11.10",
+    "vllm": "0.19.1",
+    "torch": "2.10.0",
+    "thaw_native": "0.3.0",
+    "thaw_vllm": "0.3.0"
+  },
+  "git": {
+    "commit": "f27b78aa7d690c8e73b4e9eb3d273255f48c5c5c",
+    "short": "f27b78a",
+    "dirty": true
+  },
+  "extra": {
+    "workers": 1,
+    "rounds": 5,
+    "branches_per_round": 4,
+    "trunk_tokens": 4001,
+    "max_tokens": 64,
+    "max_model_len": 12288,
+    "gpu_memory_utilization": 0.25,
+    "worker_gpu_memory": 0.55,
+    "worker_max_model_len": 12288,
+    "amortization_note": "First subprocess-worker demo, pre-ForkPool, measured ~340s per one-shot fork on H100 80GB 2026-04-20. ForkPool trades that for a one-time init_pool cost."
+  }
+}

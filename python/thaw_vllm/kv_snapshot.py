@@ -143,9 +143,90 @@ def _rank_kv_path(base_path: str, rank: int) -> str:
     return f"{stem}.rank{rank}{ext}"
 
 
+def _coalesce_kv_to_gpu_buffer(kv_caches, block_ids):
+    """Gather every K/V slab of every cached (layer, block) pair into one
+    contiguous GPU tensor.
+
+    The per-slab mapping (``_collect_kv_slab_requests``) produces tens of
+    thousands of ~30 KB pipeline regions for a 4K-token trunk; per-region
+    FFI + DMA dispatch overhead dominates end-to-end throughput (measured
+    ~50 MB/s on H100 NVMe against a 3.4 GB/s O_DIRECT ceiling). Coalescing
+    into a single region amortizes that overhead to one call — a single
+    contiguous DMA the Rust pipelined writer can saturate the NVMe with.
+
+    Layout of the returned buffer, in logical (layer, slot, kv) order:
+    ``flat[layer_idx, slot_idx, kv_idx]`` is the flat-view of one slab.
+    Concrete shape ``[num_layers, num_slots, 2, slab_numel]`` using the
+    same dtype as ``kv_caches[0]``.
+
+    Returns ``(flat, slab_nbytes)``. The caller is responsible for
+    ``torch.cuda.synchronize()`` before submitting to the pipelined writer
+    (the gather kernels are issued on the default stream; the Rust path
+    launches its own streams).
+    """
+    device = kv_caches[0].device
+    dtype = kv_caches[0].dtype
+    num_layers = len(kv_caches)
+    num_slots = len(block_ids)
+
+    # One slab = kv_layer[0, bid] → shape [block_size, H, D]. Flattened
+    # length is the element count the Rust path thinks of as one region.
+    sample_slab = kv_caches[0][0, 0]
+    slab_numel = sample_slab.numel()
+    slab_nbytes = slab_numel * sample_slab.element_size()
+
+    bid_t = torch.tensor(block_ids, device=device, dtype=torch.long)
+    flat = torch.empty(
+        (num_layers, num_slots, 2, slab_numel),
+        device=device,
+        dtype=dtype,
+    )
+
+    for layer_idx, kv_layer in enumerate(kv_caches):
+        # kv_layer shape [2, N_pool, block_size, H, D]. Gather along the
+        # block dim to pull only the cached blocks, then permute to
+        # (slot, kv, ...) and flatten the tail to slab_numel.
+        gathered = kv_layer.index_select(dim=1, index=bid_t)
+        # gathered: [2, num_slots, block_size, H, D]
+        flat[layer_idx] = (
+            gathered.permute(1, 0, 2, 3, 4).reshape(num_slots, 2, slab_numel)
+        )
+
+    return flat, slab_nbytes
+
+
+def _scatter_gpu_buffer_to_kv(kv_caches, block_ids, flat):
+    """Inverse of ``_coalesce_kv_to_gpu_buffer``: write ``flat`` back to
+    ``kv_caches`` at ``block_ids``.
+
+    Uses ``index_copy_`` along the block dim so the whole layer goes in
+    one device-side op per layer (32 calls for an 8B model), rather than
+    num_layers × num_slots × 2 per-slab copies.
+    """
+    device = kv_caches[0].device
+    num_slots = len(block_ids)
+    bid_t = torch.tensor(block_ids, device=device, dtype=torch.long)
+
+    for layer_idx, kv_layer in enumerate(kv_caches):
+        # kv_layer: [2, N_pool, block_size, H, D]; slab tail shape = last three.
+        tail_shape = kv_layer.shape[2:]
+        # flat[layer_idx]: [num_slots, 2, slab_numel] →
+        # [2, num_slots, *tail_shape], matching kv_layer's block-dim-gather form.
+        src = (
+            flat[layer_idx]
+            .reshape(num_slots, 2, *tail_shape)
+            .permute(1, 0, *range(2, 2 + len(tail_shape)))
+            .contiguous()
+        )
+        kv_layer.index_copy_(dim=1, index=bid_t, source=src)
+
+
 def _collect_kv_slab_requests(kv_caches, block_ids):
     """Build the pipelined freeze/restore mapping list for every K and V slab
     of every (layer, block) pair.
+
+    Legacy per-slab path retained for reading ``layout: "per_slab"``
+    snapshots. New freezes go through ``_coalesce_kv_to_gpu_buffer``.
 
     vLLM's layout is ``[2, num_blocks, block_size, num_kv_heads, head_size]``.
     With K/V split at dim 0, each ``kv_layer[k, bid]`` (k in {0,1}) is a
@@ -344,7 +425,10 @@ def freeze_kv_cache(llm, path: str) -> dict:
         "block_size": ec.scheduler.block_size,
     }
 
-    # --- Fast path: Rust pipelined freeze over every K/V slab ---
+    # --- Fast path: coalesce every K/V slab into one contiguous GPU
+    # buffer, then hand the whole buffer to the Rust pipelined writer as
+    # a single region. One ~500 MB DMA saturates NVMe where 16k × 30 KB
+    # regions bottleneck on per-region dispatch overhead (~50 MB/s).
     use_rust = True
     try:
         import thaw as _thaw
@@ -360,13 +444,17 @@ def freeze_kv_cache(llm, path: str) -> dict:
         use_rust = False
 
     if use_rust:
-        mapping, slab_nbytes = _collect_kv_slab_requests(kv_caches, block_ids)
+        flat, slab_nbytes = _coalesce_kv_to_gpu_buffer(kv_caches, block_ids)
+        torch.cuda.synchronize()
+        total_payload = flat.numel() * flat.element_size()
+        mapping = [("kv_live_block", 0, flat.data_ptr(), total_payload)]
         metadata["slab_nbytes"] = slab_nbytes
         metadata["num_slots"] = len(block_ids)
+        metadata["layout"] = "coalesced"
+        metadata["coalesced_bytes"] = total_payload
         try:
             _thaw.freeze_to_file_pipelined(path, mapping, vllm_commit=None)
             _write_meta_sidecar(path, metadata)
-            total_payload = slab_nbytes * len(mapping)
         except Exception as e:
             fallback_warning(
                 "freeze_kv_cache (rust pipelined failed)", e,
@@ -375,6 +463,10 @@ def freeze_kv_cache(llm, path: str) -> dict:
             if strict_mode():
                 raise
             use_rust = False
+        finally:
+            # Free the coalesce buffer promptly — 500+ MB on GPU is
+            # meaningful headroom when the parent is already at 0.25 gmu.
+            del flat
 
     if not use_rust:
         total_payload = _freeze_kv_python_fallback(
@@ -494,9 +586,17 @@ def _validate_metadata(metadata, kv_caches):
 def _restore_kv_rust_or_fallback(path, kv_caches, metadata):
     """Restore a new-format (THAW + sidecar) KV snapshot.
 
-    Fast path is `_thaw.restore_from_file_pipelined` with one mapping entry
-    per K/V slab. Falls back to a staged pinned read+copy if the Rust
-    extension isn't loaded.
+    Two on-disk layouts, both written by ``freeze_kv_cache``:
+
+    - ``layout: "coalesced"`` (current): single ``kv_live_block`` region
+      holds the contiguous ``[num_layers, num_slots, 2, slab_numel]``
+      buffer. Read via one Rust pipelined call into a matching GPU
+      tensor, then scatter with ``index_copy_`` per layer.
+    - ``layout: "per_slab"`` (legacy): one region per K/V slab.
+      Preserved so older snapshots still restore.
+
+    Falls back to a staged pinned read+scatter if the Rust extension
+    isn't loaded.
     """
     block_ids = metadata["block_ids"]
 
@@ -513,6 +613,40 @@ def _restore_kv_rust_or_fallback(path, kv_caches, metadata):
             raise
         return _restore_kv_python_fallback_new(path, kv_caches, metadata)
 
+    layout = metadata.get("layout", "per_slab")
+
+    if layout == "coalesced":
+        num_layers = metadata["num_layers"]
+        num_slots = len(block_ids)
+        slab_nbytes = metadata["slab_nbytes"]
+        slab_numel = slab_nbytes // kv_caches[0].element_size()
+        total_bytes = metadata.get(
+            "coalesced_bytes",
+            num_layers * num_slots * 2 * slab_nbytes,
+        )
+        flat = torch.empty(
+            (num_layers, num_slots, 2, slab_numel),
+            device=kv_caches[0].device,
+            dtype=kv_caches[0].dtype,
+        )
+        mapping = [("kv_live_block", 0, flat.data_ptr(), total_bytes)]
+        try:
+            _thaw.restore_from_file_pipelined(path, mapping)
+        except Exception as e:
+            del flat
+            fallback_warning(
+                "restore_kv_cache (rust pipelined coalesced failed)", e,
+                dst="pure-python readinto + GPU scatter",
+            )
+            if strict_mode():
+                raise
+            return _restore_kv_python_fallback_new(path, kv_caches, metadata)
+
+        _scatter_gpu_buffer_to_kv(kv_caches, block_ids, flat)
+        del flat
+        return total_bytes
+
+    # Legacy per-slab path.
     mapping, _slab_nbytes = _collect_kv_slab_requests(kv_caches, block_ids)
     try:
         _thaw.restore_from_file_pipelined(path, mapping)
@@ -637,7 +771,7 @@ def freeze_kv_cache_tp(llm, base_path: str) -> dict:
         # fast-path logic. Workers run in the same interpreter under V1
         # in-proc, so a plain import is fine here.
         from thaw_vllm.kv_snapshot import (
-            _collect_kv_slab_requests,
+            _coalesce_kv_to_gpu_buffer,
             _freeze_kv_python_fallback,
             _rank_kv_path,
             _write_meta_sidecar,
@@ -684,13 +818,17 @@ def freeze_kv_cache_tp(llm, base_path: str) -> dict:
             use_rust = False
 
         if use_rust:
-            mapping, slab_nbytes = _collect_kv_slab_requests(kv_caches, block_ids)
+            flat, slab_nbytes = _coalesce_kv_to_gpu_buffer(kv_caches, block_ids)
+            torch.cuda.synchronize()
+            total_payload = flat.numel() * flat.element_size()
+            mapping = [("kv_live_block", 0, flat.data_ptr(), total_payload)]
             metadata["slab_nbytes"] = slab_nbytes
             metadata["num_slots"] = len(block_ids)
+            metadata["layout"] = "coalesced"
+            metadata["coalesced_bytes"] = total_payload
             try:
                 _thaw.freeze_to_file_pipelined(rank_path, mapping, vllm_commit=None)
                 _write_meta_sidecar(rank_path, metadata)
-                total_payload = slab_nbytes * len(mapping)
             except Exception as e:
                 fallback_warning(
                     f"freeze_kv_cache_tp rank {rank} (rust pipelined failed)", e,
@@ -699,6 +837,8 @@ def freeze_kv_cache_tp(llm, base_path: str) -> dict:
                 if strict_mode():
                     raise
                 use_rust = False
+            finally:
+                del flat
 
         if not use_rust:
             total_payload = _freeze_kv_python_fallback(
@@ -764,9 +904,11 @@ def restore_kv_cache_tp(llm, base_path: str) -> dict:
             _meta_path,
             _restore_kv_python_fallback_legacy,
             _restore_kv_python_fallback_new,
+            _scatter_gpu_buffer_to_kv,
             _validate_metadata,
         )
         from thaw_common.telemetry import fallback_warning, strict_mode
+        import torch as _torch
 
         rank = get_tensor_model_parallel_rank()
         rank_path = _rank_kv_path(base_path, rank)
@@ -810,24 +952,58 @@ def restore_kv_cache_tp(llm, base_path: str) -> dict:
                 use_rust = False
 
             if use_rust:
-                mapping, _slab_nbytes = _collect_kv_slab_requests(
-                    kv_caches, metadata["block_ids"],
-                )
-                try:
-                    _thaw.restore_from_file_pipelined(rank_path, mapping)
-                    total_payload = (
-                        len(metadata["block_ids"])
-                        * metadata["num_layers"]
-                        * metadata["block_bytes"]
+                layout = metadata.get("layout", "per_slab")
+                if layout == "coalesced":
+                    num_layers = metadata["num_layers"]
+                    num_slots = len(metadata["block_ids"])
+                    slab_nbytes = metadata["slab_nbytes"]
+                    slab_numel = slab_nbytes // kv_caches[0].element_size()
+                    total_payload = metadata.get(
+                        "coalesced_bytes",
+                        num_layers * num_slots * 2 * slab_nbytes,
                     )
-                except Exception as e:
-                    fallback_warning(
-                        f"restore_kv_cache_tp rank {rank} (rust pipelined failed)", e,
-                        dst="pure-python readinto + GPU scatter",
+                    flat = _torch.empty(
+                        (num_layers, num_slots, 2, slab_numel),
+                        device=kv_caches[0].device,
+                        dtype=kv_caches[0].dtype,
                     )
-                    if strict_mode():
-                        raise
-                    use_rust = False
+                    mapping = [("kv_live_block", 0, flat.data_ptr(), total_payload)]
+                    try:
+                        _thaw.restore_from_file_pipelined(rank_path, mapping)
+                        _scatter_gpu_buffer_to_kv(
+                            kv_caches, metadata["block_ids"], flat,
+                        )
+                    except Exception as e:
+                        del flat
+                        fallback_warning(
+                            f"restore_kv_cache_tp rank {rank} "
+                            "(rust pipelined coalesced failed)", e,
+                            dst="pure-python readinto + GPU scatter",
+                        )
+                        if strict_mode():
+                            raise
+                        use_rust = False
+                    else:
+                        del flat
+                else:
+                    mapping, _slab_nbytes = _collect_kv_slab_requests(
+                        kv_caches, metadata["block_ids"],
+                    )
+                    try:
+                        _thaw.restore_from_file_pipelined(rank_path, mapping)
+                        total_payload = (
+                            len(metadata["block_ids"])
+                            * metadata["num_layers"]
+                            * metadata["block_bytes"]
+                        )
+                    except Exception as e:
+                        fallback_warning(
+                            f"restore_kv_cache_tp rank {rank} (rust pipelined failed)", e,
+                            dst="pure-python readinto + GPU scatter",
+                        )
+                        if strict_mode():
+                            raise
+                        use_rust = False
 
             if not use_rust:
                 total_payload = _restore_kv_python_fallback_new(
