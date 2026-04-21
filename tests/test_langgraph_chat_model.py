@@ -127,13 +127,17 @@ class FakeRequestOutput:
 
 
 def install_fake_plumbing(llm: ChatThaw, gen_response: str = "fake-response"):
-    """Populate the private state that _load_sync would set up."""
+    """Populate the private state that _load_async would set up."""
     fake_llm = MagicMock()
     fake_llm.generate = MagicMock(return_value=[FakeRequestOutput(gen_response)])
     llm._llm = fake_llm
     llm._tokenizer = FakeTokenizer()
     llm._pool = MagicMock()
     llm._warmed_lock = asyncio.Lock()
+    # _coalescer is the short-circuit guard in _load_async; install a sentinel
+    # so tests that invoke _load_async (e.g. fork_fanout) don't try to boot a
+    # real vLLM + ForkPool.
+    llm._coalescer = MagicMock()
     return fake_llm
 
 
@@ -184,6 +188,37 @@ async def test_do_single_routes_to_parent_llm():
     result = await llm._do_single([HumanMessage(content="hi")], sampling_params="sp")
     assert result == "single-output"
     fake_llm.generate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_do_singles_batches_into_one_generate_call():
+    """_do_singles must pass all N prompts to generate() in a single call so
+    vLLM's continuous batcher schedules them together; N threaded generate()
+    calls deadlock V1 EngineCore."""
+    llm = ChatThaw(model="m")
+    fake_llm = install_fake_plumbing(llm)
+    # Stage distinct outputs, one per prompt
+    fake_llm.generate = MagicMock(
+        return_value=[
+            FakeRequestOutput("a-out"),
+            FakeRequestOutput("b-out"),
+            FakeRequestOutput("c-out"),
+        ]
+    )
+    results = await llm._do_singles(
+        [
+            [HumanMessage(content="a")],
+            [HumanMessage(content="b")],
+            [HumanMessage(content="c")],
+        ],
+        sampling_params="sp",
+    )
+    assert results == ["a-out", "b-out", "c-out"]
+    fake_llm.generate.assert_called_once()
+    # First positional arg is the list of rendered prompts
+    prompts_arg = fake_llm.generate.call_args[0][0]
+    assert isinstance(prompts_arg, list)
+    assert len(prompts_arg) == 3
 
 
 # ---------------------------------------------------------------------------

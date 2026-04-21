@@ -61,6 +61,18 @@ def make_callables(log: CallLog, fork_return=None, fork_error=None, single_error
     return fork_callable, single_callable
 
 
+def make_batch_single(log: CallLog, error=None, wrong_count=False):
+    async def batch_single(messages_list, sampling_params):
+        log.single_calls.append(([list(m) for m in messages_list], sampling_params))
+        if error is not None:
+            raise error
+        if wrong_count:
+            return ["only-one"]
+        return [f"batch-{m[-1].content}" for m in messages_list]
+
+    return batch_single
+
+
 # ---------------------------------------------------------------------------
 # _message_utils tests
 # ---------------------------------------------------------------------------
@@ -445,6 +457,135 @@ async def test_sampling_params_from_first_call():
     await asyncio.gather(t1, t2)
 
     assert log.fork_calls[0][2] == "first-sp"
+
+
+# ---------------------------------------------------------------------------
+# Coalescer: mismatched result count → exception to all pending
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Coalescer: batched single path — N pending, prefix below threshold
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_batch_single_callable_used_when_prefix_below_threshold():
+    log = CallLog()
+    fork, single = make_callables(log)
+    batch_single = make_batch_single(log)
+    coalescer = ForkCoalescer(
+        fork_callable=fork,
+        single_callable=single,
+        batch_single_callable=batch_single,
+        window_ms=2.0,
+        min_prefix_tokens=10000,  # unreachable → always fall through
+    )
+
+    prefix = [msg("a" * 40)]  # tiny — well below threshold
+    tasks = [
+        asyncio.create_task(coalescer.submit(prefix + [msg(f"b{i}")], sampling_params="sp"))
+        for i in range(4)
+    ]
+    results = await asyncio.gather(*tasks)
+
+    assert results == [f"batch-b{i}" for i in range(4)]
+    # batch_single gets recorded in log.single_calls; fork must not be touched
+    assert len(log.fork_calls) == 0
+    # Exactly one batch invocation, not four
+    assert len(log.single_calls) == 1
+    msgs_list, sp = log.single_calls[0]
+    assert len(msgs_list) == 4
+    assert sp == "sp"
+
+
+@pytest.mark.asyncio
+async def test_batch_single_callable_used_when_lcp_zero():
+    log = CallLog()
+    fork, single = make_callables(log)
+    batch_single = make_batch_single(log)
+    coalescer = ForkCoalescer(
+        fork_callable=fork,
+        single_callable=single,
+        batch_single_callable=batch_single,
+        window_ms=2.0,
+        min_prefix_tokens=10,
+    )
+
+    tasks = [
+        asyncio.create_task(coalescer.submit([msg(f"totally-different-{i}")], sampling_params=None))
+        for i in range(3)
+    ]
+    results = await asyncio.gather(*tasks)
+
+    assert set(results) == {"batch-totally-different-0", "batch-totally-different-1", "batch-totally-different-2"}
+    assert len(log.single_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_single_error_propagates_to_all():
+    log = CallLog()
+    fork, single = make_callables(log)
+    batch_single = make_batch_single(log, error=RuntimeError("batch boom"))
+    coalescer = ForkCoalescer(
+        fork_callable=fork,
+        single_callable=single,
+        batch_single_callable=batch_single,
+        window_ms=2.0,
+        min_prefix_tokens=10000,
+    )
+
+    tasks = [
+        asyncio.create_task(coalescer.submit([msg(f"b{i}")], sampling_params=None))
+        for i in range(3)
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    assert all(isinstance(r, RuntimeError) and "batch boom" in str(r) for r in results)
+
+
+@pytest.mark.asyncio
+async def test_batch_single_result_count_mismatch_raises():
+    log = CallLog()
+    fork, single = make_callables(log)
+    batch_single = make_batch_single(log, wrong_count=True)
+    coalescer = ForkCoalescer(
+        fork_callable=fork,
+        single_callable=single,
+        batch_single_callable=batch_single,
+        window_ms=2.0,
+        min_prefix_tokens=10000,
+    )
+
+    tasks = [
+        asyncio.create_task(coalescer.submit([msg(f"b{i}")], sampling_params=None))
+        for i in range(3)
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    assert all(isinstance(r, RuntimeError) for r in results)
+    assert all("returned 1 results for 3 calls" in str(r) for r in results)
+
+
+@pytest.mark.asyncio
+async def test_no_batch_callable_falls_back_to_gather_of_singles():
+    """Back-compat: if batch_single_callable isn't supplied, gather singles."""
+    log = CallLog()
+    fork, single = make_callables(log)
+    coalescer = ForkCoalescer(
+        fork_callable=fork,
+        single_callable=single,
+        # no batch_single_callable
+        window_ms=2.0,
+        min_prefix_tokens=10000,
+    )
+
+    tasks = [
+        asyncio.create_task(coalescer.submit([msg(f"b{i}")], sampling_params=None))
+        for i in range(3)
+    ]
+    await asyncio.gather(*tasks)
+
+    assert len(log.single_calls) == 3  # one per pending, via gather
+    assert len(log.fork_calls) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -160,6 +160,7 @@ class ChatThaw(BaseChatModel):
             self._coalescer = ForkCoalescer(
                 fork_callable=self._do_fork,
                 single_callable=self._do_single,
+                batch_single_callable=self._do_singles,
                 window_ms=self.fork_window_ms,
                 min_prefix_tokens=self.fork_min_prefix_tokens,
                 token_counter=self._count_tokens,
@@ -235,6 +236,20 @@ class ChatThaw(BaseChatModel):
             self._llm.generate, prompt, sampling_params
         )
         return outputs[0].outputs[0].text
+
+    async def _do_singles(
+        self,
+        messages_list: Sequence[Sequence[BaseMessage]],
+        sampling_params: Any,
+    ) -> List[str]:
+        # vLLM V1 `LLM.generate` is not thread-safe: N concurrent threads each
+        # calling it deadlock the EngineCore request loop. Pass all N prompts
+        # in one call so the scheduler batches them via continuous batching.
+        prompts = [self._messages_to_prompt(m) for m in messages_list]
+        outputs = await asyncio.to_thread(
+            self._llm.generate, prompts, sampling_params
+        )
+        return [o.outputs[0].text for o in outputs]
 
     async def _ensure_prefix_warm(self, prefix_prompt: str) -> None:
         from vllm import SamplingParams
