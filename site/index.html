@@ -1361,8 +1361,8 @@
       <div class="stat-label">Hot-swap a Llama-3-8B model</div>
     </div>
     <div class="stat">
-      <div class="stat-num"><span class="accent">55</span> GB/s</div>
-      <div class="stat-label">Sustained DMA — 86% of PCIe Gen5</div>
+      <div class="stat-num"><span class="accent">0.88</span>s</div>
+      <div class="stat-label">Per fork round · 4 branches, amortized on H100 8B</div>
     </div>
     <div class="stat">
       <div class="stat-num"><span class="accent">17.2</span>&times;</div>
@@ -1821,6 +1821,38 @@ Is there something I can help you with?"}}],
           </tr>
         </thead>
         <tbody>
+          <tr>
+            <td class="col-mono">2026-04-20</td>
+            <td class="col-model">fork_pool_rl</td>
+            <td class="col-mono">H100 80 GB HBM3</td>
+            <td class="col-mono">Llama-3.1-8B</td>
+            <td><strong style="color:var(--text)">ForkPool:</strong> init_pool 22.3s amortized over 5 rounds &times; 4 branches at <strong style="color:var(--cyan)">0.88s median/round</strong> (1.16s first round)</td>
+            <td class="col-mono"><a href="https://github.com/thaw-ai/thaw/blob/main/site/receipts/2026-04-20_h100_fork_pool_rl.json">open</a></td>
+          </tr>
+          <tr>
+            <td class="col-mono">2026-04-20</td>
+            <td class="col-model">rl_rollout</td>
+            <td class="col-mono">H100 80 GB HBM3</td>
+            <td class="col-mono">Llama-3.1-8B</td>
+            <td>16 PPO rollouts from 8k-token trunk; native batch 5.04s vs fork+subprocess 389.7s vs cold&times;16 43.2s</td>
+            <td class="col-mono"><a href="https://github.com/thaw-ai/thaw/blob/main/site/receipts/2026-04-20_h100_rl_rollout.json">open</a></td>
+          </tr>
+          <tr>
+            <td class="col-mono">2026-04-20</td>
+            <td class="col-model">parallel_agents</td>
+            <td class="col-mono">H100 80 GB HBM3</td>
+            <td class="col-mono">Llama-3.1-8B</td>
+            <td>8 candidate branches from 8k-token trunk; native batch 5.8s vs fork+subprocess 401.5s</td>
+            <td class="col-mono"><a href="https://github.com/thaw-ai/thaw/blob/main/site/receipts/2026-04-20_h100_parallel_agents.json">open</a></td>
+          </tr>
+          <tr>
+            <td class="col-mono">2026-04-20</td>
+            <td class="col-model">fork_smoke_test</td>
+            <td class="col-mono">H100 80 GB HBM3</td>
+            <td class="col-mono">Llama-3-8B</td>
+            <td>fork handle in 0.289s, 4 divergent same-process completions in 0.633s</td>
+            <td class="col-mono"><a href="https://github.com/thaw-ai/thaw/blob/main/site/receipts/2026-04-20_h100_fork_smoke_test.json">open</a></td>
+          </tr>
           <tr>
             <td class="col-mono">2026-04-20</td>
             <td class="col-model">fork_smoke_test</td>
