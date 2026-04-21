@@ -177,6 +177,7 @@ def _build_graph():
 def _build_thaw_llm(args):
     from thaw_vllm.langgraph import ChatThaw
 
+    extra = {"max_model_len": args.max_model_len} if args.max_model_len else {}
     return ChatThaw(
         model=args.model,
         fork_window_ms=args.fork_window_ms,
@@ -187,6 +188,8 @@ def _build_thaw_llm(args):
         worker_gpu_memory_utilization=args.worker_gpu_memory_utilization,
         temperature=args.temperature,
         max_tokens=args.max_tokens,
+        extra_llm_kwargs=extra,
+        extra_pool_kwargs=extra,
     )
 
 
@@ -196,6 +199,7 @@ def _build_baseline_llm(args):
     # to ChatOpenAI pointed at a vLLM OpenAI-compatible server on this box.
     from thaw_vllm.langgraph import ChatThaw
 
+    extra = {"max_model_len": args.max_model_len} if args.max_model_len else {}
     return ChatThaw(
         model=args.model,
         fork_window_ms=args.fork_window_ms,
@@ -206,6 +210,8 @@ def _build_baseline_llm(args):
         worker_gpu_memory_utilization=args.worker_gpu_memory_utilization,
         temperature=args.temperature,
         max_tokens=args.max_tokens,
+        extra_llm_kwargs=extra,
+        extra_pool_kwargs=extra,
     )
 
 
@@ -403,6 +409,11 @@ def _parse_args():
     p.add_argument("--tensor-parallel-size", type=int, default=1)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.25)
     p.add_argument("--worker-gpu-memory-utilization", type=float, default=0.15)
+    # Cap the parent vLLM's max_model_len so KV cache fits at gpu_memory_utilization=0.25.
+    # Llama 3.1's native 131K context needs 16 GiB of KV by itself; at 0.25 of an
+    # 80 GB H100 we have ~4 GiB after weights. 16384 covers an 8K-token context +
+    # reasonable response headroom, which is all this demo uses.
+    p.add_argument("--max-model-len", type=int, default=16384)
     p.add_argument("--fork-window-ms", type=float, default=2.0)
     p.add_argument("--fork-min-prefix-tokens", type=int, default=500)
     p.add_argument("--temperature", type=float, default=0.7)
