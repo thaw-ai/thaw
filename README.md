@@ -260,20 +260,28 @@ for epoch in range(num_epochs):
     ...                              # PPO / best-of-N / tree-GRPO step
 ```
 
-### LangGraph: change one import, fork happens under the hood
+### LangGraph: one import, fork as a first-class primitive
 
-Agent frameworks erase the "N branches share a system prompt" signal — by the time `Send()` fans out, each branch looks independent. `thaw_vllm.langgraph.ChatThaw` reconstructs it: concurrent calls within a short window are coalesced, and groups sharing a ≥500-token prefix route through `ForkPool.fork_completions` automatically.
+Agent frameworks erase the "N branches share a system prompt" signal — by the time `Send()` fans out, each branch looks independent. `thaw_vllm.langgraph` gives you two entry points: a LangChain-compatible chat model, and an explicit fork primitive you can call from any node.
 
 ```python
-# Drop-in LangChain chat model. Install with: pip install thaw-vllm[langgraph]
-from thaw_vllm.langgraph import ChatThaw
+# Install: pip install thaw-vllm[langgraph]
+from thaw_vllm.langgraph import ChatThaw, fork_fanout
 
-llm = ChatThaw(model="meta-llama/Llama-3.1-8B-Instruct", workers=4)
+llm = ChatThaw(model="meta-llama/Llama-3.1-8B-Instruct", workers=2)
 
-# Build a StateGraph with a Send() fan-out as you normally would.
-# When N specialists hit the model simultaneously with a shared prefix,
-# they get coalesced into one fork call — not N independent prefills.
+# 1. Drop-in chat model — concurrent ainvoke calls are coalesced into
+#    one batched vLLM.generate (continuous batching). Use this wherever
+#    LangGraph expects a BaseChatModel.
+response = await llm.ainvoke(messages)
+
+# 2. Explicit fan-out — snapshots the parent's KV over `prefix` once
+#    and fans out N divergent suffixes through the ForkPool. This is
+#    the path that hits sub-second amortized fork latency.
+texts = await fork_fanout(llm, prefix_messages, [suffix_a, suffix_b, suffix_c, suffix_d])
 ```
+
+**Important:** parent and pool workers must boot with the same dtype. `ChatThaw` accepts `extra_llm_kwargs` / `extra_pool_kwargs` — pass matching `{"dtype": "float16"}` (or `"bfloat16"`) to both. Mismatches corrupt snapshotted KV cache blocks and produce garbage on rounds 1+.
 
 Working demos ship in the repo:
 
@@ -479,7 +487,7 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 - [x] **Pipelined-freeze parity with restore** — `freeze_pipelined_to_file` with chunked WC-pinned buffers + O_DIRECT lands in v0.2.1 (2026-04-17). End-to-end 9.57 GB/s on H100 SXM (vs 3.82 GB/s in v0.1.2); pure-Rust 19.62 GB/s on synthetic buffer.
 - [x] **ForkPool (v0.3.2, 2026-04-20)** — pre-warmed subprocess pool: boot N vLLM engines once with real weights, each `fork_completions()` call snapshots KV only. 22.3s init → 0.88s median/round on H100 8B (4 branches × 64 tokens). First sub-second fork amortization on real hardware.
 - [x] **Plain-pinned freeze fix (thaw-native v0.3.1, 2026-04-20)** — v0.3.0 wheel capped freeze at 50 MB/s because CPU reads of WC-pinned memory are ~100× slower than plain pinned. Fresh `pip install` now pulls the fast path by default.
-- [x] **LangGraph integration (v0.4.0, 2026-04-21)** — `thaw_vllm.langgraph.ChatThaw` wraps ForkPool as a LangChain `BaseChatModel`. Async coalescer detects shared-prefix fan-outs from `Send()` and routes them through `fork_completions` automatically. `pip install thaw-vllm[langgraph]`.
+- [x] **LangGraph integration (v0.4.0, 2026-04-21)** — `thaw_vllm.langgraph.ChatThaw` wraps vLLM + ForkPool as a LangChain `BaseChatModel`; `fork_fanout(llm, prefix, suffix_lists)` is the explicit fork primitive you call from a LangGraph node. H100 + Llama-3.1-8B: 3 rounds × 4 branches, **64.55s → 1.43s → 1.43s** median, all branches coherent. `pip install thaw-vllm[langgraph]`.
 - [ ] Framework-layer RL helpers — TRL / `accelerate` wrappers around `fork_completions()` for tree-GRPO / best-of-N
 - [ ] Rust `thaw-cloud` crate — concurrent ranged GETs for S3 restore at NIC line-rate (restore gap, deprioritized behind fork-layer distribution)
 - [ ] GPUDirect Storage support
