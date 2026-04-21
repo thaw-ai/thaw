@@ -61,6 +61,15 @@
       "timestamp_utc": "2026-04-21T02:09:05+00:00",
       "headline": "ForkPool RL shape: init_pool 22.3s amortized over 5 rounds × 4 branches at 0.88s median/round (1.16s first round)",
       "note": "Pre-warmed subprocess workers hold the 8B engine with real weights; each fork snapshots KV only. Per-round cost drops from ~340s cold-boot to sub-second. All rounds 4/4 non-empty and divergent. Reproduces with `pip install thaw-native>=0.3.1 thaw-vllm>=0.3.2`."
+    },
+    {
+      "file": "2026-04-21_h100_pr_review_langgraph.json",
+      "demo": "pr_review_langgraph",
+      "pod": "RunPod H100 80 GB HBM3",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "timestamp_utc": "2026-04-21T19:59:00+00:00",
+      "headline": "LangGraph PR-review fan-out: 3 rounds × 4 specialist reviews, 64.55s round 0 → 1.43s rounds 1-2 (45× amortized) via fork_fanout inside a StateGraph node",
+      "note": "ChatThaw + fork_fanout wraps ForkPool behind a LangChain BaseChatModel. All 3 rounds produce coherent, perspective-specific reviews (security / performance / style / correctness) of the same PR diff. Reproduces with `pip install thaw-vllm[langgraph]>=0.4.0 thaw-native>=0.3.1` + `python demos/pr_review_langgraph.py --mode thaw --rounds 3 --dtype float16`. IMPORTANT: --dtype must match parent + pool (both float16 default) — mismatch corrupts snapshotted KV cache."
     }
   ]
 }

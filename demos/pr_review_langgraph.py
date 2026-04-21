@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
 pr_review_langgraph — A LangGraph multi-agent workflow that fans out a PR to
-four specialist reviewers in parallel. Demonstrates ChatThaw as a drop-in
-replacement for any LangChain chat model, with the coalescer routing the
-Send() fan-out through ForkPool for prefill skip.
+four specialist reviewers in parallel, comparing ChatThaw's ``fork_fanout``
+primitive against the standard N-concurrent-ainvoke baseline.
 
 What the demo shows
 -------------------
-A single reviewer node receives a PR diff + ~8K-token codebase context,
-then Send()s to four specialist nodes (security / performance / style /
-correctness). Each specialist generates a perspective-specific review
-against the full shared context. With the --mode thaw path, the four
-concurrent ainvoke calls are coalesced and routed through ForkPool; with
---mode baseline, each call is routed single-path through the same parent
-vLLM (equivalent to ChatOpenAI against a vLLM OpenAI-compatible server).
+Both modes ingest the same PR diff + ~8K-token codebase context and produce
+four perspective-specific reviews (security / performance / style /
+correctness). Only the LangGraph wiring differs.
+
+  * --mode baseline uses the familiar ``Send()`` fan-out: four specialist
+    nodes each call ``llm.ainvoke`` concurrently. The same vLLM parent
+    handles all four via continuous batching — equivalent to pointing
+    ChatOpenAI at a vLLM OpenAI-compatible server on this box.
+
+  * --mode thaw calls ``fork_fanout(llm, prefix, suffix_lists)`` directly
+    from a single reviewer node. The parent's KV cache over the shared
+    prefix is snapshotted once; four ForkPool workers pick up from the
+    fork point and diverge. That is the primitive the fork_pool_rl
+    receipt measures.
 
 Produces a timing JSON receipt suitable for side-by-side comparison.
 
@@ -118,6 +124,24 @@ class ReviewState(TypedDict, total=False):
     perspective_prompt: str
 
 
+def _shared_prefix_messages(state: ReviewState) -> list:
+    # System prompt + context+diff — identical across all four specialists.
+    # Everything after this point is what differs, so this is what gets
+    # snapshotted once and reused by every fork worker.
+    return [
+        SystemMessage(content=SHARED_SYSTEM_PROMPT),
+        HumanMessage(
+            content=(
+                f"Codebase context:\n\n{state['context']}\n\n"
+                f"---\n\nPull request diff:\n\n{state['diff']}"
+            )
+        ),
+    ]
+
+
+# ---- baseline: Send()-based per-specialist fan-out -----------------------
+
+
 def _fanout(state: ReviewState):
     return [
         Send(
@@ -135,19 +159,7 @@ def _fanout(state: ReviewState):
 
 async def _specialist(state: ReviewState, config):
     llm = config["configurable"]["llm"]
-    # Messages are structured so the shared prefix is as long as possible: the
-    # system prompt and the "here's the context+diff" human message are IDENTICAL
-    # across all four specialists. Only the final human message (the perspective
-    # ask) differs. That's what lets the coalescer detect a shared prefix and
-    # route through the fork path.
-    messages = [
-        SystemMessage(content=SHARED_SYSTEM_PROMPT),
-        HumanMessage(
-            content=(
-                f"Codebase context:\n\n{state['context']}\n\n"
-                f"---\n\nPull request diff:\n\n{state['diff']}"
-            )
-        ),
+    messages = _shared_prefix_messages(state) + [
         HumanMessage(content=state["perspective_prompt"]),
     ]
     t0 = time.perf_counter()
@@ -164,11 +176,45 @@ async def _specialist(state: ReviewState, config):
     }
 
 
-def _build_graph():
+# ---- thaw: single-node fork_fanout --------------------------------------
+
+
+async def _fork_reviewer(state: ReviewState, config):
+    from thaw_vllm.langgraph import fork_fanout
+
+    llm = config["configurable"]["llm"]
+    prefix = _shared_prefix_messages(state)
+    suffix_lists = [
+        [HumanMessage(content=prompt)] for _, prompt in SPECIALISTS
+    ]
+    t0 = time.perf_counter()
+    texts = await fork_fanout(llm, prefix, suffix_lists)
+    t1 = time.perf_counter()
+    # One wall-time across the batch — per-branch timing is a pool-internal
+    # detail, so record the aggregate on every branch for the receipt.
+    wall = t1 - t0
+    return {
+        "reviews": [
+            {
+                "perspective": name,
+                "review": text,
+                "elapsed_s": wall,
+            }
+            for (name, _prompt), text in zip(SPECIALISTS, texts)
+        ]
+    }
+
+
+def _build_graph(mode: str):
     g = StateGraph(ReviewState)
-    g.add_node("specialist", _specialist)
-    g.add_conditional_edges(START, _fanout, ["specialist"])
-    g.add_edge("specialist", END)
+    if mode == "thaw":
+        g.add_node("fork_reviewer", _fork_reviewer)
+        g.add_edge(START, "fork_reviewer")
+        g.add_edge("fork_reviewer", END)
+    else:
+        g.add_node("specialist", _specialist)
+        g.add_conditional_edges(START, _fanout, ["specialist"])
+        g.add_edge("specialist", END)
     return g.compile()
 
 
@@ -177,14 +223,28 @@ def _build_graph():
 # ---------------------------------------------------------------------------
 
 
+def _llm_extra_kwargs(args) -> dict:
+    # IMPORTANT: parent and pool workers MUST boot with the same dtype.
+    # vLLM's default for Llama-3.1 is bf16 (the model's native dtype);
+    # ForkPool's default is float16. If they mismatch, KV cache blocks
+    # snapshotted from the parent get reinterpreted bit-for-bit in the
+    # worker and round 0 decodes fine but round 1+ produces token-salad.
+    extra: dict = {"dtype": args.dtype}
+    if args.max_model_len:
+        extra["max_model_len"] = args.max_model_len
+    return extra
+
+
 def _build_thaw_llm(args):
+    # thaw mode uses fork_fanout() directly, which bypasses the coalescer
+    # and the fork-auto-route threshold. We still construct the parent LLM
+    # + ForkPool via ChatThaw so the rest of the demo (tokenizer access,
+    # sampling params) stays uniform.
     from thaw_vllm.langgraph import ChatThaw
 
-    extra = {"max_model_len": args.max_model_len} if args.max_model_len else {}
+    extra = _llm_extra_kwargs(args)
     return ChatThaw(
         model=args.model,
-        fork_window_ms=args.fork_window_ms,
-        fork_min_prefix_tokens=args.fork_min_prefix_tokens,
         workers=args.workers,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -197,16 +257,15 @@ def _build_thaw_llm(args):
 
 
 def _build_baseline_llm(args):
-    # Baseline: same underlying parent vLLM, but force every call through the
-    # single-invoke path by setting an unreachable prefix threshold. Equivalent
-    # to ChatOpenAI pointed at a vLLM OpenAI-compatible server on this box.
+    # Baseline: same ChatThaw parent, no ForkPool usage — the Send()-based
+    # graph dispatches N concurrent ainvoke calls that land in the coalescer's
+    # batched-singles path. Equivalent to ChatOpenAI pointed at a vLLM OpenAI-
+    # compatible server on this box.
     from thaw_vllm.langgraph import ChatThaw
 
-    extra = {"max_model_len": args.max_model_len} if args.max_model_len else {}
+    extra = _llm_extra_kwargs(args)
     return ChatThaw(
         model=args.model,
-        fork_window_ms=args.fork_window_ms,
-        fork_min_prefix_tokens=10 ** 9,
         workers=args.workers,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -255,7 +314,7 @@ async def _run(args) -> dict:
     else:
         raise ValueError(f"unknown mode: {args.mode}")
 
-    graph = _build_graph()
+    graph = _build_graph(args.mode)
 
     rounds: list[RoundResult] = []
     for r in range(args.rounds):
@@ -423,8 +482,12 @@ def _parse_args():
     # 80 GB H100 we have ~4 GiB after weights. 16384 covers an 8K-token context +
     # reasonable response headroom, which is all this demo uses.
     p.add_argument("--max-model-len", type=int, default=16384)
-    p.add_argument("--fork-window-ms", type=float, default=2.0)
-    p.add_argument("--fork-min-prefix-tokens", type=int, default=500)
+    # Parent and pool workers MUST share a dtype — KV cache bytes snapshotted
+    # from the parent are memcpy'd into worker block tensors, so any reinterpret
+    # (bf16→fp16 or vice versa) corrupts rounds 1+. ForkPool's default is float16;
+    # vLLM's default for Llama-3.1 is bf16. Pinning here keeps both in lockstep.
+    p.add_argument("--dtype", default="float16",
+                   help="dtype for BOTH parent and pool workers — must match")
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--max-tokens", type=int, default=256)
     p.add_argument("--json-out", default=None)

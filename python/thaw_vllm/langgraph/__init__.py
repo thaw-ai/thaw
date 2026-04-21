@@ -1,9 +1,16 @@
 """LangGraph / LangChain integration for thaw's fork primitive.
 
-Exposes :class:`ChatThaw`, a drop-in replacement for chat models like
-``ChatOpenAI`` that transparently routes LangGraph ``Send`` fan-out through
-``ForkPool.fork_completions``. The "change one import line, N× faster" story
-for agent workflows with shared parent context.
+Exposes two entry points:
+
+  * :class:`ChatThaw` — a LangChain ``BaseChatModel`` backed by a vLLM
+    parent + thaw ``ForkPool``. Behaves like any other chat model for
+    single and concurrent ``ainvoke`` calls.
+
+  * :func:`fork_fanout` — the explicit fork primitive. Given a parent
+    message list and a list of divergent suffix message lists, snapshots
+    the parent's cached prefix once and fans out to the pool. This is
+    what the fork_pool_rl receipt measures and the recommended way to
+    get sub-second amortized fork latency inside a LangGraph node.
 
 Requires langchain-core and langgraph (``pip install thaw-vllm[langgraph]``).
 The coalescer module itself has no langchain dependency and can be reused

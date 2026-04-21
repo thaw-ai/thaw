@@ -77,6 +77,10 @@ def test_chat_thaw_defaults():
     assert llm.model == "test-model"
     assert llm.fork_window_ms == 2.0
     assert llm.fork_min_prefix_tokens == 500
+    # Auto-fork is OFF by default: concurrent submits dispatch via batched
+    # singles. Users opt in with enable_auto_fork=True or call fork_fanout()
+    # directly for guaranteed fork dispatch.
+    assert llm.enable_auto_fork is False
     assert llm.workers == 4
     assert llm.tensor_parallel_size == 1
     assert llm._llm is None
@@ -256,6 +260,11 @@ async def test_do_fork_warms_prefix_and_calls_fork_completions():
 
 @pytest.mark.asyncio
 async def test_do_fork_skips_rewarm_on_same_prefix():
+    """Warming a fully-cached prompt on vLLM V1 forces ≥1 token of prefill
+    by uncaching the last block — the re-cached block then has a different
+    hash than the one snapshotted to the pool workers, producing garbage
+    output on round 2+. Dedup by prefix hash keeps the warm as a one-time
+    setup cost."""
     llm = ChatThaw(model="m")
     fake_llm = install_fake_plumbing(llm)
 
@@ -267,13 +276,12 @@ async def test_do_fork_skips_rewarm_on_same_prefix():
         suffixes_a = [[HumanMessage(content="q1")], [HumanMessage(content="q2")]]
         await llm._do_fork(prefix, suffixes_a, sampling_params="sp")
 
-        # First call should have triggered a warm (single call to parent.generate).
         warm_calls_after_first = fake_llm.generate.call_count
 
         suffixes_b = [[HumanMessage(content="q3")], [HumanMessage(content="q4")]]
         await llm._do_fork(prefix, suffixes_b, sampling_params="sp")
 
-        # Second call with the same prefix should NOT re-warm.
+        # Second round with the same prefix should NOT re-warm.
         assert fake_llm.generate.call_count == warm_calls_after_first
 
 
@@ -295,6 +303,39 @@ def test_make_sampling_params_overrides_via_kwargs():
     llm = ChatThaw(model="m", temperature=0.5)
     sp = llm._make_sampling_params(temperature=0.9, max_tokens=50)
     assert sp is not None
+
+
+# ---------------------------------------------------------------------------
+# enable_auto_fork wiring — coalescer threshold gate
+# ---------------------------------------------------------------------------
+
+
+def _fake_load_sync(llm: ChatThaw) -> None:
+    """Stand-in for the real _load_sync so we can exercise _load_async without
+    spinning up vLLM. Sets exactly the attributes _load_sync would set."""
+    llm._llm = MagicMock()
+    llm._tokenizer = FakeTokenizer()
+    llm._pool = MagicMock()
+
+
+@pytest.mark.asyncio
+async def test_load_async_pins_fork_threshold_when_auto_fork_off():
+    # Default path: auto-fork off → coalescer's effective threshold is
+    # unreachable by the token counter, so every flush falls through to the
+    # batched-singles path regardless of how long the shared prefix is.
+    llm = ChatThaw(model="m")
+    with patch.object(ChatThaw, "_load_sync", _fake_load_sync):
+        await llm._load_async()
+    assert llm._coalescer is not None
+    assert llm._coalescer._min_prefix_tokens >= 10**12
+
+
+@pytest.mark.asyncio
+async def test_load_async_uses_fork_min_when_auto_fork_on():
+    llm = ChatThaw(model="m", enable_auto_fork=True, fork_min_prefix_tokens=321)
+    with patch.object(ChatThaw, "_load_sync", _fake_load_sync):
+        await llm._load_async()
+    assert llm._coalescer._min_prefix_tokens == 321
 
 
 # ---------------------------------------------------------------------------

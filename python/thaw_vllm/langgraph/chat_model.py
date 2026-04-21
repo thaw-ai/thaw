@@ -2,10 +2,12 @@
 
 Usage with LangGraph::
 
-    from thaw_vllm.langgraph import ChatThaw
+    from thaw_vllm.langgraph import ChatThaw, fork_fanout
     llm = ChatThaw(model="meta-llama/Llama-3.1-8B-Instruct")
-    # drop into a StateGraph; Send() fan-out is routed through ForkPool
-    # via the async coalescer.
+    # Drop into a StateGraph; concurrent Send() calls are auto-batched
+    # via vLLM continuous batching. For guaranteed fork dispatch, call
+    # fork_fanout(llm, parent_messages, suffix_message_lists) — that is
+    # the supported primitive and what the fork_pool_rl receipt measures.
 
 Requires ``langchain-core>=0.3``. Install with ``pip install thaw-vllm[langgraph]``.
 """
@@ -64,9 +66,16 @@ class ChatThaw(BaseChatModel):
     """LangChain chat model backed by a vLLM parent + thaw ForkPool.
 
     Single ``ainvoke`` calls route through the parent LLM. Concurrent calls
-    (e.g. from a LangGraph ``Send`` fan-out) are buffered for ``fork_window_ms``,
-    and groups sharing a ≥``fork_min_prefix_tokens`` message prefix are routed
-    through ``ForkPool.fork_completions`` for prefill skip.
+    (e.g. from a LangGraph ``Send`` fan-out) are buffered for ``fork_window_ms``
+    and dispatched as one batched ``LLM.generate`` call (continuous batching).
+
+    To route qualifying batches through ``ForkPool.fork_completions`` for
+    prefill-skip amortization, set ``enable_auto_fork=True``. Auto-routing is
+    off by default because the interaction between repeated identical prefixes
+    and vLLM's V1 prefix cache still has a rough edge that corrupts output on
+    round 2+ of a fan-out. Users who want guaranteed fork dispatch for a known
+    parent/suffix split should call ``fork_fanout()`` directly — that entry
+    point is the primitive and is what the fork_pool_rl receipt measures.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
@@ -75,6 +84,7 @@ class ChatThaw(BaseChatModel):
 
     fork_window_ms: float = 2.0
     fork_min_prefix_tokens: int = 500
+    enable_auto_fork: bool = False
     workers: int = 4
 
     tensor_parallel_size: int = 1
@@ -107,6 +117,7 @@ class ChatThaw(BaseChatModel):
             "model": self.model,
             "fork_window_ms": self.fork_window_ms,
             "fork_min_prefix_tokens": self.fork_min_prefix_tokens,
+            "enable_auto_fork": self.enable_auto_fork,
             "workers": self.workers,
             "tensor_parallel_size": self.tensor_parallel_size,
         }
@@ -164,12 +175,18 @@ class ChatThaw(BaseChatModel):
                 return
             await asyncio.to_thread(self._load_sync)
             self._warmed_lock = asyncio.Lock()
+            # When auto-fork is off, pin min_prefix_tokens to a value the
+            # token_counter can never produce, so the coalescer always falls
+            # through to the batched-singles path.
+            effective_min = (
+                self.fork_min_prefix_tokens if self.enable_auto_fork else 10**12
+            )
             self._coalescer = ForkCoalescer(
                 fork_callable=self._do_fork,
                 single_callable=self._do_single,
                 batch_single_callable=self._do_singles,
                 window_ms=self.fork_window_ms,
-                min_prefix_tokens=self.fork_min_prefix_tokens,
+                min_prefix_tokens=effective_min,
                 token_counter=self._count_tokens,
             )
 
@@ -223,9 +240,7 @@ class ChatThaw(BaseChatModel):
             self._messages_to_prompt(list(prefix_messages) + list(suffix))
             for suffix in suffix_message_lists
         ]
-
         await self._ensure_prefix_warm(prefix_prompt)
-
         results = await asyncio.to_thread(
             fork_completions,
             self._llm,
@@ -259,6 +274,10 @@ class ChatThaw(BaseChatModel):
         return [o.outputs[0].text for o in outputs]
 
     async def _ensure_prefix_warm(self, prefix_prompt: str) -> None:
+        # fork_completions snapshots the parent's cached prefix blocks, so
+        # the parent must have prefilled the prefix at least once before
+        # the first fork. Dedup by prefix hash so repeated fan-outs on the
+        # same parent do not re-run prefill.
         from vllm import SamplingParams
 
         prefix_hash = _prefix_hash(prefix_prompt)
@@ -341,12 +360,12 @@ async def fork_fanout(
     stop: Optional[List[str]] = None,
     **sampling_overrides: Any,
 ) -> List[str]:
-    """Explicit fork fan-out. Bypasses the coalescer.
+    """Explicit fork fan-out — guaranteed fork dispatch, bypasses the coalescer.
 
-    Use this when you already have a parent message list and a set of suffix
-    message lists and want to guarantee the fork path is taken. LangGraph
-    users typically don't need this — ``ChatThaw`` via the coalescer handles
-    Send fan-out automatically.
+    This is the supported primitive: the caller tells us the parent/suffix
+    split, we snapshot the parent's cached prefix once and fan out to the
+    ForkPool. It is what the fork_pool_rl receipt measures and what YC-demo
+    workloads should route through.
     """
     await llm._load_async()
     sp = llm._make_sampling_params(stop=stop, **sampling_overrides)

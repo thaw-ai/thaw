@@ -3,12 +3,13 @@
 Runs the real LangGraph StateGraph against a ChatThaw whose fork and single
 callables are stubbed. Verifies that:
 
-  1. The graph compiles and a fan-out produces the expected 4 Send branches.
-  2. With the shared-system-prompt structure, the coalescer detects a common
-     message prefix and routes the 4 concurrent calls through the fork path.
-  3. Each specialist receives its own perspective instruction.
+  1. ``--mode thaw`` — the graph compiles to a single reviewer node that
+     calls ``fork_fanout`` once with four divergent suffixes, and each
+     prompt carries the right perspective instruction.
+  2. ``--mode baseline`` — the Send-based fan-out produces four specialist
+     branches, none of which hit the fork path.
 
-GPU is not required; ForkPool.fork_completions is patched.
+GPU is not required; fork_completions + parent.generate are patched.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ import importlib  # noqa: E402
 _thaw_fork_module = importlib.import_module("thaw_vllm.fork")  # noqa: E402
 
 from thaw_vllm.langgraph.chat_model import ChatThaw  # noqa: E402
+from thaw_vllm.langgraph.coalescer import ForkCoalescer  # noqa: E402
 
 
 def _install_fake_plumbing(llm: ChatThaw):
@@ -46,36 +48,34 @@ def _install_fake_plumbing(llm: ChatThaw):
     llm._tokenizer = FakeTokenizer()
     llm._pool = MagicMock()
     llm._warmed_lock = asyncio.Lock()
+    # Install a ready coalescer so ChatThaw short-circuits _load_async.
+    llm._coalescer = ForkCoalescer(
+        fork_callable=llm._do_fork,
+        single_callable=llm._do_single,
+        batch_single_callable=llm._do_singles,
+        window_ms=llm.fork_window_ms,
+        min_prefix_tokens=10**12,  # auto-fork off; matches production default
+        token_counter=llm._count_tokens,
+    )
+
+    async def _noop_load():
+        return None
+
+    llm._load_async = _noop_load
     return fake_llm
 
 
-async def test_pr_review_graph_triggers_fork_path():
-    """The LangGraph fan-out should coalesce into one fork call with 4 suffixes."""
+@pytest.mark.asyncio
+async def test_pr_review_graph_thaw_mode_uses_fork_fanout():
+    """thaw mode dispatches a single fork_fanout with 4 divergent suffixes."""
     from demos.pr_review_langgraph import (
         _DEFAULT_CONTEXT,
         _DEFAULT_DIFF,
         _build_graph,
     )
-    from thaw_vllm.langgraph.coalescer import ForkCoalescer
 
-    llm = ChatThaw(
-        model="test-model",
-        fork_window_ms=10.0,
-        fork_min_prefix_tokens=50,
-    )
+    llm = ChatThaw(model="test-model")
     _install_fake_plumbing(llm)
-    # Pre-install the coalescer (normally done in _load_async, which we skip).
-    llm._coalescer = ForkCoalescer(
-        fork_callable=llm._do_fork,
-        single_callable=llm._do_single,
-        window_ms=llm.fork_window_ms,
-        min_prefix_tokens=llm.fork_min_prefix_tokens,
-        token_counter=llm._count_tokens,
-    )
-    # Skip the expensive _load_async by pre-asserting already loaded.
-    async def _noop_load():
-        return None
-    llm._load_async = _noop_load
 
     fork_call_log = []
 
@@ -83,7 +83,7 @@ async def test_pr_review_graph_triggers_fork_path():
         fork_call_log.append({"n_prompts": len(prompts), "prompts": prompts, "pool": pool})
         return [MagicMock(text=f"fork-review-{i}") for i in range(len(prompts))]
 
-    graph = _build_graph()
+    graph = _build_graph("thaw")
 
     with patch.object(
         _thaw_fork_module, "fork_completions", side_effect=fake_fork_completions
@@ -102,12 +102,10 @@ async def test_pr_review_graph_triggers_fork_path():
     perspectives = {r["perspective"] for r in result["reviews"]}
     assert perspectives == {"security", "performance", "style", "correctness"}
 
-    # The coalescer should have batched them into one fork call with 4 prompts
+    # Exactly one fork_fanout → one fork_completions call with all 4 suffixes
     assert len(fork_call_log) == 1
     assert fork_call_log[0]["n_prompts"] == 4
 
-    # Each prompt should contain a different perspective instruction (verifies
-    # that the suffix messages actually differ per branch)
     prompts = fork_call_log[0]["prompts"]
     assert any("security" in p for p in prompts)
     assert any("performance" in p for p in prompts)
@@ -115,35 +113,28 @@ async def test_pr_review_graph_triggers_fork_path():
     assert any("correctness" in p for p in prompts)
 
 
-async def test_pr_review_graph_baseline_mode_uses_single_path():
-    """With fork_min_prefix_tokens unreachable, all calls fall through to single."""
+@pytest.mark.asyncio
+async def test_pr_review_graph_baseline_mode_uses_send_fanout():
+    """baseline mode dispatches 4 per-specialist ainvokes — no fork_completions."""
     from demos.pr_review_langgraph import (
         _DEFAULT_CONTEXT,
         _DEFAULT_DIFF,
         _build_graph,
     )
-    from thaw_vllm.langgraph.coalescer import ForkCoalescer
+    from tests.test_langgraph_chat_model import FakeRequestOutput
 
-    llm = ChatThaw(
-        model="test-model",
-        fork_window_ms=10.0,
-        fork_min_prefix_tokens=10 ** 9,  # baseline mode
-    )
+    llm = ChatThaw(model="test-model")
     fake_parent = _install_fake_plumbing(llm)
-    fake_parent.generate.return_value = [
-        MagicMock(outputs=[MagicMock(text="baseline-review")])
-    ]
 
-    llm._coalescer = ForkCoalescer(
-        fork_callable=llm._do_fork,
-        single_callable=llm._do_single,
-        window_ms=llm.fork_window_ms,
-        min_prefix_tokens=llm.fork_min_prefix_tokens,
-        token_counter=llm._count_tokens,
-    )
-    async def _noop_load():
-        return None
-    llm._load_async = _noop_load
+    # _do_singles passes all N prompts in one generate() call and expects N
+    # outputs back. _do_single passes one and expects one. Adapt the fake
+    # to the shape of the first positional arg.
+    def _variable_length_generate(prompt_or_prompts, *args, **kwargs):
+        if isinstance(prompt_or_prompts, list):
+            return [FakeRequestOutput(f"baseline-{i}") for i in range(len(prompt_or_prompts))]
+        return [FakeRequestOutput("baseline")]
+
+    fake_parent.generate.side_effect = _variable_length_generate
 
     fork_call_log = []
 
@@ -151,7 +142,7 @@ async def test_pr_review_graph_baseline_mode_uses_single_path():
         fork_call_log.append(True)
         return []
 
-    graph = _build_graph()
+    graph = _build_graph("baseline")
 
     with patch.object(
         _thaw_fork_module, "fork_completions", side_effect=fake_fork_completions
@@ -162,8 +153,7 @@ async def test_pr_review_graph_baseline_mode_uses_single_path():
         )
 
     assert len(result["reviews"]) == 4
-    # fork_completions should NOT have been called (threshold unreachable)
+    # fork_completions must not run in baseline mode
     assert fork_call_log == []
-    # Each branch goes through parent.generate via _do_single
-    # (4 branches; the first call also did a warm for the prefix hash cache)
-    assert fake_parent.generate.call_count >= 4
+    # Every specialist branch drives parent.generate via _do_single or _do_singles
+    assert fake_parent.generate.call_count >= 1
