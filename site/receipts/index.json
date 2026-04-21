@@ -60,7 +60,7 @@
       "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
       "timestamp_utc": "2026-04-21T02:09:05+00:00",
       "headline": "ForkPool RL shape: init_pool 22.3s amortized over 5 rounds × 4 branches at 0.88s median/round (1.16s first round)",
-      "note": "Pre-warmed subprocess workers hold the 8B engine with real weights; each fork snapshots KV only. Per-round cost drops from ~340s cold-boot to sub-second. All rounds 4/4 non-empty and divergent. Requires thaw-native source build until 0.3.1 — PyPI 0.3.0 wheel has a WC-pinned-freeze regression that caps throughput at 50 MB/s."
+      "note": "Pre-warmed subprocess workers hold the 8B engine with real weights; each fork snapshots KV only. Per-round cost drops from ~340s cold-boot to sub-second. All rounds 4/4 non-empty and divergent. Reproduces with `pip install thaw-native>=0.3.1 thaw-vllm>=0.3.2`."
     }
   ]
 }
