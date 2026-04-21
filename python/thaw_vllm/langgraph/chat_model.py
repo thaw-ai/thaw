@@ -116,6 +116,13 @@ class ChatThaw(BaseChatModel):
     def _load_sync(self) -> None:
         if self._coalescer is not None:
             return
+        # The fork path (thaw_vllm.fork_completions → _assert_prefix_caching_enabled)
+        # needs in-proc scheduler access to snapshot the block pool, which V1 MP's
+        # subprocess EngineCoreClient does not expose. setdefault, so a caller who
+        # explicitly wants V1 MP on can still override (they just can't fork).
+        import os
+        os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
         from vllm import LLM
         from thaw_vllm.fork_pool import ForkPool
 
