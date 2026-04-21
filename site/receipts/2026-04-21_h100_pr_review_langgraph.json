@@ -1,0 +1,49 @@
+{
+  "mode": "thaw",
+  "model": "meta-llama/Llama-3.1-8B-Instruct",
+  "rounds": 3,
+  "branches_per_round": 4,
+  "wall_times_s": [
+    64.54675379395485,
+    1.4284684183076024,
+    1.4289484601467848
+  ],
+  "wall_median_s": 1.4289484601467848,
+  "wall_min_s": 1.4284684183076024,
+  "wall_max_s": 64.54675379395485,
+  "round_details": [
+    {
+      "round": 0,
+      "wall_s": 64.54675379395485,
+      "per_branch_s": [
+        64.54387561697513,
+        64.54387561697513,
+        64.54387561697513,
+        64.54387561697513
+      ],
+      "sample_review": "Here are 3-5 security findings for this PR:\n\n1. **SQL injection vulnerability**: In the `get_user` method, the query is constructed by concatenating a string with the user ID, which is vulnerable to SQL injection attacks. The corrected code"
+    },
+    {
+      "round": 1,
+      "wall_s": 1.4284684183076024,
+      "per_branch_s": [
+        1.426452207379043,
+        1.426452207379043,
+        1.426452207379043,
+        1.426452207379043
+      ],
+      "sample_review": "Security Findings:\n\n1. **Raw SQL Injection Vulnerability**: In the `get_user` method, the `query` variable is constructed using string concatenation with user input (`user_id`). This is a potential SQL injection vulnerability. Instead, use "
+    },
+    {
+      "round": 2,
+      "wall_s": 1.4289484601467848,
+      "per_branch_s": [
+        1.4265610668808222,
+        1.4265610668808222,
+        1.4265610668808222,
+        1.4265610668808222
+      ],
+      "sample_review": "Security Findings:\n\n1. **SQL Injection Vulnerability in `get_user` method**: The `get_user` method uses a raw SQL query with string formatting to fetch a user by ID. This is a SQL injection vulnerability because the `user_id` parameter is n"
+    }
+  ]
+}

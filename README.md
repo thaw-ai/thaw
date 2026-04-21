@@ -260,8 +260,24 @@ for epoch in range(num_epochs):
     ...                              # PPO / best-of-N / tree-GRPO step
 ```
 
+### LangGraph: change one import, fork happens under the hood
+
+Agent frameworks erase the "N branches share a system prompt" signal — by the time `Send()` fans out, each branch looks independent. `thaw_vllm.langgraph.ChatThaw` reconstructs it: concurrent calls within a short window are coalesced, and groups sharing a ≥500-token prefix route through `ForkPool.fork_completions` automatically.
+
+```python
+# Drop-in LangChain chat model. Install with: pip install thaw-vllm[langgraph]
+from thaw_vllm.langgraph import ChatThaw
+
+llm = ChatThaw(model="meta-llama/Llama-3.1-8B-Instruct", workers=4)
+
+# Build a StateGraph with a Send() fan-out as you normally would.
+# When N specialists hit the model simultaneously with a shared prefix,
+# they get coalesced into one fork call — not N independent prefills.
+```
+
 Working demos ship in the repo:
 
+- [`demos/pr_review_langgraph.py`](demos/pr_review_langgraph.py) — 4-specialist PR review (security / performance / style / correctness) against a shared diff + codebase context. `--mode thaw` routes the fan-out through ForkPool; `--mode baseline` runs the same graph against a stock single-call path for side-by-side timing.
 - [`demos/rl_rollout_simulator.py`](demos/rl_rollout_simulator.py) — Tree-GRPO-style pivot resampling. Builds a reasoning trunk, forks 16 rollouts, scores each. The table it prints is the arithmetic HuggingFace's async-RL survey said no library ships: `num_rollouts × prefill → num_rollouts × memcpy`.
 - [`demos/parallel_agents.py`](demos/parallel_agents.py) — 8 parallel coding approaches from one reasoning trunk, ranked by pytest pass rate. The Cursor/Cognition reframe.
 - [`demos/agent_fork.py`](demos/agent_fork.py) — the original end-to-end session-clone demo used in the launch video.
@@ -463,7 +479,7 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 - [x] **Pipelined-freeze parity with restore** — `freeze_pipelined_to_file` with chunked WC-pinned buffers + O_DIRECT lands in v0.2.1 (2026-04-17). End-to-end 9.57 GB/s on H100 SXM (vs 3.82 GB/s in v0.1.2); pure-Rust 19.62 GB/s on synthetic buffer.
 - [x] **ForkPool (v0.3.2, 2026-04-20)** — pre-warmed subprocess pool: boot N vLLM engines once with real weights, each `fork_completions()` call snapshots KV only. 22.3s init → 0.88s median/round on H100 8B (4 branches × 64 tokens). First sub-second fork amortization on real hardware.
 - [x] **Plain-pinned freeze fix (thaw-native v0.3.1, 2026-04-20)** — v0.3.0 wheel capped freeze at 50 MB/s because CPU reads of WC-pinned memory are ~100× slower than plain pinned. Fresh `pip install` now pulls the fast path by default.
-- [ ] LangGraph integration — expose `fork()` as a graph-level primitive in the framework teams already use
+- [x] **LangGraph integration (v0.4.0, 2026-04-21)** — `thaw_vllm.langgraph.ChatThaw` wraps ForkPool as a LangChain `BaseChatModel`. Async coalescer detects shared-prefix fan-outs from `Send()` and routes them through `fork_completions` automatically. `pip install thaw-vllm[langgraph]`.
 - [ ] Framework-layer RL helpers — TRL / `accelerate` wrappers around `fork_completions()` for tree-GRPO / best-of-N
 - [ ] Rust `thaw-cloud` crate — concurrent ranged GETs for S3 restore at NIC line-rate (restore gap, deprioritized behind fork-layer distribution)
 - [ ] GPUDirect Storage support

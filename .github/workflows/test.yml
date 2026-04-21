@@ -58,9 +58,14 @@ jobs:
         # small and avoiding a 2+ GB torch download per matrix entry.
         # fastapi is real (test_pool.py imports it at runtime) and moto
         # is real (test_cloud.py drives an in-process fake S3).
+        # langchain-core and langgraph are real (ChatThaw subclasses
+        # BaseChatModel, and demos/pr_review_langgraph.py imports langgraph
+        # StateGraph at module level — neither can be meaningfully mocked).
+        # pytest-asyncio is needed for the async coalescer tests.
         run: |
           python -m pip install --upgrade pip
-          pip install pytest httpx fastapi 'moto>=5.0' boto3
+          pip install pytest httpx fastapi 'moto>=5.0' boto3 \
+            'langchain-core>=0.3' 'langgraph>=0.2' 'pytest-asyncio>=0.23'
 
       - name: Run pytest
         run: pytest tests/ -q
