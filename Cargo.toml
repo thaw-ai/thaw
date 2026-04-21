@@ -37,7 +37,7 @@ edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
 repository = "https://github.com/matteso1/thaw"
-authors = ["Nils Matteson <nilsmatteson@icloud.com>"]
+authors = ["Nils Matteson <nils@thaw.sh>"]
 
 # Release profile tuning. `opt-level = 3` is the Rust default for release,
 # but we also turn on LTO (link-time optimization) and a single codegen
