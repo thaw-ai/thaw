@@ -1,17 +1,43 @@
 # thaw
 
+[![PyPI](https://img.shields.io/pypi/v/thaw-vllm.svg)](https://pypi.org/project/thaw-vllm/)
+[![Python](https://img.shields.io/pypi/pyversions/thaw-vllm.svg)](https://pypi.org/project/thaw-vllm/)
+[![Tests](https://github.com/thaw-ai/thaw/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/thaw-ai/thaw/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Downloads](https://static.pepy.tech/badge/thaw-vllm)](https://pepy.tech/project/thaw-vllm)
+
 **The fork primitive for LLM inference.**
 
 Snapshot a running AI agent — weights, KV cache, scheduler state, and prefix-hash table — into a single durable file. Restore it. Fork it N times. Each child shares the parent's state at the fork point and diverges from there. `git branch` for live GPU inference.
 
+```bash
+pip install thaw-vllm
+```
+
+### The receipt — ForkPool, 2026-04-20
+
+Pre-warmed subprocess pool holds the engine once; each `fork_completions()` call snapshots KV only.
+
+**Llama-3.1-8B on H100 80 GB PCIe, 5 rounds × 4 branches × 64 tokens:**
+
+| Stage | Time |
+|---|---|
+| `init_pool` (one-time — workers boot with real weights) | 22.3s |
+| First fork round | 1.16s |
+| **Median fork round** | **0.88s** |
+
+Per-round cost: ~340s cold-boot → sub-second (≈400× amortized). All rounds 4/4 non-empty and divergent. Bit-identical at the fork boundary. The first sub-second fork amortization proof on real hardware.
+
+Reproducer: [`demos/fork_pool_rl.py`](demos/fork_pool_rl.py) · Receipt JSON: [`site/receipts/2026-04-20_h100_fork_pool_rl.json`](site/receipts/2026-04-20_h100_fork_pool_rl.json)
+
+### What you can build with it
+
 - **Agent branching** — fork a conversation into N parallel hypotheses mid-reasoning, run them concurrently, pick the winner.
-- **RL rollouts** — collapse `num_rollouts × prefill_time` to `num_rollouts × memcpy_time`. Real dollars on $100k+/month training budgets.
+- **RL rollouts** — collapse `num_rollouts × prefill_time` to `num_rollouts × memcpy_time`. Real dollars on $100k+/month training budgets. HuggingFace's 2026 async-RL survey: *"no current async library supports [KV pivot resampling] out of the box."* This ships it.
 - **Parallel coding agents** — turn "8 agents exploring 8 solutions" from an expensive re-prefill tax into a fast primitive.
 - **Session migration** — move a live inference session between GPUs, pods, or data centers without losing state.
 
-Works with vLLM and SGLang. Open source (MIT). `pip install thaw-vllm[all]`.
-
-Also: the fastest model loader we know of — 17.2× cold-start speedup on Llama-3-70B (2× A100 TP=2), 0.29s hot-swap at 55 GB/s on H100 SXM. Because forking a live session requires it.
+Works with vLLM and SGLang. Open source (MIT).
 
 <p align="center">
   <a href="https://youtu.be/zPmuvSKWrSY">
@@ -21,11 +47,11 @@ Also: the fastest model loader we know of — 17.2× cold-start speedup on Llama
   <sub><b>▶ 75-second demo</b> — <a href="https://youtu.be/zPmuvSKWrSY">Hot-swap LLMs in 0.29s</a> · <a href="https://youtu.be/aLF3lIuBeBY">How it works (4m)</a> · <a href="https://youtu.be/Fzk8sVGgi1g">Fork a running agent (2m 20s)</a></sub>
 </p>
 
-## The fork primitive
+## Inside a single fork
 
-Every other "fast model loading" tool restores weights. thaw restores the full state of a live inference session — and that's what makes fork possible. No other tool does this:
+ForkPool amortizes setup cost across repeated forks. A single one-shot fork — full state restore from cold, end-to-end — looks like this:
 
-**Agent fork — clone a running AI session (Llama-3-8B-Instruct, H100 SXM):**
+**Clone a running AI session (Llama-3-8B-Instruct, H100 SXM):**
 
 | Operation | Time | Notes |
 |-----------|------|-------|
@@ -34,7 +60,9 @@ Every other "fast model loading" tool restores weights. thaw restores the full s
 | Total restore (incl. vLLM init) | **7.3s** | vs 16s normal cold start |
 | Fork 3 parallel completions | **1.6s avg** | All share the 872-token cached prefix |
 
-> The KV restore number, the fork-completion numbers, and the "skip prefill" claim are what matters here. The 14.79 GB/s weight restore is a warm-cache measurement (the freeze that ran 5s earlier left the 16 GB file in Linux's page cache); cold-cache NVMe hits 14.12 GB/s (next table), so the agent-fork flow lands in the same range either way.
+Every other "fast model loading" tool restores weights only. thaw restores the full state of a live inference session — weights + KV blocks + prefix-hash table + scheduler state — and that's what makes fork work.
+
+> The 14.79 GB/s weight restore is warm-cache (the freeze that ran 5s earlier left the 16 GB file in Linux's page cache). Cold-cache NVMe hits 14.12 GB/s (next table), so the agent-fork flow lands in the same range either way.
 >
 > Watch the 2m20s agent-fork demo: **[Fork a running LLM agent](https://youtu.be/Fzk8sVGgi1g)**. Bit-identical output verified against the parent's next-token distribution.
 
@@ -197,6 +225,25 @@ handle yourself:
 with thaw_vllm.fork(llm, include_weights=True) as handle:
     handle.save("s3://my-bucket/session-abc123/")       # ship it anywhere
     stats = handle.hydrate(other_llm)                    # or restore in-place
+```
+
+For RL training loops — boot the engine pool once, fork repeatedly at sub-second cost:
+
+```python
+from thaw_vllm import ForkPool
+
+pool = ForkPool()
+pool.init_pool(                      # one-time, ~22s on H100 8B
+    model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    workers=4,
+    preload_weights=True,            # workers hold real weights; fork swaps only KV
+)
+
+for epoch in range(num_epochs):
+    # Each call reuses the warm pool — ~0.88s median per round on H100 8B
+    results = thaw_vllm.fork_completions(llm, prompts, sampling_params, pool=pool)
+    rewards = score(results)
+    ...                              # PPO / best-of-N / tree-GRPO step
 ```
 
 Working demos ship in the repo:
@@ -400,7 +447,11 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 - [x] **Slot-warm hot-swap** — persistent `cudaHostRegister` per pool slot, 0.29s / 55 GB/s model swap on H100 SXM (`thaw serve`)
 - [x] **Cloud snapshot storage (S3)** — `thaw freeze --output s3://...` and `thaw serve --snapshot s3://...`, validated H100 SXM 2026-04-17 (15 GiB freeze+upload in 5.6s, 229s single-stream S3 download — ranged-GET crate is next)
 - [x] **Pipelined-freeze parity with restore** — `freeze_pipelined_to_file` with chunked WC-pinned buffers + O_DIRECT lands in v0.2.1 (2026-04-17). End-to-end 9.57 GB/s on H100 SXM (vs 3.82 GB/s in v0.1.2); pure-Rust 19.62 GB/s on synthetic buffer.
-- [ ] Rust `thaw-cloud` crate — concurrent ranged GETs for S3 restore at NIC line-rate
+- [x] **ForkPool (v0.3.2, 2026-04-20)** — pre-warmed subprocess pool: boot N vLLM engines once with real weights, each `fork_completions()` call snapshots KV only. 22.3s init → 0.88s median/round on H100 8B (4 branches × 64 tokens). First sub-second fork amortization on real hardware.
+- [x] **Plain-pinned freeze fix (thaw-native v0.3.1, 2026-04-20)** — v0.3.0 wheel capped freeze at 50 MB/s because CPU reads of WC-pinned memory are ~100× slower than plain pinned. Fresh `pip install` now pulls the fast path by default.
+- [ ] LangGraph integration — expose `fork()` as a graph-level primitive in the framework teams already use
+- [ ] Framework-layer RL helpers — TRL / `accelerate` wrappers around `fork_completions()` for tree-GRPO / best-of-N
+- [ ] Rust `thaw-cloud` crate — concurrent ranged GETs for S3 restore at NIC line-rate (restore gap, deprioritized behind fork-layer distribution)
 - [ ] GPUDirect Storage support
 
 ## Design
