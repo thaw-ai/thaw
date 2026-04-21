@@ -14,6 +14,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+# `thaw_vllm.__init__` does `from thaw_vllm.fork import fork, fork_completions`,
+# which overrides the auto-submodule attribute — so `thaw_vllm.fork` resolves
+# to the `fork` function, not the submodule. Both `from thaw_vllm import fork`
+# and `import thaw_vllm.fork as Z` end up bound to the function on CPython.
+# Grab the real submodule out of sys.modules and patch.object against it.
+import importlib
+_thaw_fork_module = importlib.import_module("thaw_vllm.fork")
 from thaw_vllm.langgraph.chat_model import (
     ChatThaw,
     _message_to_hf,
@@ -194,8 +201,8 @@ async def test_do_fork_warms_prefix_and_calls_fork_completions():
         MagicMock(text="fork-b"),
         MagicMock(text="fork-c"),
     ]
-    with patch(
-        "thaw_vllm.fork.fork_completions", return_value=fake_results
+    with patch.object(
+        _thaw_fork_module, "fork_completions", return_value=fake_results
     ) as mock_fork:
         prefix = [SystemMessage(content="shared system prompt")]
         suffixes = [
@@ -217,8 +224,9 @@ async def test_do_fork_skips_rewarm_on_same_prefix():
     llm = ChatThaw(model="m")
     fake_llm = install_fake_plumbing(llm)
 
-    with patch(
-        "thaw_vllm.fork.fork_completions", return_value=[MagicMock(text="x"), MagicMock(text="y")]
+    with patch.object(
+        _thaw_fork_module, "fork_completions",
+        return_value=[MagicMock(text="x"), MagicMock(text="y")],
     ):
         prefix = [SystemMessage(content="same prefix")]
         suffixes_a = [[HumanMessage(content="q1")], [HumanMessage(content="q2")]]
@@ -265,8 +273,8 @@ async def test_fork_fanout_bypasses_coalescer():
     install_fake_plumbing(llm)
 
     fake_results = [MagicMock(text="a"), MagicMock(text="b")]
-    with patch(
-        "thaw_vllm.fork.fork_completions", return_value=fake_results
+    with patch.object(
+        _thaw_fork_module, "fork_completions", return_value=fake_results
     ) as mock_fork:
         results = await fork_fanout(
             llm,

@@ -13,14 +13,25 @@ GPU is not required; ForkPool.fork_completions is patched.
 from __future__ import annotations
 
 import asyncio
+import pathlib
 import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Make demos/ importable
-sys.path.insert(0, "demos")
+# Put the repo root on sys.path so `demos.` and `tests.` resolve as namespace
+# packages. `testpaths=tests` + `pythonpath=python` in pyproject doesn't cover
+# these, and the prior `sys.path.insert(0, "demos")` shadowed the intended
+# `demos.pr_review_langgraph` dotted import.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
 
+
+import importlib  # noqa: E402
+
+# `thaw_vllm.__init__` re-exports the `fork` function, shadowing the submodule
+# attribute. Grab the real submodule from sys.modules for patch.object.
+_thaw_fork_module = importlib.import_module("thaw_vllm.fork")  # noqa: E402
 
 from thaw_vllm.langgraph.chat_model import ChatThaw  # noqa: E402
 
@@ -74,8 +85,8 @@ async def test_pr_review_graph_triggers_fork_path():
 
     graph = _build_graph()
 
-    with patch(
-        "thaw_vllm.fork.fork_completions", side_effect=fake_fork_completions
+    with patch.object(
+        _thaw_fork_module, "fork_completions", side_effect=fake_fork_completions
     ):
         result = await graph.ainvoke(
             {
@@ -142,8 +153,8 @@ async def test_pr_review_graph_baseline_mode_uses_single_path():
 
     graph = _build_graph()
 
-    with patch(
-        "thaw_vllm.fork.fork_completions", side_effect=fake_fork_completions
+    with patch.object(
+        _thaw_fork_module, "fork_completions", side_effect=fake_fork_completions
     ):
         result = await graph.ainvoke(
             {"diff": _DEFAULT_DIFF, "context": _DEFAULT_CONTEXT, "reviews": []},
