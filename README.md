@@ -1,9 +1,13 @@
+<p align="center">
+  <img src="logo.png" alt="thaw" width="220">
+</p>
+
 # thaw
 
 [![PyPI](https://img.shields.io/pypi/v/thaw-vllm.svg)](https://pypi.org/project/thaw-vllm/)
 [![Python](https://img.shields.io/pypi/pyversions/thaw-vllm.svg)](https://pypi.org/project/thaw-vllm/)
 [![Tests](https://github.com/thaw-ai/thaw/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/thaw-ai/thaw/actions/workflows/test.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Downloads](https://static.pepy.tech/badge/thaw-vllm)](https://pepy.tech/project/thaw-vllm)
 
 **The fork primitive for LLM inference.**
@@ -47,7 +51,7 @@ Reproducer: [`demos/fork_pool_rl.py`](demos/fork_pool_rl.py) · Receipt JSON: [`
 
 **Not for you yet.** Single-prompt serving — one request, one response, no shared trunk, no repeated forking — vLLM / SGLang alone are fine. thaw earns its keep when you fork ≥2 children from shared state or hot-swap between sessions.
 
-Works with vLLM and SGLang. Open source (MIT).
+Works with vLLM and SGLang. Open source (Apache-2.0).
 
 <p align="center">
   <a href="https://youtu.be/zPmuvSKWrSY">
@@ -426,7 +430,7 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 | **Fork a running session into N divergent children** | **✅** | — | — | — | — | — | — |
 | Cross-process / cross-pod restore | ✅ | ✅ (reload) | ✅ (reload) | — (same process) | ✅ | partial | claimed |
 | Works on commodity hardware (no GDS / RAID) | ✅ | — | ✅ | ✅ | ✅ | ✅ | — |
-| Open source, pip-installable | ✅ (MIT) | ✅ (Apache) | ✅ | ✅ | — | ✅ | — |
+| Open source, pip-installable | ✅ (Apache-2.0) | ✅ (Apache) | ✅ | ✅ | — | ✅ | — |
 
 **What thaw uniquely owns:**
 
@@ -480,4 +484,4 @@ thaw is built by a Madison, WI team — Nils Matteson (founder), Matt Yu, Karan 
 
 ## License
 
-MIT
+Apache License 2.0 — see [LICENSE](./LICENSE).

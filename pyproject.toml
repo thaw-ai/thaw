@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thaw-vllm"
-version = "0.3.2"
-description = "Fast snapshot/restore for LLM inference. 17x faster cold starts, multi-GPU tensor parallel, KV cache snapshots. Supports vLLM and SGLang."
+version = "0.3.3"
+description = "The fork primitive for LLM inference. Snapshot a running session — weights + KV cache + scheduler state — and hydrate it into N divergent children that skip prefill. For RL rollouts, parallel coding agents, agent branching. Supports vLLM and SGLang."
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 requires-python = ">=3.9"
 authors = [
     {name = "Nils Matteson"},
@@ -16,7 +16,7 @@ keywords = ["llm", "inference", "vllm", "sglang", "gpu", "cold-start", "kv-cache
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
