@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thaw-vllm"
-version = "0.3.3"
+version = "0.4.0"
 description = "The fork primitive for LLM inference. Snapshot a running session — weights + KV cache + scheduler state — and hydrate it into N divergent children that skip prefill. For RL rollouts, parallel coding agents, agent branching. Supports vLLM and SGLang."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -30,8 +30,9 @@ vllm = ["vllm>=0.18"]
 sglang = ["sglang>=0.4,<0.6"]
 serve = ["vllm>=0.18", "fastapi", "uvicorn"]
 cloud = ["boto3>=1.26"]
-test = ["pytest>=7.0", "httpx", "moto>=5.0"]
-all = ["vllm>=0.18", "fastapi", "uvicorn", "thaw-native>=0.3.1", "boto3>=1.26"]
+langgraph = ["langchain-core>=0.3", "langgraph>=0.2"]
+test = ["pytest>=7.0", "pytest-asyncio>=0.23", "httpx", "moto>=5.0", "langchain-core>=0.3"]
+all = ["vllm>=0.18", "fastapi", "uvicorn", "thaw-native>=0.3.1", "boto3>=1.26", "langchain-core>=0.3", "langgraph>=0.2"]
 
 [project.scripts]
 thaw = "thaw_vllm.cli:main"
@@ -53,3 +54,4 @@ include = ["thaw_common*", "thaw_vllm*", "thaw_sglang*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["python"]
+asyncio_mode = "auto"
