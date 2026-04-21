@@ -33,8 +33,11 @@ Usage
 
 Sizing
 ------
-Parent LLM at gpu_memory_utilization=0.25 + 4 pool workers at 0.15 each
-fits on a single 80 GB H100. For smaller GPUs use --workers 2.
+Parent LLM at gpu_memory_utilization=0.25 (20 GB) + 2 pool workers at 0.30
+each (24 GB) fits on an 80 GB H100: total 0.85 reserved, each worker has
+enough to hold the 15 GB 8B model plus KV headroom. For smaller GPUs drop
+to --workers 1 and/or raise --gpu-memory-utilization so the parent still
+has room for KV after loading weights.
 """
 from __future__ import annotations
 
@@ -405,10 +408,16 @@ def _parse_args():
     p.add_argument("--diff-file", default=None)
     p.add_argument("--context-file", default=None)
     p.add_argument("--rounds", type=int, default=3)
-    p.add_argument("--workers", type=int, default=4)
+    # Default worker count is 2 (not the 4 reviewer personas) because each
+    # worker holds its own full copy of the model weights on the same GPU.
+    # 2 workers × 0.30 mem util = 0.60, parent = 0.25 → 0.85 total on 80 GB.
+    # The 4 specialist branches are still served — two forks, each producing
+    # two completions from the same parent KV snapshot. Bump --workers on
+    # larger GPUs (e.g. 2× H100) if you want one worker per branch.
+    p.add_argument("--workers", type=int, default=2)
     p.add_argument("--tensor-parallel-size", type=int, default=1)
     p.add_argument("--gpu-memory-utilization", type=float, default=0.25)
-    p.add_argument("--worker-gpu-memory-utilization", type=float, default=0.15)
+    p.add_argument("--worker-gpu-memory-utilization", type=float, default=0.30)
     # Cap the parent vLLM's max_model_len so KV cache fits at gpu_memory_utilization=0.25.
     # Llama 3.1's native 131K context needs 16 GiB of KV by itself; at 0.25 of an
     # 80 GB H100 we have ~4 GiB after weights. 16384 covers an 8K-token context +

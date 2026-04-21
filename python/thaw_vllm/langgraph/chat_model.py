@@ -114,7 +114,7 @@ class ChatThaw(BaseChatModel):
     # ---- lazy init ---------------------------------------------------------
 
     def _load_sync(self) -> None:
-        if self._llm is not None:
+        if self._coalescer is not None:
             return
         from vllm import LLM
         from thaw_vllm.fork_pool import ForkPool
@@ -126,29 +126,37 @@ class ChatThaw(BaseChatModel):
             "enforce_eager": self.enforce_eager,
             **self.extra_llm_kwargs,
         }
-        self._llm = LLM(model=self.model, **llm_kwargs)
-        self._tokenizer = self._llm.get_tokenizer()
-
-        pool = ForkPool()
-        pool_kwargs = {
-            "workers": self.workers,
-            "preload_weights": True,
-            "gpu_memory_utilization": self.worker_gpu_memory_utilization,
-            "tensor_parallel_size": self.tensor_parallel_size,
-            **self.extra_pool_kwargs,
-        }
-        pool.init_pool(model=self.model, **pool_kwargs)
+        # Build parent + pool into locals first; publish them atomically only
+        # after both succeed, so a worker-init failure doesn't leave a partially
+        # loaded ChatThaw whose `self._llm is not None` would fool the guard.
+        llm = LLM(model=self.model, **llm_kwargs)
+        try:
+            pool = ForkPool()
+            pool_kwargs = {
+                "workers": self.workers,
+                "preload_weights": True,
+                "gpu_memory_utilization": self.worker_gpu_memory_utilization,
+                "tensor_parallel_size": self.tensor_parallel_size,
+                **self.extra_pool_kwargs,
+            }
+            pool.init_pool(model=self.model, **pool_kwargs)
+        except Exception:
+            del llm
+            raise
+        self._llm = llm
+        self._tokenizer = llm.get_tokenizer()
         self._pool = pool
 
     async def _load_async(self) -> None:
-        if self._llm is not None:
+        if self._coalescer is not None:
             return
         if self._init_lock is None:
             self._init_lock = asyncio.Lock()
         async with self._init_lock:
-            if self._llm is not None:
+            if self._coalescer is not None:
                 return
             await asyncio.to_thread(self._load_sync)
+            self._warmed_lock = asyncio.Lock()
             self._coalescer = ForkCoalescer(
                 fork_callable=self._do_fork,
                 single_callable=self._do_single,
@@ -156,7 +164,6 @@ class ChatThaw(BaseChatModel):
                 min_prefix_tokens=self.fork_min_prefix_tokens,
                 token_counter=self._count_tokens,
             )
-            self._warmed_lock = asyncio.Lock()
 
     # ---- prompt + sampling helpers ----------------------------------------
 
