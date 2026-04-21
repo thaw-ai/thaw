@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thaw-vllm"
-version = "0.3.1"
+version = "0.3.2"
 description = "Fast snapshot/restore for LLM inference. 17x faster cold starts, multi-GPU tensor parallel, KV cache snapshots. Supports vLLM and SGLang."
 readme = "README.md"
 license = {text = "MIT"}
@@ -25,13 +25,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-native = ["thaw-native>=0.3.0"]
+native = ["thaw-native>=0.3.1"]
 vllm = ["vllm>=0.18"]
 sglang = ["sglang>=0.4,<0.6"]
 serve = ["vllm>=0.18", "fastapi", "uvicorn"]
 cloud = ["boto3>=1.26"]
 test = ["pytest>=7.0", "httpx", "moto>=5.0"]
-all = ["vllm>=0.18", "fastapi", "uvicorn", "thaw-native>=0.3.0", "boto3>=1.26"]
+all = ["vllm>=0.18", "fastapi", "uvicorn", "thaw-native>=0.3.1", "boto3>=1.26"]
 
 [project.scripts]
 thaw = "thaw_vllm.cli:main"
