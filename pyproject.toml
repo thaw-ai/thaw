@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thaw-vllm"
-version = "0.4.0"
+version = "0.5.0"
 description = "The fork primitive for LLM inference. Snapshot a running session — weights + KV cache + scheduler state — and hydrate it into N divergent children that skip prefill. For RL rollouts, parallel coding agents, agent branching. Supports vLLM and SGLang."
 readme = "README.md"
 license = {text = "Apache-2.0"}

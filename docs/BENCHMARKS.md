@@ -184,50 +184,16 @@ The 14.79 GB/s number above is RAM-to-GPU throughput for a file that was left in
 
 Always verify storage before benchmarking: `df -h /workspace` (check for `mfs#...` = network) and `dd if=/dev/zero of=/tmp/test bs=1M count=1024 oflag=direct`.
 
-## Multi-GPU Tensor Parallel — 2x A100 SXM 80GB (RunPod)
+## Multi-GPU Tensor Parallel
 
-### Llama-3-70B-Instruct (141 GB fp16, TP=2)
+**Prior 2×A100 "17.2× / 546.5s → 31.8s" number has been removed pending re-measurement.** The value came from a single single-pod run with a full HF download included in the "normal cold start" baseline; a later H100 TP=2 run on current code showed 74.2s → 33.1s (2.24×) with the restore cascade mis-ordered. Cascade fix is in the commit log; re-validation on 2×H100 is on the Tier-1 benchmark matrix. New receipts will land in `site/receipts/` when produced.
 
-**vLLM:** v0.19.0, V1 engine, enforce_eager=True  
-**Backend:** Rust pipelined (double-buffered DMA)  
-**Storage:** /dev/shm (RAM-backed tmpfs — eliminates disk bottleneck)
+Validated today (bit-identical output):
 
-| Phase | Time | Throughput | Notes |
-|-------|------|-----------|-------|
-| Normal vLLM cold start | 546.5s | — | Includes 467s HF download + 53s safetensors loading + 14s KV init |
-| Freeze (TP=2) | 75.0s | 1.88 GB/s | 966 regions, 70.56 GB per rank |
-| **thaw restore (total)** | **31.8s** | — | 10.5s weights + ~7s NCCL/init + 14.5s KV profiling |
-| **Weight restore per rank** | **10.5s** | **6.74 GB/s** | 483 regions, 70.56 GB per rank, parallel across GPUs |
+- 2× A40 TP=2 (Llama-3-8B): V1 MP default path, freeze+restore round-trip PASS (`project_issue3_complete` memory)
+- 2× H100 TP=2 (Llama-3-70B, 2026-04-19): restore 8.55 GB/s per rank, 6.06 GB/s freeze, 74.2s → 33.1s e2e — see `project_70b_h100_bench`
 
-**Speedup: 17.2x** (vs cold start including HF download)  
-**Weight loading speedup: 5.0x** (10.5s vs 53s safetensors, apples-to-apples)  
-**Correctness:** PASS (bit-identical greedy output)
-
-### Llama-3-8B-Instruct (16 GB fp16, TP=2)
-
-**Storage:** /dev/shm (RAM-backed)
-
-| Phase | Time | Throughput | Notes |
-|-------|------|-----------|-------|
-| Normal vLLM cold start | 20.0s | — | Model cached, safetensors from disk |
-| Freeze (TP=2) | 9.3s | 1.73 GB/s | 390 regions, 8.03 GB per rank |
-| **thaw restore (total)** | **13.8s** | — | 1.2s weights + ~10s NCCL/init + 2.8s KV profiling |
-| **Weight restore per rank** | **1.2s** | **6.53 GB/s** | 195 regions, 8.03 GB per rank |
-
-**Speedup: 1.4x** (vLLM overhead dominates for small model — weight loading is only 5% of total time)  
-**Weight loading speedup: 7.4x** (1.2s vs 8.9s safetensors)  
-**Correctness:** PASS
-
-### Why larger models show bigger speedups
-
-On 8B, weight loading is ~45% of total time (8.9s out of 20s). On 70B, it's ~97% (520s out of 546s). thaw accelerates weight loading by 5-7x, so the total speedup scales with how much of the cold start is weight-dominated:
-
-| Model size | Weight % of cold start | thaw speedup |
-|-----------|----------------------|-------------|
-| 8B (TP=2) | ~45% | 1.4x |
-| 70B (TP=2) | ~97% | 17.2x |
-
-This is why thaw's value proposition gets stronger with larger models — exactly the direction the industry is moving.
+For why whole-flow speedup numbers depend heavily on whether HF download is in the baseline, see "Apples-to-apples" notes in `docs/STRATEGY.md`.
 
 ## SGLang — H100 SXM 80GB (RunPod)
 

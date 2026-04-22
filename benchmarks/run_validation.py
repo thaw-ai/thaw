@@ -58,10 +58,61 @@ DEFAULT_MODELS = [
 ]
 
 
+# Named presets for the vLLM RFC #34303 evidence push.
+#
+# Each preset is an ordered list of (model_id, tp, gpu_mem_util) tuples. A
+# preset overrides --models/--tp/--gpu-mem-util on the command line; everything
+# else (--runs, --out-dir, --snapshot) still applies uniformly.
+#
+# rfc-tier1 — the minimal set the RFC cares about: a TP=1 small, a TP=1
+# mid (matching @fergusfinn's H200 table spirit), and a TP=2 large to
+# prove multi-GPU. Enough for a credible "three sizes, three configs"
+# claim. Target: 2× H100 80 GB pod, ~3 hours of runtime at N=5.
+#
+# rfc-tier2 — adds FP8 (Qwen3-14B-FP8) and a dense 70B distill to stress
+# the quantized weight-swizzling edge cases that L2 sleep mode skips.
+# The fp8/fp4-correctness-on-restore gap is exactly what the RFC
+# comment advertises, so we need the receipt.
+#
+# rfc-full — full matrix; ~8 hours at N=5 on 2×H100. Run once right
+# before the RFC reply; don't run during development.
+PRESETS: dict[str, list[tuple[str, int, float | None]]] = {
+    "rfc-tier1": [
+        ("meta-llama/Meta-Llama-3.1-8B-Instruct", 1, None),
+        ("Qwen/Qwen2.5-32B-Instruct",             1, 0.90),
+        ("meta-llama/Meta-Llama-3.1-70B-Instruct", 2, 0.90),
+    ],
+    "rfc-tier2": [
+        ("meta-llama/Meta-Llama-3.1-8B-Instruct", 1, None),
+        ("Qwen/Qwen2.5-32B-Instruct",             1, 0.90),
+        ("Qwen/Qwen3-14B-FP8",                    1, None),
+        ("meta-llama/Meta-Llama-3.1-70B-Instruct", 2, 0.90),
+        ("deepseek-ai/DeepSeek-R1-Distill-Llama-70B", 2, 0.90),
+    ],
+    "rfc-full": [
+        ("meta-llama/Meta-Llama-3.1-8B-Instruct", 1, None),
+        ("meta-llama/Meta-Llama-3.1-8B-Instruct", 2, None),
+        ("Qwen/Qwen2.5-32B-Instruct",             1, 0.90),
+        ("Qwen/Qwen2.5-32B-Instruct",             2, 0.90),
+        ("Qwen/Qwen3-14B-FP8",                    1, None),
+        ("mistralai/Mistral-7B-v0.3",             1, None),
+        ("meta-llama/Meta-Llama-3.1-70B-Instruct", 2, 0.90),
+        ("deepseek-ai/DeepSeek-R1-Distill-Llama-70B", 2, 0.90),
+    ],
+}
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--models", nargs="+", default=DEFAULT_MODELS,
-                   help="Hugging Face model IDs to validate.")
+    p.add_argument("--models", nargs="+", default=None,
+                   help="Hugging Face model IDs to validate. Ignored if "
+                        "--preset is set.")
+    p.add_argument("--preset", choices=sorted(PRESETS.keys()), default=None,
+                   help="Named preset of (model, tp, gpu_mem_util) tuples. "
+                        "Overrides --models/--tp/--gpu-mem-util. Use "
+                        "rfc-tier1 for the minimal RFC evidence push, "
+                        "rfc-tier2 for FP8 + dense-70B-distill coverage, "
+                        "rfc-full for the exhaustive matrix.")
     p.add_argument("--runs", type=int, default=3,
                    help="Runs per model. N=3 is the minimum for a median; "
                         "bump to 5 when a result is CoV-flagged.")
@@ -250,6 +301,14 @@ def run_once(demo: Path, model: str, snapshot: str, json_out: Path,
     return proc.returncode
 
 
+def _expand_matrix(args) -> list[tuple[str, int, float | None]]:
+    """Resolve (model, tp, gpu_mem_util) matrix from preset or CLI flags."""
+    if args.preset:
+        return list(PRESETS[args.preset])
+    models = args.models or DEFAULT_MODELS
+    return [(m, args.tp, args.gpu_mem_util) for m in models]
+
+
 def main():
     args = parse_args()
     demo = find_demo_path(args.demo_path)
@@ -257,6 +316,8 @@ def main():
     out_dir = Path(args.out_dir).resolve()
     runs_dir = out_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
+
+    matrix = _expand_matrix(args)
 
     # Pre-resolve host fingerprint by stealing vllm_demo.hardware_fingerprint.
     # Import lazily so --dry-run works without torch installed.
@@ -270,16 +331,18 @@ def main():
             host_fp = {"probe_error": repr(e)}
 
     agg = {
-        "schema_version": 1,
+        "schema_version": 2,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "host": host_fp,
         "matrix": {
-            "models": args.models,
-            "runs_per_model": args.runs,
+            "preset": args.preset,
+            "entries": [
+                {"model": m, "tp": t, "gpu_mem_util": g}
+                for (m, t, g) in matrix
+            ],
+            "runs_per_entry": args.runs,
             "snapshot_path": args.snapshot,
             "skip_warm": args.skip_warm,
-            "tp": args.tp,
-            "gpu_mem_util": args.gpu_mem_util,
             "extra_args": args.extra_arg,
             "cov_threshold": args.cov_threshold,
         },
@@ -287,16 +350,20 @@ def main():
     }
 
     if args.dry_run:
-        for model in args.models:
+        for model, tp, gmu in matrix:
             for i in range(args.runs):
-                slug = model_slug(model)
+                slug = f"{model_slug(model)}__tp{tp}"
                 jp = runs_dir / f"{slug}-{i+1}.json"
-                lp = runs_dir / f"{slug}-{i+1}.log"
-                print(f"[dry-run] {model} run {i+1}/{args.runs} tp={args.tp} -> {jp}")
+                gmu_s = "-" if gmu is None else f"{gmu:.2f}"
+                print(f"[dry-run] {model} tp={tp} gmu={gmu_s} "
+                      f"run {i+1}/{args.runs} -> {jp}")
         return
 
-    for model in args.models:
-        slug = model_slug(model)
+    for model, tp, gmu in matrix:
+        # Key the aggregate by "model @ tp=N" so a preset that includes the
+        # same model at multiple TP degrees (rfc-full) produces two rows.
+        key = f"{model} @ tp={tp}"
+        slug = f"{model_slug(model)}__tp{tp}"
         reports: list[dict] = []
         failures: list[dict] = []
 
@@ -312,7 +379,7 @@ def main():
             jp = runs_dir / f"{slug}-{i+1}.json"
             lp = runs_dir / f"{slug}-{i+1}.log"
             rc = run_once(demo, model, args.snapshot, jp, lp,
-                          args.skip_warm, args.tp, args.gpu_mem_util,
+                          args.skip_warm, tp, gmu,
                           args.extra_arg)
             if rc != 0 or not jp.exists():
                 failures.append({
@@ -321,7 +388,8 @@ def main():
                     "log": str(lp),
                     "json_written": jp.exists(),
                 })
-                print(f"[warn] {model} run {i+1} FAILED rc={rc}. See {lp}", flush=True)
+                print(f"[warn] {key} run {i+1} FAILED rc={rc}. See {lp}",
+                      flush=True)
                 continue
             try:
                 with jp.open() as fh:
@@ -334,7 +402,10 @@ def main():
             "num_runs": 0, "metrics": {}, "flags": ["no successful runs"],
             "all_outputs_bit_identical": False,
         }
-        agg["models"][model] = {
+        agg["models"][key] = {
+            "model": model,
+            "tp": tp,
+            "gpu_mem_util": gmu,
             "summary": summary,
             "failures": failures,
             "runs": [{"json_path": str(runs_dir / f"{slug}-{i+1}.json")}

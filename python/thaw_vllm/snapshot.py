@@ -105,13 +105,17 @@ def _worker_freeze(worker, base_path, vllm_commit):
 def _worker_restore(worker, base_path, chunk_size_mb):
     """Restore this worker's model shard from its rank-specific snapshot.
 
-    Runs inside a vLLM worker process via collective_rpc. Prefers the
-    O_DIRECT pread pipelined path (fastest for one-shot restore under
-    vLLM — 2.5× over mmap on H100 SXM 2026-04-19), falls back to RAM-
-    mmap then pure-Python region-by-region. The mmap path pays a ~5.6s
-    PTE-walk cost for 16 GB that pread skips entirely; keep it as a
-    safety net and for the amortized warm-mmap scenario.
+    Under TP>1, two ranks issuing O_DIRECT pread concurrently contend for
+    one NVMe controller and degrade aggregate throughput. Prefer RAM-mmap
+    first (shared page cache is read-parallel), fall back to pipelined
+    pread, then pure-Python. Matches TP=1 cascade in loader.py.
     """
+    import os as _os
+    # Per-chunk CRC fold is CPU-serial work on the pread path; on TP>1 it
+    # blocks the other rank's DMA. Safe to skip — magic + region-size
+    # checks still run.
+    _os.environ.setdefault("THAW_VERIFY", "0")
+
     from vllm.distributed import get_tensor_model_parallel_rank
     from thaw_common.snapshot import (
         restore_model_from_ram,
@@ -127,19 +131,19 @@ def _worker_restore(worker, base_path, chunk_size_mb):
     model = worker.model_runner.model
 
     try:
-        stats = restore_model_pipelined(model, rank_path, chunk_size_mb)
-    except Exception as e_pipe:
+        stats = restore_model_from_ram(model, rank_path, chunk_size_mb)
+    except Exception as e_ram:
         fallback_warning(
-            f"_worker_restore(rank={rank}).restore_model_pipelined", e_pipe,
-            dst="restore_model_from_ram",
+            f"_worker_restore(rank={rank}).restore_model_from_ram", e_ram,
+            dst="restore_model_pipelined",
         )
         if strict_mode():
             raise
         try:
-            stats = restore_model_from_ram(model, rank_path, chunk_size_mb)
-        except Exception as e_ram:
+            stats = restore_model_pipelined(model, rank_path, chunk_size_mb)
+        except Exception as e_pipe:
             fallback_warning(
-                f"_worker_restore(rank={rank}).restore_model_from_ram", e_ram,
+                f"_worker_restore(rank={rank}).restore_model_pipelined", e_pipe,
                 dst="restore_model (pure python)",
             )
             if strict_mode():

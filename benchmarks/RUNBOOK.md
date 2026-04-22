@@ -100,10 +100,13 @@ treat warm-cache + pre-staged-RAM as the reliable figures.
 
 ## Step 0 — TP=2 historic re-measurement (on 2× A100 80GB)
 
-The existing site/README cites "17.2× on Llama-3-70B 2× A100 TP=2" from a
-single measurement. Nils's standing rule (`feedback_benchmark_claims`) is
-to only publish numbers re-measured across configs. This step replaces
-that bare 17× with a median + CoV over N≥3 runs.
+The site/README previously cited "17.2× on Llama-3-70B 2× A100 TP=2" from a
+single measurement. That claim has been REMOVED from public surfaces
+(2026-04-22) because a later 2× H100 TP=2 run on current code showed
+74.2s → 33.1s (2.24×) with the restore cascade mis-ordered. The cascade
+flip has landed in `python/thaw_vllm/snapshot.py:_worker_restore` — this
+step re-measures median + CoV over N≥3 runs on the fixed cascade and
+produces the first rfc-tier1 receipt.
 
 ```bash
 # on 2× A100 80GB pod:

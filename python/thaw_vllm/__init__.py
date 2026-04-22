@@ -64,6 +64,7 @@ from thaw_vllm.fork_pool import (
     WorkerDead,
     WorkerProtocolError,
 )
+from thaw_vllm import sleep_mode
 
 # Register load_format="thaw" with vLLM when available.
 # vLLM also auto-discovers this via the `vllm.general_plugins` entrypoint
@@ -166,4 +167,6 @@ __all__ = [
     "WorkerBootTimeout",
     "WorkerDead",
     "WorkerProtocolError",
+    # sleep-mode backend wrapper (vLLM RFC #34303 integration).
+    "sleep_mode",
 ]

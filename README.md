@@ -84,14 +84,6 @@ Every other "fast model loading" tool restores weights only. thaw restores the f
 
 Fork a live inference session only makes sense if restore is fast enough to be a primitive, not a pause. Here's where thaw lands:
 
-**Llama-3-70B-Instruct (141 GB fp16) on 2x A100 SXM 80GB — tensor parallel cold start:**
-
-| Method | Time | Speedup |
-|--------|------|---------|
-| Normal vLLM cold start | 546.5s | 1x |
-| **thaw restore (TP=2)** | **31.8s** | **17.2x** |
-| Weight restore only | 10.5s | 6.74 GB/s per rank |
-
 **Llama-3-8B-Instruct (16 GB fp16) — single GPU, H100 SXM:**
 
 | Method | Time | Throughput | Speedup |
@@ -125,14 +117,15 @@ All paths produce **bit-identical** inference output. KV cache restore preserves
 <details>
 <summary>More GPUs and models</summary>
 
-| GPU | Model | Normal | thaw | Speedup |
-|-----|-------|--------|------|---------|
-| 2x A100 SXM 80GB | Llama-3-70B (TP=2) | 546.5s | 31.8s | **17.2x** |
-| H100 SXM 80GB | Llama-3-8B | 24.8s | 2.6s | **9.7x** |
-| RTX PRO 6000 (Blackwell) | Llama-3-8B | 28.6s | 3.2s | **8.9x** |
-| RTX A6000 | Llama-3-8B | 73.2s | 5.8s | **12.6x** |
+| GPU | Model | Restore | Throughput | Notes |
+|-----|-------|---------|-----------|-------|
+| H100 SXM 80GB | Llama-3-8B | 2.6s | 14.12 GB/s | cold-cache NVMe, one-shot |
+| H100 SXM 80GB | Llama-3-8B | 0.29s | 55 GB/s | slot-warm hot-swap (post one-time pin) |
+| 2× H100 SXM TP=2 | Llama-3-70B | 11.9s | 12.8 GB/s aggregate | restore only; needs cascade-fix pod rerun |
+| RTX PRO 6000 (Blackwell) | Llama-3-8B | 3.2s | ~6 GB/s | PCIe Gen4 link |
+| RTX A6000 | Llama-3-8B | 5.8s | ~3.5 GB/s | |
 
-Larger models show bigger speedups because weight loading dominates more of the total cold start time.
+Numbers are per-pod — freeze-side throughput is gated by the NVMe on that specific instance. Re-measure before citing. Every row verified bit-identical against the parent model output.
 
 </details>
 
@@ -366,7 +359,7 @@ llm = LLM(model="meta-llama/Meta-Llama-3-70B-Instruct", tensor_parallel_size=2, 
 thaw_vllm.freeze_model_tp(llm, "/path/to/weights.thaw")
 # Creates: weights.thaw (rank 0), weights.rank1.thaw (rank 1)
 
-# Restore: 17.2x faster than normal cold start
+# Restore: skip the disk-bottlenecked safetensors load
 llm = thaw_vllm.load("meta-llama/Meta-Llama-3-70B-Instruct", "/path/to/weights.thaw",
                       tensor_parallel_size=2)
 ```
@@ -478,7 +471,7 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 - [x] OpenAI-compatible API server (`thaw serve`)
 - [x] Streaming support in API server (SSE, OpenAI-compatible)
 - [x] **Agent fork demo** — clone a running AI session, fork parallel completions from shared KV cache (full-cycle: 14.79 GB/s restore, 0.135s KV restore on H100 SXM)
-- [x] **Multi-GPU / tensor parallel** — 17.2x speedup on Llama-3-70B with 2x A100 (TP=2), bit-exact correctness verified
+- [x] **Multi-GPU / tensor parallel** — arbitrary TP via `collective_rpc`, bit-exact correctness verified on 2×H100 + 2×A40 TP=2
 - [x] **Engine pool (`thaw serve`)** — pre-warmed vLLM engines with hot model swapping, OpenAI-compatible API, multi-model serving
 - [x] **Pre-built native wheels** — `pip install thaw-vllm[all]`, no Rust toolchain needed
 - [x] **SGLang integration** — class-passthrough loader, freeze + restore, validated on H100 TP=2 (5.0 GB/s)
