@@ -78,6 +78,12 @@ TASK_BRANCHES = [
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default="meta-llama/Meta-Llama-3.1-8B-Instruct")
+    ap.add_argument("--tp", "--tensor-parallel-size", dest="tp", type=int,
+                    default=1,
+                    help="Tensor-parallel degree for both parent engine and "
+                         "each worker. TP>1 needs one GPU per rank per "
+                         "engine (parent + workers), so 2×H100 fits TP=2 "
+                         "parent only; 70B TP=2 fork requires ≥4 GPUs.")
     ap.add_argument("--workers", type=int, default=1,
                     help="Pool size. Each worker holds a full vLLM engine "
                          "on GPU. 80 GB H100 fits parent + 1 worker.")
@@ -94,16 +100,27 @@ def main() -> int:
                          "prefix cache at scale.")
     ap.add_argument("--max-tokens", type=int, default=64)
     ap.add_argument("--max-model-len", type=int, default=12288)
-    ap.add_argument("--gpu-memory-utilization", type=float, default=0.25,
-                    help="Parent engine GPU fraction. 0.25 leaves room "
-                         "for one worker at 0.55 on 80 GB.")
-    ap.add_argument("--worker-gpu-memory", type=float, default=0.55,
-                    help="Each worker's gpu_memory_utilization.")
+    ap.add_argument("--gpu-memory-utilization", type=float, default=None,
+                    help="Parent engine GPU fraction. Default depends on "
+                         "model size: 0.25 for 8B, 0.45 for ≥32B (more GPU "
+                         "needed for weights + KV on larger models).")
+    ap.add_argument("--worker-gpu-memory", type=float, default=None,
+                    help="Each worker's gpu_memory_utilization. Default "
+                         "0.55 for 8B, 0.45 for ≥32B.")
     ap.add_argument("--worker-max-model-len", type=int, default=12288)
     ap.add_argument("--enforce-eager", action="store_true", default=True)
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
+
+    model_lc = args.model.lower()
+    is_large = any(tag in model_lc for tag in (
+        "32b", "34b", "70b", "72b", "405b",
+    ))
+    if args.gpu_memory_utilization is None:
+        args.gpu_memory_utilization = 0.45 if is_large else 0.25
+    if args.worker_gpu_memory is None:
+        args.worker_gpu_memory = 0.45 if is_large else 0.55
 
     if args.branches_per_round > len(TASK_BRANCHES):
         raise SystemExit(
@@ -123,6 +140,7 @@ def main() -> int:
         enforce_eager=args.enforce_eager,
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        tensor_parallel_size=args.tp,
         dtype="float16",
     )
     load_s = time.perf_counter() - t0
@@ -155,6 +173,7 @@ def main() -> int:
         model=args.model,
         workers=args.workers,
         preload_weights=True,
+        tensor_parallel_size=args.tp,
         gpu_memory_utilization=args.worker_gpu_memory,
         max_model_len=args.worker_max_model_len,
         enforce_eager=True,
@@ -279,6 +298,7 @@ def main() -> int:
             ],
             extra={
                 "workers": args.workers,
+                "tensor_parallel_size": args.tp,
                 "rounds": args.rounds,
                 "branches_per_round": args.branches_per_round,
                 "trunk_tokens": trunk_tokens,

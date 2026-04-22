@@ -325,6 +325,15 @@ def main():
         help="gpu_memory_utilization. Raise for larger models (70B TP=2 needs ~0.85).",
     )
     parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=None,
+        help="max_model_len forwarded to vLLM's LLM(). Cap context to bound "
+             "KV-cache allocation when running on pods with tight headroom "
+             "— the default is the model's full context, which needs many "
+             "GiB at Llama-3.1's 131k ceiling.",
+    )
+    parser.add_argument(
         "--_phase3-state",
         default=None,
         help=argparse.SUPPRESS,
@@ -440,6 +449,7 @@ def main():
                 enforce_eager=True,      # skip CUDA graph compilation
                 tensor_parallel_size=tp,
                 gpu_memory_utilization=gpu_mem,  # vLLM doesn't fully free on del
+                max_model_len=args.max_model_len,
             )
             normal_time = time.perf_counter() - t0
             print(f"Normal load time: {normal_time:.1f}s")
@@ -552,6 +562,7 @@ def main():
             enforce_eager=True,
             tensor_parallel_size=tp,
             gpu_memory_utilization=gpu_mem,
+            max_model_len=args.max_model_len,
             load_format="dummy",
         )
         init_time = time.perf_counter() - t0
@@ -625,6 +636,7 @@ def main():
                 enforce_eager=True,
                 tensor_parallel_size=tp,
                 gpu_memory_utilization=gpu_mem,
+            max_model_len=args.max_model_len,
                 load_format="dummy",
             )
             warm_init_time = time.perf_counter() - t0
@@ -696,6 +708,7 @@ def main():
                 enforce_eager=True,
                 tensor_parallel_size=tp,
                 gpu_memory_utilization=gpu_mem,
+            max_model_len=args.max_model_len,
                 load_format="dummy",
             )
             ram_init_time = time.perf_counter() - t0
