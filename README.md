@@ -63,90 +63,48 @@ Works with vLLM and SGLang. Open source (Apache-2.0).
 
 ## Inside a single fork
 
-ForkPool amortizes setup cost across repeated forks. A single one-shot fork — full state restore from cold, end-to-end — looks like this:
+ForkPool amortizes setup cost across repeated forks. Each primitive behind it is receipted individually.
 
-**Clone a running AI session (Llama-3-8B-Instruct, H100 SXM):**
+**Sleep / wake round-trip** (vLLM native `LLM.sleep(level=2)` + `LLM.wake_up()` composed with thaw's snapshot — bit-identical greedy output both sides):
 
-| Operation | Time | Notes |
-|-----------|------|-------|
-| **KV cache restore** | **0.135s** | 65 blocks, 136 MB — prefill eliminated |
-| Weight restore (warm-cache, post-freeze) | 1.1s | 14.79 GB/s |
-| Total restore (incl. vLLM init) | **7.3s** | vs 16s normal cold start |
-| Fork 3 parallel completions | **1.6s avg** | All share the 872-token cached prefix |
+| Config | Sleep | Wake | Snapshot | `CuMemAllocator` freed | Receipt |
+|---|---|---|---|---|---|
+| Llama-3.1-8B, 1× H100 SXM, TP=1 | **3.4s** | **11.1s** | 16 GB, 195 regions | 45.38 GiB | [`sleep_mode_8b_tp1.json`](site/receipts/2026-04-22_rfc/sleep_mode_8b_tp1.json) |
+| Llama-3.1-70B, 2× H100 SXM, TP=2 | **16.1s** | **53.6s** | 141 GB, 966 regions | 72.67 GiB/rank (145 GiB total) | [`sleep_mode_70b_tp2.json`](site/receipts/2026-04-22_rfc/sleep_mode_70b_tp2.json) |
+
+**Slot-warm hot-swap** (`thaw serve` with a persisted pinned mmap, H100 SXM Llama-3-8B): one-time `cudaHostRegister` pin ~6s, then **0.29s / 55 GB/s** per reload (86% of PCIe Gen5 line rate). Reproducer: [`bench_slot_warm.py`](bench_slot_warm.py), correctness: [`bench_slot_warm_correctness.py`](bench_slot_warm_correctness.py). Extrapolates to ~2.5s hot-swap for a 70B at 140 GB.
 
 Every other "fast model loading" tool restores weights only. thaw restores the full state of a live inference session — weights + KV blocks + prefix-hash table + scheduler state — and that's what makes fork work.
 
-> The 14.79 GB/s weight restore is warm-cache (the freeze that ran 5s earlier left the 16 GB file in Linux's page cache). Cold-cache NVMe hits 14.12 GB/s (next table), so the agent-fork flow lands in the same range either way.
+> Numbers are per-pod; freeze-side throughput is NVMe-bound (not code-bound). Re-measure on your own pod before citing as a ceiling. Methodology: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 >
-> Watch the 2m20s agent-fork demo: **[Fork a running LLM agent](https://youtu.be/Fzk8sVGgi1g)**. Bit-identical output verified against the parent's next-token distribution.
-
-## Speed benchmarks (why fork is viable)
-
-Fork a live inference session only makes sense if restore is fast enough to be a primitive, not a pause. Here's where thaw lands:
-
-**Llama-3-8B-Instruct (16 GB fp16) — single GPU, H100 SXM:**
-
-| Method | Time | Throughput | Speedup |
-|--------|------|-----------|---------|
-| Normal vLLM cold start | 24.8s | — | 1x |
-| **thaw restore (cold-cache NVMe)** | **2.6s** | 14.12 GB/s | **9.7x** |
-| thaw restore (warm-cache) | 2.5s | 13.99 GB/s | 9.9x |
-| **thaw freeze (end-to-end, v0.2.1)** | **1.7s** | **9.57 GB/s** | 2.4x over v0.1.2 |
-| Freeze (pure Rust, 16 GiB synthetic) | 0.82s | 19.62 GB/s | — |
-
-**Hot model swap (`thaw serve`, H100 SXM, Llama-3-8B-Instruct, 16 GB fp16):**
-
-| Reload # | Time | Throughput | Backend |
-|----------|------|-----------|---------|
-| 0 (cold, one-time pin) | 6.40s | — | `rust_pipelined_pinned_mmap` |
-| 1 | **0.29s** | **55.0 GB/s** | `rust_pipelined_pinned_mmap` |
-| 2 | **0.29s** | **55.1 GB/s** | `rust_pipelined_pinned_mmap` |
-| 3 | **0.29s** | **55.1 GB/s** | `rust_pipelined_pinned_mmap` |
-| 4 | **0.29s** | **55.1 GB/s** | `rust_pipelined_pinned_mmap` |
-
-> `thaw serve` pins the snapshot mmap once when a pool slot warms up (~6s for 16 GB — the one-time `cudaHostRegister` cost), then reuses that pinned buffer on every subsequent swap. Steady-state = pure PCIe Gen5 DMA at 86% of theoretical peak. Extrapolates to **~2.5s hot-swap for Llama-70B** (140 GB). Bench: [`bench_slot_warm.py`](bench_slot_warm.py), correctness: [`bench_slot_warm_correctness.py`](bench_slot_warm_correctness.py).
->
-> Cold-cache measurement verified with `vmtouch -e` (0% resident pages before restore, checked via `mincore`). fio parallel read on the same file confirms the NVMe ceiling. See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for methodology.
->
-> **Freeze runs on the same pipelined path as restore** (v0.2.1, 2026-04-17). Double-buffered WC-pinned memory, two CUDA streams, O_DIRECT writes. End-to-end 9.57 GB/s on H100 SXM; pure-Rust pipeline on synthetic 16 GiB buffer hits 19.62 GB/s (78% of PCIe Gen5 line rate).
->
-> A pre-staged RAM path (mmap + `cudaHostRegister`) is implemented but gated off by default (`THAW_ZEROCOPY_MMAP=1`). `cudaHostRegister` is O(pages) — pinning a 16 GB mmap costs ~7s, which dominates one-shot restore. The path exists for `thaw serve`, where registration is amortized.
+> A pre-staged RAM path (mmap + `cudaHostRegister`) exists behind `THAW_ZEROCOPY_MMAP=1`. `cudaHostRegister` is O(pages) — pinning a 16 GB mmap costs ~7s, so the path is only a win when amortized across many restores (what `thaw serve` does by persisting the pin on each slot).
 
 All paths produce **bit-identical** inference output. KV cache restore preserves prefix cache across cold starts — new requests skip prefill entirely.
-
-<details>
-<summary>More GPUs and models</summary>
-
-| GPU | Model | Restore | Throughput | Notes |
-|-----|-------|---------|-----------|-------|
-| H100 SXM 80GB | Llama-3-8B | 2.6s | 14.12 GB/s | cold-cache NVMe, one-shot |
-| H100 SXM 80GB | Llama-3-8B | 0.29s | 55 GB/s | slot-warm hot-swap (post one-time pin) |
-| 2× H100 SXM TP=2 | Llama-3-70B | 11.9s | 12.8 GB/s aggregate | restore only; needs cascade-fix pod rerun |
-| RTX PRO 6000 (Blackwell) | Llama-3-8B | 3.2s | ~6 GB/s | PCIe Gen4 link |
-| RTX A6000 | Llama-3-8B | 5.8s | ~3.5 GB/s | |
-
-Numbers are per-pod — freeze-side throughput is gated by the NVMe on that specific instance. Re-measure before citing. Every row verified bit-identical against the parent model output.
-
-</details>
 
 ## How it works
 
 **Fork** is a composition of four primitives: freeze weights, freeze KV cache, freeze scheduler state, restore all three into a fresh process. None of that was possible at GPU speeds before thaw.
 
-```
-A running vLLM engine:
-  [weights 16 GB] + [KV cache N blocks] + [scheduler state + prefix-hash table]
-                             │
-                             ▼ thaw.freeze_model + thaw.freeze_kv_cache
-                             │
-                    one durable artifact on disk (or S3)
-                             │
-          ┌──────────────────┼──────────────────┐
-          ▼                  ▼                  ▼
-    child process 1    child process 2    child process N
-    [same weights]     [same weights]     [same weights]
-    [same KV state]    [same KV state]    [same KV state]
-    diverges here →    diverges here →    diverges here →
+```mermaid
+flowchart TB
+    A["Running vLLM engine<br/>weights (16 GB) + KV blocks + prefix-hash table + scheduler state"]
+    A -- "thaw.freeze_model<br/>+ thaw.freeze_kv_cache" --> B["Durable artifact<br/>(.thaw + .thawkv on disk or S3)"]
+    B -- "pipelined CUDA DMA<br/>(double-buffered, O_DIRECT)" --> C1["Child engine 1<br/>same weights + KV"]
+    B -- "pipelined CUDA DMA" --> C2["Child engine 2<br/>same weights + KV"]
+    B -- "pipelined CUDA DMA" --> C3["Child engine N<br/>same weights + KV"]
+    C1 --> D1[diverges here →]
+    C2 --> D2[diverges here →]
+    C3 --> D3[diverges here →]
+
+    classDef src fill:#1e293b,stroke:#64748b,color:#f1f5f9
+    classDef art fill:#0f172a,stroke:#38bdf8,color:#e0f2fe
+    classDef child fill:#134e4a,stroke:#2dd4bf,color:#ccfbf1
+    classDef diverge fill:none,stroke:none,color:#94a3b8
+    class A src
+    class B art
+    class C1,C2,C3 child
+    class D1,D2,D3 diverge
 ```
 
 **Freeze** captures the full engine state into two binary files: `.thaw` (weights) and `.thawkv` (KV blocks + prefix-hash table + scheduler metadata).
@@ -154,11 +112,68 @@ A running vLLM engine:
 **Restore** initializes a fresh vLLM engine with dummy weights (fast — no disk I/O), overwrites them from the snapshot via double-buffered pipelined DMA through pinned host memory, then rebuilds the prefix-cache block table from the `.thawkv` sidecar. Two CUDA streams overlap PCIe transfers with disk reads. New requests matching the restored prefix skip prefill entirely.
 
 Three restore modes:
-- **Disk**: reads snapshot from NVMe with O_DIRECT, bypassing the kernel page cache. Throughput limited by NVMe bandwidth — on H100 SXM NVMe this hits 14 GB/s with the Rust pipelined path, saturating the drive.
+- **Disk**: reads snapshot from NVMe with O_DIRECT, bypassing the kernel page cache. Throughput is NVMe-bound; re-measure per pod before citing a ceiling.
 - **Pre-staged RAM**: snapshot already in memory (tmpfs, shared memory, or mmapped with page cache warm). The full zero-copy path (mmap + `cudaHostRegister`) is implemented behind `THAW_ZEROCOPY_MMAP=1`, but the one-time registration cost makes it a win only when amortized across many restores.
 - **Slot-warm hot-swap (`thaw serve`)**: when a pool slot warms up, `thaw serve` pins the snapshot mmap once (~6s `cudaHostRegister` for 16 GB) and persists the pinned handle on the slot. Every subsequent model swap into that slot reuses the pinned buffer and runs as pure PCIe DMA — 0.29s at 55 GB/s for an 8B model on H100 SXM.
 
 **KV cache snapshots** are the hard part. vLLM's prefix-cache hash table maps token-hash → block-id, and the scheduler assumes those block assignments are live. thaw serializes the block contents, the hash table, and the scheduler's view of which blocks are cached. On restore, the block data is DMA'd back to GPU and the hash table is rebuilt — so a request whose prefix was cached in the parent immediately hits cache in the child. Nobody else does this.
+
+### Sleep-mode integration (vLLM RFC #34303)
+
+`thaw_vllm.sleep_mode` composes thaw's freeze/restore around vLLM's native `LLM.sleep(level=2)` + `LLM.wake_up()` — not a parallel path: `sleep()` freezes *then* lets vLLM's `CuMemAllocator` free the GPU memory; `wake_up()` re-allocates the tensor storage *then* thaw populates it. Requires `enable_sleep_mode=True` at LLM construction (strict-mode gate).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as user code
+    participant TS as thaw_vllm.sleep_mode
+    participant T as thaw (freeze/restore_model_tp)
+    participant V as vLLM (LLM.sleep / wake_up)
+    participant CMA as CuMemAllocator (GPU memory)
+
+    rect rgba(59,130,246,0.12)
+    note over U,CMA: sleep(llm, path, level=2)
+    U->>TS: sleep(llm, path)
+    TS->>T: freeze_model_tp(llm, path)
+    T-->>TS: snapshot on disk (.thaw)
+    TS->>V: llm.sleep(level=2)
+    V->>CMA: release tagged allocations
+    CMA-->>V: GPU memory freed (receipt: 72.67 GiB / rank on 70B TP=2)
+    V-->>TS: ok
+    TS-->>U: stats (freed=True)
+    end
+
+    rect rgba(16,185,129,0.12)
+    note over U,CMA: wake_up(llm, path)
+    U->>TS: wake_up(llm, path)
+    TS->>V: llm.wake_up()
+    V->>CMA: re-allocate tensor storage
+    CMA-->>V: GPU tensors re-created (empty)
+    V-->>TS: ok (~0.33s on 70B)
+    TS->>T: restore_model_tp(llm, path)
+    T-->>TS: snapshot populated into GPU tensors
+    TS-->>U: stats (bit-identical greedy output)
+    end
+```
+
+Receipts (2× H100 SXM, bit-identical greedy output on both ends): [`sleep_mode_8b_tp1.json`](site/receipts/2026-04-22_rfc/sleep_mode_8b_tp1.json), [`sleep_mode_70b_tp2.json`](site/receipts/2026-04-22_rfc/sleep_mode_70b_tp2.json). Source: [`python/thaw_vllm/sleep_mode.py`](python/thaw_vllm/sleep_mode.py). Tests: [`tests/test_sleep_mode.py`](tests/test_sleep_mode.py) (8 passing, CPU-only).
+
+```python
+from vllm import LLM
+import thaw_vllm.sleep_mode as sm
+
+llm = LLM(model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+          enable_sleep_mode=True,           # required by the strict-mode gate
+          enforce_eager=True, dtype="float16")
+
+llm.generate(["hello"])                      # warm the engine
+
+sm.sleep(llm, "/snap/llama8b.thaw")          # freeze then llm.sleep(level=2)
+# GPU memory is actually freed here — not just tagged
+
+sm.wake_up(llm, "/snap/llama8b.thaw")        # llm.wake_up() then restore
+llm.generate(["hello"])                      # bit-identical tokens
+```
 
 ## Architecture
 
@@ -338,7 +353,7 @@ from vllm import LLM, SamplingParams
 llm = LLM(model="meta-llama/Meta-Llama-3-8B", dtype="float16", enforce_eager=True)
 thaw_vllm.freeze_model_pipelined(model, "/path/to/weights.thaw")
 
-# Restore: two lines, 9.2x faster cold start
+# Restore: one call
 llm = thaw_vllm.load("meta-llama/Meta-Llama-3-8B", "/path/to/weights.thaw")
 ```
 
@@ -442,7 +457,7 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 
 | Capability | thaw | fastsafetensors | NVIDIA Model Streamer | vLLM Sleep Mode | Modal Snapshots | LMCache / Dynamo KV | InferX |
 |---|---|---|---|---|---|---|---|
-| Weight snapshot + fast restore | ✅ (14 GB/s NVMe, 55 GB/s slot-warm) | ✅ (26 GB/s w/ GDS+RAID) | ✅ (~2 GB/s) | ✅ (RAM only) | ✅ (alpha) | — | claimed (no public code) |
+| Weight snapshot + fast restore | ✅ (55 GB/s slot-warm, NVMe-bound one-shot) | ✅ (26 GB/s w/ GDS+RAID) | ✅ (~2 GB/s) | ✅ (RAM only) | ✅ (alpha) | — | claimed (no public code) |
 | **KV cache snapshot + prefix-hash restore** | **✅** | — | — | RAM only, same process | — | partial (block-level, not engine) | claimed |
 | **Fork a running session into N divergent children** | **✅** | — | — | — | — | — | — |
 | Cross-process / cross-pod restore | ✅ | ✅ (reload) | ✅ (reload) | — (same process) | ✅ | partial | claimed |
@@ -453,7 +468,7 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 
 1. **Fork as a primitive.** Nobody else snapshots the combined weights + KV cache + prefix-hash table + scheduler state of a live inference engine and restores it into a fresh process. This is what makes agent branching, RL rollout deduplication, and session migration actually work. Everything below exists to make this primitive fast enough to be useful.
 2. **KV cache snapshot with prefix-hash reconstruction.** The moat under the moat. LMCache / Dynamo tier KV blocks for their own cache; they don't let you transport a cache between engines. thaw does.
-3. **Saturates commodity hardware.** 14 GB/s on a single NVMe (no GDS, no RAID) and 55 GB/s slot-warm (no special drivers). The speed is table stakes for the fork primitive to be viable — but it's still faster than fastsafetensors' GDS+RAID ceiling on the setups most people actually have.
+3. **Saturates commodity hardware.** Slot-warm hot-swap hits 55 GB/s on a single H100 SXM (no GDS, no RAID, no special drivers — reproducer: [`bench_slot_warm.py`](bench_slot_warm.py)). The speed is table stakes for the fork primitive to be viable.
 4. **Works with vLLM and SGLang.** Two engines, one `.thaw` file. `load_format="thaw"` for vLLM, class-passthrough loader for SGLang.
 
 **How thaw is not LMCache / Tensormesh.** LMCache (and Tensormesh, which commercializes it) is a *server-side cache-tiering proxy* that sits in front of your engine, watches incoming requests, and serves prefix cache hits from GPU/RAM/NVMe tiers. It's passive: requests come in, matches happen or don't. thaw is an *imperative primitive* your code calls at a specific pivot — `fork(llm) → handle` returns an atomic, portable reference to that session (weights + KV + scheduler state + prefix-hash table) that any other process can hydrate. LMCache can't give you a handle you hand to an RL worker; it's not the API shape. HuggingFace's 2026 async-RL survey documented this gap explicitly: *"no current async library supports [KV pivot resampling] out of the box."* Different product, different buyer — their raise is validation, not overlap.
@@ -470,17 +485,18 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 - [x] `load_format="thaw"` — native vLLM ModelLoader integration
 - [x] OpenAI-compatible API server (`thaw serve`)
 - [x] Streaming support in API server (SSE, OpenAI-compatible)
-- [x] **Agent fork demo** — clone a running AI session, fork parallel completions from shared KV cache (full-cycle: 14.79 GB/s restore, 0.135s KV restore on H100 SXM)
+- [x] **Agent fork demo** — clone a running AI session, fork parallel completions from shared KV cache
 - [x] **Multi-GPU / tensor parallel** — arbitrary TP via `collective_rpc`, bit-exact correctness verified on 2×H100 + 2×A40 TP=2
 - [x] **Engine pool (`thaw serve`)** — pre-warmed vLLM engines with hot model swapping, OpenAI-compatible API, multi-model serving
 - [x] **Pre-built native wheels** — `pip install thaw-vllm[all]`, no Rust toolchain needed
 - [x] **SGLang integration** — class-passthrough loader, freeze + restore, validated on H100 TP=2 (5.0 GB/s)
 - [x] **Slot-warm hot-swap** — persistent `cudaHostRegister` per pool slot, 0.29s / 55 GB/s model swap on H100 SXM (`thaw serve`)
 - [x] **Cloud snapshot storage (S3)** — `thaw freeze --output s3://...` and `thaw serve --snapshot s3://...`, validated H100 SXM 2026-04-17 (15 GiB freeze+upload in 5.6s, 229s single-stream S3 download — ranged-GET crate is next)
-- [x] **Pipelined-freeze parity with restore** — `freeze_pipelined_to_file` with chunked WC-pinned buffers + O_DIRECT lands in v0.2.1 (2026-04-17). End-to-end 9.57 GB/s on H100 SXM (vs 3.82 GB/s in v0.1.2); pure-Rust 19.62 GB/s on synthetic buffer.
+- [x] **Pipelined-freeze parity with restore** — `freeze_pipelined_to_file` with chunked WC-pinned buffers + O_DIRECT lands in v0.2.1 (2026-04-17). Throughput is NVMe-bound and varies per pod; latest TP=2 receipt has 9.04 GB/s aggregate freeze on 2× H100 SXM.
 - [x] **ForkPool (v0.3.2, 2026-04-20)** — pre-warmed subprocess pool: boot N vLLM engines once with real weights, each `fork_completions()` call snapshots KV only. 22.3s init → 0.88s median/round on H100 8B (4 branches × 64 tokens). First sub-second fork amortization on real hardware.
 - [x] **Plain-pinned freeze fix (thaw-native v0.3.1, 2026-04-20)** — v0.3.0 wheel capped freeze at 50 MB/s because CPU reads of WC-pinned memory are ~100× slower than plain pinned. Fresh `pip install` now pulls the fast path by default.
 - [x] **LangGraph integration (v0.4.0, 2026-04-21)** — `thaw_vllm.langgraph.ChatThaw` wraps vLLM + ForkPool as a LangChain `BaseChatModel`; `fork_fanout(llm, prefix, suffix_lists)` is the explicit fork primitive you call from a LangGraph node. H100 + Llama-3.1-8B: 3 rounds × 4 branches, **64.55s → 1.43s → 1.43s** median, all branches coherent. `pip install thaw-vllm[langgraph]`.
+- [x] **Sleep-mode integration + vLLM RFC #34303 evidence (v0.5.0, 2026-04-22)** — `thaw_vllm.sleep_mode.sleep(llm, path)` / `wake_up(llm, path)` compose thaw's freeze/restore around vLLM's real `LLM.sleep(level=2)` + `LLM.wake_up()`. Two bit-identical 2× H100 SXM receipts: **8B TP=1** (sleep 3.4s / wake 11.1s, `CuMemAllocator` freed 45.38 GiB) and **70B TP=2** (sleep 16.1s / wake 53.6s, 141 GB snapshot across 966 regions, `CuMemAllocator` freed 72.67 GiB per rank = 145 GiB total). Proposed as `--sleep-mode thaw` backend in [vLLM RFC #34303](https://github.com/vllm-project/vllm/issues/34303).
 - [ ] Framework-layer RL helpers — TRL / `accelerate` wrappers around `fork_completions()` for tree-GRPO / best-of-N
 - [ ] Rust `thaw-cloud` crate — concurrent ranged GETs for S3 restore at NIC line-rate (restore gap, deprioritized behind fork-layer distribution)
 - [ ] GPUDirect Storage support

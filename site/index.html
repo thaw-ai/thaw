@@ -1667,13 +1667,13 @@ llm <span class="hl-op">=</span> LLM(
 )</pre></div>
       <div class="code-panel" id="tab-demo"><pre><span class="hl-cmt"># Fresh RunPod H100 SXM — zero source builds, just pip</span>
 $ pip install thaw-vllm[all]
-<span class="hl-str">Successfully installed thaw-native-0.2.1 thaw-vllm-0.2.1 vllm-0.19.0</span>
+<span class="hl-str">Successfully installed thaw-native-0.3.1 thaw-vllm-0.5.0 vllm-0.19.1</span>
 
 $ huggingface-cli login
 <span class="hl-str">Login successful.</span>
 
 $ thaw freeze --model meta-llama/Llama-3.1-8B-Instruct -o weights.thaw
-<span class="hl-str">[thaw] Weights: 195 regions, 16.06 GB in 1.7s (9.57 GB/s)</span>
+<span class="hl-str">[thaw] Weights: 195 regions, 16.06 GB frozen to weights.thaw</span>
 
 $ thaw serve --model meta-llama/Llama-3.1-8B-Instruct --snapshot weights.thaw
 <span class="hl-str">[thaw] Slot 0 ready in 7.9s</span>
@@ -1821,6 +1821,30 @@ Is there something I can help you with?"}}],
           </tr>
         </thead>
         <tbody>
+          <tr>
+            <td class="col-mono">2026-04-22</td>
+            <td class="col-model">sleep_mode_70b_tp2</td>
+            <td class="col-mono">2&times; H100 80 GB SXM</td>
+            <td class="col-mono">Llama-3.1-70B</td>
+            <td><strong style="color:var(--text)">Sleep/wake (vLLM RFC #34303):</strong> sleep 16.1s / wake 53.6s, 141 GB / 966 regions, <strong style="color:var(--cyan)">CuMemAllocator freed 72.67 GiB&nbsp;per&nbsp;rank</strong>, greedy tokens bit-identical</td>
+            <td class="col-mono"><a href="https://github.com/thaw-ai/thaw/blob/main/site/receipts/2026-04-22_rfc/sleep_mode_70b_tp2.json">open</a></td>
+          </tr>
+          <tr>
+            <td class="col-mono">2026-04-22</td>
+            <td class="col-model">sleep_mode_8b_tp1</td>
+            <td class="col-mono">H100 80 GB SXM</td>
+            <td class="col-mono">Llama-3.1-8B</td>
+            <td><strong style="color:var(--text)">Sleep/wake (vLLM RFC #34303):</strong> sleep 3.4s / wake 11.1s, 16 GB / 195 regions, CuMemAllocator freed 45.38 GiB, greedy tokens bit-identical</td>
+            <td class="col-mono"><a href="https://github.com/thaw-ai/thaw/blob/main/site/receipts/2026-04-22_rfc/sleep_mode_8b_tp1.json">open</a></td>
+          </tr>
+          <tr>
+            <td class="col-mono">2026-04-21</td>
+            <td class="col-model">pr_review_langgraph</td>
+            <td class="col-mono">H100 80 GB HBM3</td>
+            <td class="col-mono">Llama-3.1-8B</td>
+            <td><strong style="color:var(--text)">LangGraph PR-review fan-out:</strong> 3 rounds &times; 4 specialist reviews, 64.55s round 0 &rarr; <strong style="color:var(--cyan)">1.43s rounds 1&ndash;2</strong> (45&times; amortized) via fork_fanout inside a StateGraph node</td>
+            <td class="col-mono"><a href="https://github.com/thaw-ai/thaw/blob/main/site/receipts/2026-04-21_h100_pr_review_langgraph.json">open</a></td>
+          </tr>
           <tr>
             <td class="col-mono">2026-04-20</td>
             <td class="col-model">fork_pool_rl</td>
@@ -1972,7 +1996,6 @@ Is there something I can help you with?"}}],
       <div class="footer-col">
         <h4>Resources</h4>
         <a href="https://github.com/thaw-ai/thaw" target="_blank" rel="noopener">GitHub</a>
-        <a href="https://github.com/thaw-ai/thaw/blob/main/DESIGN.md" target="_blank" rel="noopener">Design Doc</a>
         <a href="https://pypi.org/project/thaw-vllm/" target="_blank" rel="noopener">PyPI</a>
       </div>
       <div class="footer-col">

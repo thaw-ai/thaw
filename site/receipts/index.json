@@ -70,6 +70,24 @@
       "timestamp_utc": "2026-04-21T19:59:00+00:00",
       "headline": "LangGraph PR-review fan-out: 3 rounds × 4 specialist reviews, 64.55s round 0 → 1.43s rounds 1-2 (45× amortized) via fork_fanout inside a StateGraph node",
       "note": "ChatThaw + fork_fanout wraps ForkPool behind a LangChain BaseChatModel. All 3 rounds produce coherent, perspective-specific reviews (security / performance / style / correctness) of the same PR diff. Reproduces with `pip install thaw-vllm[langgraph]>=0.4.0 thaw-native>=0.3.1` + `python demos/pr_review_langgraph.py --mode thaw --rounds 3 --dtype float16`. IMPORTANT: --dtype must match parent + pool (both float16 default) — mismatch corrupts snapshotted KV cache."
+    },
+    {
+      "file": "2026-04-22_rfc/sleep_mode_8b_tp1.json",
+      "demo": "sleep_mode_demo",
+      "pod": "RunPod H100 80 GB SXM",
+      "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+      "timestamp_utc": "2026-04-22T13:30:00+00:00",
+      "headline": "Sleep/wake round-trip composed with vLLM's native LLM.sleep(level=2) + LLM.wake_up(): sleep 3.4s / wake 11.1s, 16 GB / 195 regions, CuMemAllocator freed 45.38 GiB, greedy tokens bit-identical (RFC #34303 evidence)",
+      "note": "thaw_vllm.sleep_mode.sleep(llm, path) / wake_up(llm, path) compose freeze/restore around vLLM's real sleep hook — not a parallel path. Sleep calls llm.sleep(level=2) AFTER freezing so CuMemAllocator actually releases GPU memory; wake_up calls llm.wake_up() BEFORE restoring so the allocator re-allocates. Throughputs (freeze 4.78 GB/s, restore 1.54 GB/s) are NVMe-bound and pod-specific."
+    },
+    {
+      "file": "2026-04-22_rfc/sleep_mode_70b_tp2.json",
+      "demo": "sleep_mode_demo",
+      "pod": "RunPod 2× H100 80 GB SXM",
+      "model": "meta-llama/Llama-3.1-70B-Instruct",
+      "timestamp_utc": "2026-04-22T14:10:00+00:00",
+      "headline": "TP=2 sleep/wake round-trip: sleep 16.1s / wake 53.6s, 141 GB / 966 regions, CuMemAllocator freed 72.67 GiB per rank (145 GiB total), greedy tokens TP=2 bit-identical (RFC #34303 TP>1 evidence)",
+      "note": "Cross-rank sleep+wake via collective_rpc. vLLM's own gpu_worker.py log: 'Sleep mode freed 72.67 GiB memory, 2.48 GiB memory is still in use'. vLLM's wake re-allocation took 0.33s per abstract.py — snapshot restore is the wall-clock. Aggregates: freeze 9.04 GB/s, restore 2.78 GB/s across 2 ranks. Pod-specific NVMe ceilings."
     }
   ]
 }
