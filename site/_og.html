@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600;700&display=swap');
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:1200px;height:630px;overflow:hidden;background:#07080d;color:#eaeaf0;font-family:'Geist',system-ui;-webkit-font-smoothing:antialiased}
+  body{
+    position:relative;
+    background:
+      radial-gradient(60% 60% at 22% 48%, rgba(198,255,26,.10), transparent 70%),
+      radial-gradient(55% 55% at 82% 70%, rgba(255,46,126,.09), transparent 72%),
+      linear-gradient(180deg,#07080d,#05060a);
+  }
+  .grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-size:40px 40px;pointer-events:none}
+  .vignette{position:absolute;inset:0;background:radial-gradient(100% 80% at 50% 50%,transparent 35%,rgba(0,0,0,.5) 100%);pointer-events:none}
+  .bar-top{position:absolute;top:0;left:0;right:0;height:4px;background:linear-gradient(90deg,#C6FF1A 0%, #A855F7 55%, #FF2E7E 100%)}
+
+  .frame{
+    position:absolute;inset:52px 60px;
+    display:flex;flex-direction:column;justify-content:space-between;
+  }
+
+  /* top row */
+  .top{display:flex;justify-content:space-between;align-items:center;font-family:'JetBrains Mono';font-size:14px;letter-spacing:.2em;text-transform:uppercase;color:rgba(234,234,240,.55)}
+  .top .brand{color:#C6FF1A;font-weight:700;letter-spacing:.28em}
+  .top .brand .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#C6FF1A;box-shadow:0 0 12px #C6FF1A;margin-right:10px;vertical-align:middle}
+  .top .right{display:flex;gap:22px;align-items:center}
+  .top .right .pill{border:1px solid rgba(255,255,255,.12);padding:6px 12px;border-radius:999px;letter-spacing:.18em}
+
+  /* hero */
+  .hero{display:flex;flex-direction:column;gap:22px}
+  .kicker{font-family:'JetBrains Mono';font-size:14px;letter-spacing:.28em;text-transform:uppercase;color:#FF2E7E;display:flex;align-items:center;gap:14px}
+  .kicker .line{flex:0 0 48px;height:1px;background:#FF2E7E;opacity:.6}
+  h1{
+    font-family:'Instrument Serif',serif;
+    font-weight:400;font-style:italic;
+    font-size:134px;line-height:.96;letter-spacing:-.02em;
+    color:#fafaff;
+  }
+  h1 em{color:#C6FF1A;font-style:italic}
+  .sub{
+    font-family:'JetBrains Mono';font-size:18px;letter-spacing:.08em;
+    color:rgba(234,234,240,.62);max-width:920px;line-height:1.55;
+  }
+  .sub b{color:#fafaff;font-weight:600}
+
+  /* stats */
+  .stats{
+    display:flex;gap:36px;align-items:flex-end;
+    padding-top:22px;border-top:1px solid rgba(255,255,255,.08);
+  }
+  .stat{display:flex;flex-direction:column;gap:4px;position:relative}
+  .stat .n{font-family:'Instrument Serif',serif;font-style:italic;font-size:56px;line-height:1;color:#fafaff}
+  .stat .n.acid{color:#C6FF1A}
+  .stat .n.mag{color:#FF2E7E}
+  .stat .l{font-family:'JetBrains Mono';font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:rgba(234,234,240,.5)}
+  .stats .sep{width:1px;align-self:stretch;background:linear-gradient(180deg,transparent,rgba(255,255,255,.1),transparent)}
+
+  .foot{display:flex;justify-content:space-between;align-items:flex-end;font-family:'JetBrains Mono';font-size:13px;letter-spacing:.22em;text-transform:uppercase;color:rgba(234,234,240,.45)}
+  .foot .url{color:#C6FF1A;font-weight:700;letter-spacing:.28em}
+  .foot .cta{color:#fafaff}
+
+  /* corner diamonds */
+  .d{position:absolute;width:10px;height:10px;border:1px solid #FF2E7E;transform:rotate(45deg);background:rgba(255,46,126,.1)}
+  .d.tl{top:44px;left:52px}.d.tr{top:44px;right:52px}.d.bl{bottom:44px;left:52px}.d.br{bottom:44px;right:52px}
+</style>
+</head>
+<body>
+  <div class="grid"></div>
+  <div class="bar-top"></div>
+  <div class="d tl"></div><div class="d tr"></div><div class="d bl"></div><div class="d br"></div>
+
+  <div class="frame">
+    <div class="top">
+      <span class="brand"><span class="dot"></span>thaw · v0.5.1</span>
+      <span class="right">
+        <span class="pill">open source</span>
+        <span class="pill">cuda 12+</span>
+      </span>
+    </div>
+
+    <div class="hero">
+      <div class="kicker"><span class="line"></span>the fork primitive for live llm inference</div>
+      <h1>fork a running<br><em>LLM.</em></h1>
+      <div class="sub">snapshot a running vllm session — weights, kv cache, scheduler state — and hydrate <b>N divergent children</b> that skip prefill. not a proxy, not a cache-tier — a <b>primitive</b> you call from user code.</div>
+    </div>
+
+    <div class="stats">
+      <div class="stat">
+        <span class="n acid">0.88s</span>
+        <span class="l">fork round · H100 8B · amortized</span>
+      </div>
+      <div class="sep"></div>
+      <div class="stat">
+        <span class="n">14+ gb/s</span>
+        <span class="l">parallel crc32c verification</span>
+      </div>
+      <div class="sep"></div>
+      <div class="stat">
+        <span class="n mag">2×H100</span>
+        <span class="l">70B TP=2 · bit-identical sleep/wake</span>
+      </div>
+    </div>
+
+    <div class="foot">
+      <span class="url">thaw.sh</span>
+      <span class="cta">pip install thaw-vllm  ↗</span>
+    </div>
+  </div>
+
+  <div class="vignette"></div>
+</body>
+</html>
