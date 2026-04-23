@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "thaw-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "tempfile",
  "thaw-core",
@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "thaw-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "crc32c",
  "tempfile",
@@ -404,11 +404,11 @@ dependencies = [
 
 [[package]]
 name = "thaw-cuda-sys"
-version = "0.3.1"
+version = "0.3.2"
 
 [[package]]
 name = "thaw-py"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "pyo3",
  "thaw-core",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "thaw-runtime"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "crc32c",
  "libc",
