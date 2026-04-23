@@ -1,0 +1,2838 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>thaw — fork a running LLM.</title>
+<meta name="description" content="thaw is the fork primitive for live LLM inference. Snapshot a running session, hydrate N divergent children that skip prefill. Open source. Press F to fork.">
+<meta name="theme-color" content="#07080D">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Archivo+Black&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+
+  :root{
+    --bg:#07080D;
+    --bg-2:#0B0D16;
+    --surface:#10131F;
+    --surface-2:#181C2C;
+    --raised:#1F2338;
+    --border:rgba(255,255,255,.06);
+    --border-bright:rgba(255,255,255,.14);
+    --text:#EAEDF5;
+    --text-mid:#B4BAC9;
+    --text-dim:#6E7588;
+    --acid:#C6FF1A;
+    --acid-dim:#9ACC0E;
+    --magenta:#FF2E7E;
+    --magenta-dim:#CC1F62;
+    --blue:#3E6BFF;
+    --cyan:#00E5FF;
+    --violet:#A855F7;
+    --warn:#FFB547;
+    --ease:cubic-bezier(.22,1,.36,1);
+    --bounce:cubic-bezier(.34,1.56,.64,1);
+  }
+
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:'Archivo',system-ui,sans-serif;
+    font-weight:500;
+    line-height:1.5;
+    overflow-x:hidden;
+    -webkit-font-smoothing:antialiased;
+    -moz-osx-font-smoothing:grayscale;
+    position:relative;
+  }
+
+  /* ambient radial glow */
+  body::before{
+    content:'';
+    position:fixed;inset:0;
+    pointer-events:none;z-index:0;
+    background:
+      radial-gradient(ellipse 900px 600px at 85% -10%, rgba(198,255,26,.07), transparent 60%),
+      radial-gradient(ellipse 800px 500px at 10% 110%, rgba(255,46,126,.06), transparent 60%),
+      radial-gradient(ellipse 600px 400px at 50% 50%, rgba(62,107,255,.03), transparent 70%);
+  }
+  /* subtle grid */
+  body::after{
+    content:'';
+    position:fixed;inset:0;
+    pointer-events:none;z-index:0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+    background-size:56px 56px;
+    mask-image:radial-gradient(ellipse at 50% 30%, black, transparent 80%);
+    -webkit-mask-image:radial-gradient(ellipse at 50% 30%, black, transparent 80%);
+  }
+  main{position:relative;z-index:2}
+  ::selection{background:var(--acid);color:var(--bg)}
+
+  .display{font-family:'Archivo Black',sans-serif;font-weight:900;letter-spacing:-.045em;line-height:.86;text-transform:uppercase}
+  .serif{font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;letter-spacing:-.02em}
+  .mono{font-family:'JetBrains Mono',monospace}
+  .container{max-width:1360px;margin:0 auto;padding:0 clamp(18px,3vw,40px);position:relative;z-index:2}
+
+  /* ─── NAV ─────────────────────────────────── */
+  nav{
+    position:sticky;top:0;z-index:80;
+    backdrop-filter:blur(14px) saturate(160%);
+    -webkit-backdrop-filter:blur(14px) saturate(160%);
+    background:rgba(7,8,13,.72);
+    border-bottom:1px solid var(--border);
+  }
+  nav .row{display:flex;align-items:center;justify-content:space-between;padding:14px 0;gap:20px}
+  .wordmark{display:flex;align-items:center;gap:10px;font-family:'Archivo Black';font-size:20px;letter-spacing:-.04em;text-decoration:none;color:var(--text)}
+  .wordmark .dot{
+    width:12px;height:12px;background:var(--acid);
+    border-radius:50%;position:relative;
+    box-shadow:0 0 14px rgba(198,255,26,.5);
+  }
+  .wordmark .dot::after{
+    content:'';position:absolute;inset:3px;
+    background:var(--bg);border-radius:50%;
+  }
+  .wordmark:hover .dot{box-shadow:0 0 22px rgba(198,255,26,.9)}
+
+  .nav-links{display:flex;gap:24px;font-family:'JetBrains Mono';font-size:12px;font-weight:500;text-transform:lowercase;letter-spacing:.02em}
+  .nav-links a{color:var(--text-mid);text-decoration:none;position:relative;padding:4px 0;transition:color .15s}
+  .nav-links a:hover{color:var(--text)}
+  .nav-links a::after{content:'';position:absolute;left:0;bottom:-3px;width:0;height:1px;background:var(--acid);transition:width .2s}
+  .nav-links a:hover::after{width:100%}
+
+  .btn{
+    display:inline-flex;align-items:center;gap:10px;
+    padding:10px 18px;border-radius:8px;
+    border:1px solid var(--border-bright);
+    background:var(--surface);
+    font-family:'JetBrains Mono',monospace;
+    font-size:13px;font-weight:600;
+    letter-spacing:.02em;text-decoration:none;color:var(--text);
+    transition:all .15s var(--ease);
+    cursor:pointer;
+    position:relative;
+  }
+  .btn:hover{border-color:var(--acid);color:var(--acid)}
+  .btn.primary{
+    background:var(--acid);color:var(--bg);
+    border-color:var(--acid);font-weight:700;
+    box-shadow:0 0 0 0 rgba(198,255,26,.4);
+  }
+  .btn.primary:hover{
+    background:var(--acid);color:var(--bg);
+    box-shadow:0 0 30px rgba(198,255,26,.5);
+    transform:translateY(-1px);
+  }
+  .btn.magenta{background:var(--magenta);color:var(--text);border-color:var(--magenta);font-weight:700}
+  .btn.magenta:hover{box-shadow:0 0 30px rgba(255,46,126,.5);transform:translateY(-1px)}
+  .btn .k{
+    background:rgba(255,255,255,.12);color:inherit;
+    padding:2px 7px;border-radius:4px;
+    font-family:'JetBrains Mono';font-weight:700;font-size:11px;
+    letter-spacing:0;line-height:1;
+  }
+  .btn.primary .k{background:rgba(7,8,13,.2);color:var(--bg)}
+  .btn.magenta .k{background:rgba(255,255,255,.18);color:var(--text)}
+
+  /* ─── HERO ────────────────────────────────── */
+  .hero{padding:64px 0 48px;position:relative}
+  .hero .status-row{display:flex;gap:10px;margin-bottom:32px;flex-wrap:wrap;align-items:center}
+  .chip{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:5px 12px;border:1px solid var(--border-bright);
+    background:rgba(15,17,32,.6);
+    border-radius:999px;
+    font-family:'JetBrains Mono';font-size:11px;font-weight:500;
+    color:var(--text-mid);letter-spacing:.02em;
+  }
+  .chip .sig{width:6px;height:6px;border-radius:50%;background:var(--acid);box-shadow:0 0 8px rgba(198,255,26,.7)}
+  .chip.live .sig{background:var(--magenta);box-shadow:0 0 8px rgba(255,46,126,.7);animation:pulse 1.4s infinite}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(1.4)}}
+  .chip strong{color:var(--text);font-weight:700}
+
+  .hero h1{
+    font-family:'Archivo Black',sans-serif;
+    font-size:clamp(56px,11.5vw,190px);
+    line-height:.84;letter-spacing:-.055em;
+    text-transform:uppercase;
+    margin-bottom:28px;
+    position:relative;
+  }
+  .hero h1 em{
+    font-family:'Instrument Serif',serif;
+    font-style:italic;font-weight:400;
+    text-transform:lowercase;letter-spacing:-.02em;
+    color:var(--acid);
+    display:inline-block;transform:translateY(.04em);
+  }
+  .hero h1 .hi{
+    color:var(--acid);
+    text-shadow:0 0 40px rgba(198,255,26,.25);
+  }
+  .hero h1 .outline{
+    -webkit-text-stroke:2px var(--text);
+    color:transparent;
+  }
+
+  .hero .sub{
+    max-width:660px;
+    font-size:clamp(16px,1.4vw,20px);
+    line-height:1.55;font-weight:400;
+    margin-bottom:36px;color:var(--text-mid);
+  }
+  .hero .sub strong{color:var(--text);font-weight:600}
+  .hero .sub code{
+    font-family:'JetBrains Mono';font-weight:500;
+    background:var(--surface-2);color:var(--acid);
+    padding:2px 7px;border-radius:4px;font-size:.88em;
+    border:1px solid var(--border);
+  }
+
+  .cta-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+
+  /* ambient markers */
+  .hero .beam{
+    position:absolute;
+    top:80px;right:-100px;
+    width:500px;height:500px;
+    background:radial-gradient(circle, rgba(255,46,126,.08), transparent 60%);
+    pointer-events:none;z-index:-1;
+    filter:blur(20px);
+  }
+
+  /* ─── FORK DEMO (the hero visual) ──────────── */
+  .demo-wrap{margin-top:44px}
+  .demo{
+    position:relative;
+    background:linear-gradient(180deg, var(--surface), var(--bg-2));
+    border:1px solid var(--border-bright);
+    border-radius:16px;
+    overflow:hidden;
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,.02) inset,
+      0 60px 120px -40px rgba(62,107,255,.25),
+      0 30px 60px -20px rgba(255,46,126,.15);
+  }
+  /* neon rim accent */
+  .demo::before{
+    content:'';position:absolute;inset:-1px;
+    border-radius:16px;
+    padding:1px;
+    background:linear-gradient(135deg, rgba(198,255,26,.25), transparent 30%, transparent 70%, rgba(255,46,126,.2));
+    -webkit-mask:linear-gradient(#000,#000) content-box, linear-gradient(#000,#000);
+    mask:linear-gradient(#000,#000) content-box, linear-gradient(#000,#000);
+    -webkit-mask-composite:xor;
+    mask-composite:exclude;
+    pointer-events:none;
+  }
+  .demo-header{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:14px 20px;border-bottom:1px solid var(--border);
+    background:rgba(255,255,255,.02);
+    font-family:'JetBrains Mono';font-size:11.5px;
+  }
+  .demo-header .left{display:flex;align-items:center;gap:14px;color:var(--text-dim)}
+  .demo-header .dots{display:flex;gap:6px}
+  .demo-header .dots span{width:10px;height:10px;border-radius:50%;border:1px solid var(--border-bright)}
+  .demo-header .dots span:nth-child(1){background:var(--magenta);border-color:transparent}
+  .demo-header .dots span:nth-child(2){background:var(--warn);border-color:transparent;opacity:.5}
+  .demo-header .dots span:nth-child(3){background:var(--acid);border-color:transparent;opacity:.3}
+  .demo-header .path{color:var(--text-mid);letter-spacing:.02em}
+  .demo-header .path .sep{color:var(--text-dim);margin:0 6px}
+  .demo-header .clock{
+    color:var(--acid);font-weight:700;
+    font-variant-numeric:tabular-nums;
+    background:rgba(198,255,26,.08);
+    border:1px solid rgba(198,255,26,.25);
+    padding:4px 10px;border-radius:5px;
+    display:inline-flex;align-items:center;gap:8px;
+  }
+  .demo-header .clock::before{content:'';width:6px;height:6px;background:var(--acid);border-radius:50%;box-shadow:0 0 8px var(--acid);animation:pulse 1.2s infinite}
+
+  .scenario-tabs{display:flex;gap:4px;padding:14px 20px 0;flex-wrap:wrap}
+  .tab{
+    padding:7px 14px;
+    background:var(--surface-2);color:var(--text-mid);
+    border:1px solid var(--border);
+    font-family:'JetBrains Mono';font-size:11.5px;font-weight:500;
+    border-radius:6px;cursor:pointer;transition:all .15s;
+    display:inline-flex;align-items:center;gap:8px;
+  }
+  .tab:hover{color:var(--text);border-color:var(--border-bright)}
+  .tab.active{background:var(--raised);color:var(--acid);border-color:rgba(198,255,26,.3)}
+  .tab .k{background:rgba(255,255,255,.08);color:inherit;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600}
+  .tab.active .k{background:rgba(198,255,26,.2);color:var(--acid)}
+
+  .demo-stage{padding:18px 20px 22px}
+
+  .prompt-card{
+    background:var(--surface-2);
+    border:1px solid var(--border);
+    border-radius:10px;padding:14px 16px;
+    margin-bottom:14px;
+    font-family:'JetBrains Mono';font-size:12.5px;line-height:1.55;
+  }
+  .prompt-card .role{
+    color:var(--magenta);font-weight:700;
+    font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+    margin-bottom:6px;display:block;
+  }
+  .prompt-card .line{color:var(--text-mid);white-space:pre-wrap}
+
+  .trunk{
+    background:linear-gradient(180deg, rgba(198,255,26,.04), rgba(198,255,26,.01));
+    border:1px solid rgba(198,255,26,.2);
+    border-radius:10px;padding:14px 16px;
+    min-height:110px;
+    font-family:'JetBrains Mono';font-size:12.5px;line-height:1.6;
+    position:relative;transition:opacity .4s var(--ease), transform .4s var(--ease);
+  }
+  .trunk.dimmed{opacity:.3;transform:scale(.98)}
+  .trunk .role{
+    color:var(--acid);font-weight:700;
+    font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+    margin-bottom:6px;display:flex;align-items:center;gap:8px;
+  }
+  .trunk .role::before{content:'';width:6px;height:6px;background:var(--acid);border-radius:50%;box-shadow:0 0 8px var(--acid)}
+  .trunk .text{color:var(--text)}
+  .trunk .cursor{display:inline-block;width:7px;height:13px;background:var(--acid);margin-left:3px;vertical-align:-1px;animation:blink .9s infinite}
+  @keyframes blink{0%,50%{opacity:1}50.01%,100%{opacity:0}}
+
+  /* fork point marker */
+  .fork-marker{
+    margin:14px 0;display:none;
+    align-items:center;gap:12px;
+    font-family:'JetBrains Mono';font-size:10.5px;
+    text-transform:uppercase;letter-spacing:.1em;
+    color:var(--magenta);
+  }
+  .fork-marker.show{display:flex;animation:slideIn .4s var(--bounce)}
+  .fork-marker .bar{flex:1;height:1px;background:repeating-linear-gradient(90deg, var(--magenta) 0 6px, transparent 6px 12px)}
+  .fork-marker .diamond{color:var(--magenta);font-size:12px}
+  @keyframes slideIn{0%{opacity:0;transform:translateY(-6px)}100%{opacity:1;transform:translateY(0)}}
+
+  .branches{
+    display:grid;grid-template-columns:repeat(4,1fr);gap:10px;
+    margin-bottom:16px;
+  }
+  .branch{
+    background:var(--surface-2);
+    border:1px solid var(--border);
+    border-radius:10px;padding:14px 13px 12px;
+    font-family:'JetBrains Mono';font-size:11.5px;line-height:1.55;
+    min-height:180px;position:relative;
+    opacity:0;transform:translateY(22px) scale(.94);
+  }
+  .branch.in{animation:branchIn .5s var(--bounce) forwards}
+  .branch[data-accent="acid"]{border-color:rgba(198,255,26,.35)}
+  .branch[data-accent="magenta"]{border-color:rgba(255,46,126,.35)}
+  .branch[data-accent="blue"]{border-color:rgba(62,107,255,.35)}
+  .branch[data-accent="cyan"]{border-color:rgba(0,229,255,.35)}
+  .branch[data-accent="acid"] .accent{color:var(--acid)}
+  .branch[data-accent="magenta"] .accent{color:var(--magenta)}
+  .branch[data-accent="blue"] .accent{color:var(--blue)}
+  .branch[data-accent="cyan"] .accent{color:var(--cyan)}
+  .branch:nth-child(1).in{animation-delay:.05s}
+  .branch:nth-child(2).in{animation-delay:.12s}
+  .branch:nth-child(3).in{animation-delay:.19s}
+  .branch:nth-child(4).in{animation-delay:.26s}
+  .branch .tag{
+    position:absolute;top:-9px;left:10px;
+    background:var(--bg);border:1px solid currentColor;
+    padding:2px 8px;border-radius:999px;
+    font-size:9.5px;font-weight:700;letter-spacing:.08em;
+    text-transform:uppercase;font-family:'JetBrains Mono';
+    display:inline-flex;align-items:center;gap:6px;
+  }
+  .branch[data-accent="acid"] .tag{color:var(--acid)}
+  .branch[data-accent="magenta"] .tag{color:var(--magenta)}
+  .branch[data-accent="blue"] .tag{color:var(--blue)}
+  .branch[data-accent="cyan"] .tag{color:var(--cyan)}
+  .branch .role{font-weight:700;margin-bottom:6px;color:var(--text-dim);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase}
+  .branch .text{color:var(--text)}
+  .branch .text .hl{font-weight:700}
+  .branch[data-accent="acid"] .text .hl{color:var(--acid)}
+  .branch[data-accent="magenta"] .text .hl{color:var(--magenta)}
+  .branch[data-accent="blue"] .text .hl{color:var(--blue)}
+  .branch[data-accent="cyan"] .text .hl{color:var(--cyan)}
+  .branch .cursor{display:inline-block;width:6px;height:11px;background:currentColor;margin-left:2px;vertical-align:-1px;animation:blink .9s infinite}
+  @keyframes branchIn{0%{opacity:0;transform:translateY(22px) scale(.94)}100%{opacity:1;transform:translateY(0) scale(1)}}
+
+  /* ─── TIMELINE VIZ ─────────────────────────── */
+  .timeline{
+    margin:4px 0 16px;padding:16px 16px 14px;
+    background:rgba(255,255,255,.015);
+    border:1px solid var(--border);
+    border-radius:10px;
+    opacity:0;transform:translateY(8px);
+    transition:opacity .4s var(--ease), transform .4s var(--ease);
+  }
+  .timeline.show{opacity:1;transform:translateY(0)}
+  .timeline-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-family:'JetBrains Mono';font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--text-dim)}
+  .timeline-head .axis{display:flex;gap:22px}
+  .timeline-head .axis span{color:var(--text-dim)}
+  .tl-row{display:flex;align-items:center;gap:10px;margin-bottom:5px;font-family:'JetBrains Mono';font-size:10.5px}
+  .tl-row:last-child{margin-bottom:0}
+  .tl-row .tl-label{width:32px;color:var(--text-mid);font-weight:700;letter-spacing:.05em}
+  .tl-row .tl-track{flex:1;height:8px;background:rgba(255,255,255,.04);border-radius:4px;overflow:hidden;position:relative}
+  .tl-row .tl-fill{
+    position:absolute;left:0;top:0;height:100%;
+    background:linear-gradient(90deg, var(--acid), rgba(198,255,26,.6));
+    width:0%;border-radius:4px;
+    box-shadow:0 0 12px rgba(198,255,26,.35);
+    transition:width .1s linear;
+  }
+  .tl-row[data-accent="magenta"] .tl-fill{background:linear-gradient(90deg, var(--magenta), rgba(255,46,126,.6));box-shadow:0 0 12px rgba(255,46,126,.35)}
+  .tl-row[data-accent="blue"] .tl-fill{background:linear-gradient(90deg, var(--blue), rgba(62,107,255,.6));box-shadow:0 0 12px rgba(62,107,255,.35)}
+  .tl-row[data-accent="cyan"] .tl-fill{background:linear-gradient(90deg, var(--cyan), rgba(0,229,255,.6));box-shadow:0 0 12px rgba(0,229,255,.35)}
+  .tl-row .tl-time{width:58px;color:var(--text-mid);text-align:right;font-variant-numeric:tabular-nums}
+  .tl-row .tl-time.done{color:var(--acid);font-weight:700}
+  .tl-row[data-accent="magenta"] .tl-time.done{color:var(--magenta)}
+  .tl-row[data-accent="blue"] .tl-time.done{color:var(--blue)}
+  .tl-row[data-accent="cyan"] .tl-time.done{color:var(--cyan)}
+
+  /* ─── COMPARISON CHART ─────────────────────── */
+  .compare{
+    margin-top:0;padding:16px 18px 16px;
+    background:
+      radial-gradient(ellipse 500px 200px at 50% 100%, rgba(255,46,126,.08), transparent 70%),
+      rgba(255,255,255,.015);
+    border:1px solid var(--border);
+    border-radius:10px;
+    opacity:0;transform:translateY(8px);
+    transition:opacity .4s var(--ease), transform .4s var(--ease);
+  }
+  .compare.show{opacity:1;transform:translateY(0)}
+  .compare-head{
+    display:flex;justify-content:space-between;align-items:baseline;
+    margin-bottom:14px;
+    font-family:'JetBrains Mono';font-size:10px;
+    text-transform:uppercase;letter-spacing:.1em;color:var(--text-dim);
+  }
+  .compare-head .speedup{
+    font-family:'Archivo Black';font-size:22px;
+    color:var(--acid);letter-spacing:-.03em;text-transform:none;
+    text-shadow:0 0 20px rgba(198,255,26,.3);
+  }
+  .compare-head .speedup em{font-family:'Instrument Serif';font-style:italic;font-weight:400;font-size:18px;color:var(--text-mid)}
+
+  .cmp-row{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+  .cmp-row:last-child{margin-bottom:0}
+  .cmp-label{
+    width:130px;flex-shrink:0;
+    font-family:'JetBrains Mono';font-size:11px;
+    color:var(--text-mid);line-height:1.3;
+  }
+  .cmp-label strong{display:block;color:var(--text);font-weight:700;font-size:10px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:2px}
+  .cmp-bar{flex:1;height:22px;background:rgba(255,255,255,.03);border-radius:5px;overflow:hidden;position:relative}
+  .cmp-fill{
+    position:absolute;left:0;top:0;height:100%;
+    width:0%;border-radius:5px;
+    transition:width 2.2s var(--ease);
+    display:flex;align-items:center;padding-left:10px;
+    font-family:'JetBrains Mono';font-size:11px;font-weight:700;
+    color:var(--bg);white-space:nowrap;
+  }
+  .cmp-fill.slow{
+    background:repeating-linear-gradient(45deg, var(--magenta) 0 8px, #d91d6a 8px 16px);
+    box-shadow:0 0 24px rgba(255,46,126,.4);
+  }
+  .cmp-fill.fast{
+    background:linear-gradient(90deg, var(--acid), #9ACC0E);
+    box-shadow:0 0 24px rgba(198,255,26,.6);
+    transition:width .3s var(--ease);
+  }
+  .cmp-time{font-family:'JetBrains Mono';font-size:10.5px;font-weight:700;color:var(--text);margin-left:12px;width:64px;text-align:right;font-variant-numeric:tabular-nums}
+
+  /* ─── DEMO FOOTER ─────────────────────────── */
+  .demo-foot{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:14px 20px;
+    border-top:1px solid var(--border);
+    background:rgba(255,255,255,.015);
+    gap:14px;flex-wrap:wrap;
+  }
+  .demo-foot .meta{
+    display:flex;gap:22px;flex-wrap:wrap;
+    font-family:'JetBrains Mono';font-size:10.5px;color:var(--text-dim);
+  }
+  .demo-foot .meta .val{color:var(--acid);font-weight:700;margin-left:6px}
+  .demo-foot .actions{display:flex;gap:8px}
+
+  /* float words on fork */
+  .float-word{
+    position:absolute;
+    font-family:'Archivo Black';font-size:20px;
+    text-transform:uppercase;letter-spacing:-.03em;
+    pointer-events:none;z-index:3;
+    animation:floatUp .9s var(--ease) forwards;
+  }
+  @keyframes floatUp{
+    0%{opacity:1;transform:translateY(0) rotate(-4deg) scale(.7)}
+    100%{opacity:0;transform:translateY(-90px) rotate(10deg) scale(1.3)}
+  }
+
+  /* ─── MARQUEE ──────────────────────────────── */
+  .marquee{
+    margin:72px 0 0;
+    padding:16px 0;
+    border-top:1px solid var(--border);
+    border-bottom:1px solid var(--border);
+    background:linear-gradient(90deg, transparent, rgba(198,255,26,.04), transparent);
+    overflow:hidden;white-space:nowrap;
+  }
+  .marquee-inner{display:inline-block;animation:marquee 52s linear infinite;will-change:transform}
+  @keyframes marquee{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+  .marquee span{
+    font-family:'Archivo Black';font-size:clamp(20px,2.4vw,32px);
+    letter-spacing:-.02em;margin-right:36px;
+    text-transform:uppercase;vertical-align:middle;color:var(--text-mid);
+  }
+  .marquee span.hi{color:var(--acid)}
+  .marquee .sep{
+    color:var(--magenta);font-family:'Instrument Serif';font-style:italic;
+    font-weight:400;margin:0 24px;font-size:26px;
+  }
+
+  /* ─── SECTION HEADINGS ─────────────────────── */
+  .kicker{
+    display:inline-flex;align-items:center;gap:10px;
+    padding:5px 12px;border:1px solid var(--border-bright);
+    background:rgba(15,17,32,.6);border-radius:999px;
+    font-family:'JetBrains Mono';font-size:11px;font-weight:500;
+    color:var(--text-mid);letter-spacing:.06em;margin-bottom:22px;
+  }
+  .kicker .dot{width:5px;height:5px;background:var(--acid);border-radius:50%;box-shadow:0 0 8px var(--acid)}
+  .kicker .num{color:var(--text-dim);font-weight:700;letter-spacing:.04em}
+
+  .section-h{
+    font-family:'Archivo Black',sans-serif;
+    font-size:clamp(40px,6.5vw,96px);
+    line-height:.88;letter-spacing:-.04em;
+    text-transform:uppercase;margin-bottom:48px;max-width:1000px;
+    color:var(--text);
+  }
+  .section-h em{
+    font-family:'Instrument Serif',serif;font-style:italic;font-weight:400;
+    text-transform:lowercase;letter-spacing:-.02em;color:var(--acid);
+  }
+  .section-h .hi{color:var(--acid)}
+  .section-h .line{display:block}
+
+  /* ─── HOW IT WORKS ─────────────────────────── */
+  .steps{padding:120px 0 60px;position:relative}
+  .step-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .step{
+    background:linear-gradient(180deg, var(--surface), var(--bg-2));
+    border:1px solid var(--border-bright);
+    border-radius:14px;
+    padding:26px 24px 24px;
+    position:relative;overflow:hidden;
+    transition:all .25s var(--ease);
+  }
+  .step::before{
+    content:'';position:absolute;top:0;left:0;right:0;height:1px;
+    background:linear-gradient(90deg, transparent, var(--acid), transparent);
+    opacity:.4;
+  }
+  .step:hover{border-color:rgba(198,255,26,.35);transform:translateY(-4px)}
+  .step:hover::before{opacity:1}
+  .step .num{
+    font-family:'Instrument Serif';font-style:italic;font-weight:400;
+    font-size:72px;line-height:.8;color:var(--text-dim);opacity:.7;
+  }
+  .step .num::before{content:'/ '; opacity:.4}
+  .step h3{font-family:'Archivo Black';font-size:26px;line-height:.94;letter-spacing:-.035em;text-transform:uppercase;margin:14px 0 12px;color:var(--text)}
+  .step h3 .acc{color:var(--acid)}
+  .step p{font-size:14px;line-height:1.6;color:var(--text-mid)}
+  .step .codeline{
+    margin-top:18px;padding:9px 12px;
+    background:var(--bg);border:1px solid var(--border);
+    border-radius:6px;
+    font-family:'JetBrains Mono';font-size:11.5px;
+    color:var(--acid);font-weight:500;
+    display:inline-flex;align-items:center;gap:8px;
+  }
+  .step .codeline::before{content:'>';color:var(--text-dim);font-weight:700}
+  .step .icon{
+    position:absolute;top:22px;right:22px;
+    width:36px;height:36px;border-radius:8px;
+    border:1px solid var(--border-bright);
+    display:flex;align-items:center;justify-content:center;
+    background:rgba(255,255,255,.02);
+    color:var(--acid);
+  }
+  .step:nth-child(2) .icon{color:var(--magenta)}
+  .step:nth-child(3) .icon{color:var(--cyan)}
+  .step .icon svg{width:18px;height:18px}
+
+  /* ─── RECEIPTS ─────────────────────────────── */
+  .receipts-section{padding:100px 0 120px;position:relative}
+  .receipts-section::before{
+    content:'';position:absolute;left:0;right:0;top:0;height:1px;
+    background:linear-gradient(90deg,transparent,var(--border-bright),transparent);
+  }
+  .receipt-grid{display:grid;grid-template-columns:repeat(12,1fr);gap:12px}
+  .receipt{
+    background:linear-gradient(180deg, var(--surface), var(--bg-2));
+    border:1px solid var(--border-bright);
+    border-radius:12px;padding:22px 22px 20px;
+    transition:all .25s var(--ease);position:relative;overflow:hidden;
+  }
+  .receipt::before{
+    content:'';position:absolute;top:0;left:0;width:40%;height:1px;
+    background:linear-gradient(90deg, var(--acid), transparent);
+    opacity:0;transition:opacity .25s;
+  }
+  .receipt:hover{border-color:rgba(198,255,26,.4);transform:translateY(-3px)}
+  .receipt:hover::before{opacity:1}
+  .receipt[data-accent="magenta"]:hover{border-color:rgba(255,46,126,.4)}
+  .receipt[data-accent="magenta"]::before{background:linear-gradient(90deg, var(--magenta), transparent)}
+  .receipt[data-accent="blue"]:hover{border-color:rgba(62,107,255,.4)}
+  .receipt[data-accent="blue"]::before{background:linear-gradient(90deg, var(--blue), transparent)}
+  .receipt[data-accent="cyan"]:hover{border-color:rgba(0,229,255,.4)}
+  .receipt[data-accent="cyan"]::before{background:linear-gradient(90deg, var(--cyan), transparent)}
+
+  .receipt .big{
+    font-family:'Archivo Black';
+    font-size:clamp(38px,5vw,76px);line-height:.92;letter-spacing:-.04em;
+    color:var(--acid);margin-bottom:8px;
+    text-shadow:0 0 40px rgba(198,255,26,.2);
+  }
+  .receipt[data-accent="magenta"] .big{color:var(--magenta);text-shadow:0 0 40px rgba(255,46,126,.2)}
+  .receipt[data-accent="blue"] .big{color:var(--blue);text-shadow:0 0 40px rgba(62,107,255,.2)}
+  .receipt[data-accent="cyan"] .big{color:var(--cyan);text-shadow:0 0 40px rgba(0,229,255,.2)}
+  .receipt[data-accent="cream"] .big{color:var(--text);text-shadow:none}
+  .receipt .label{
+    font-family:'JetBrains Mono';font-size:10.5px;
+    text-transform:uppercase;letter-spacing:.1em;
+    color:var(--text-dim);margin-bottom:10px;
+  }
+  .receipt .desc{font-size:13px;line-height:1.55;color:var(--text-mid)}
+  .receipt .meta{margin-top:12px;font-family:'JetBrains Mono';font-size:10px;color:var(--text-dim);letter-spacing:.04em}
+  .receipt.size-lg{grid-column:span 6}
+  .receipt.size-md{grid-column:span 4}
+  .receipt.size-sm{grid-column:span 3}
+  @media(max-width:900px){
+    .receipt.size-lg,.receipt.size-md,.receipt.size-sm{grid-column:span 12}
+  }
+
+  .receipts-foot{
+    margin-top:28px;display:flex;justify-content:space-between;align-items:center;
+    flex-wrap:wrap;gap:16px;
+    padding-top:24px;border-top:1px dashed var(--border-bright);
+  }
+  .receipts-foot .note{
+    font-family:'JetBrains Mono';font-size:12px;color:var(--text-dim);max-width:640px;
+  }
+  .receipts-foot .note code{color:var(--acid);font-weight:600}
+
+  /* ─── WHO IT'S FOR ─────────────────────────── */
+  .who{padding:100px 0;position:relative;background:rgba(255,255,255,.015);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+  .who-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .who-card{
+    border:1px solid var(--border-bright);
+    border-radius:14px;
+    padding:28px 26px;
+    background:linear-gradient(180deg, var(--surface), var(--bg-2));
+    transition:all .25s var(--ease);
+    position:relative;overflow:hidden;
+  }
+  .who-card:hover{transform:translateY(-4px);border-color:rgba(198,255,26,.3)}
+  .who-card .type{
+    font-family:'JetBrains Mono';font-size:10px;
+    text-transform:uppercase;letter-spacing:.12em;
+    color:var(--magenta);margin-bottom:12px;font-weight:600;
+  }
+  .who-card h4{
+    font-family:'Archivo Black';font-size:24px;
+    letter-spacing:-.03em;line-height:.95;text-transform:uppercase;
+    margin-bottom:14px;color:var(--text);
+  }
+  .who-card p{font-size:13.5px;line-height:1.6;color:var(--text-mid)}
+  .who-card .sig{
+    margin-top:18px;padding-top:14px;
+    border-top:1px dashed var(--border-bright);
+    font-family:'JetBrains Mono';font-size:11px;color:var(--acid);font-weight:500;
+    display:flex;align-items:center;gap:8px;
+  }
+  .who-card .sig::before{content:'→';color:var(--text-dim)}
+
+  /* ─── INSTALL ──────────────────────────────── */
+  .install{padding:120px 0 100px;text-align:center;position:relative}
+  .install .section-h{margin-left:auto;margin-right:auto;margin-bottom:36px}
+  .install .code-block{
+    display:inline-flex;flex-direction:column;gap:2px;
+    background:var(--surface);border:1px solid var(--border-bright);
+    border-radius:12px;padding:14px 6px 14px 18px;
+    text-align:left;
+    box-shadow:
+      0 0 0 1px rgba(198,255,26,.08) inset,
+      0 20px 60px -20px rgba(198,255,26,.15);
+    max-width:95%;
+  }
+  .install .code-block .row{
+    display:flex;align-items:center;gap:14px;
+    font-family:'JetBrains Mono';font-size:clamp(14px,1.5vw,18px);font-weight:500;
+    padding-right:14px;
+  }
+  .install .code-block .row .prompt{color:var(--text-dim)}
+  .install .code-block .row .cmd{color:var(--text)}
+  .install .code-block .row .arg{color:var(--acid)}
+  .install .code-block .row .copy{
+    margin-left:auto;
+    background:transparent;color:var(--text-dim);border:1px solid var(--border-bright);
+    padding:5px 10px;border-radius:5px;
+    font-family:'JetBrains Mono';font-size:10.5px;font-weight:600;
+    text-transform:uppercase;cursor:pointer;letter-spacing:.08em;
+    transition:all .15s;
+  }
+  .install .code-block .row .copy:hover{color:var(--acid);border-color:rgba(198,255,26,.35)}
+  .install .sub{
+    margin-top:28px;
+    font-family:'JetBrains Mono';font-size:12.5px;
+    color:var(--text-dim);max-width:620px;margin-left:auto;margin-right:auto;
+    line-height:1.7;
+  }
+  .install .sub a{color:var(--acid);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
+  .install .sub code{color:var(--text);background:var(--surface);padding:2px 6px;border-radius:4px;border:1px solid var(--border)}
+
+  .install .chips{display:inline-flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:26px;max-width:640px}
+  .install .chips .c{
+    padding:6px 12px;border:1px solid var(--border-bright);
+    background:rgba(255,255,255,.02);border-radius:999px;
+    font-family:'JetBrains Mono';font-size:10.5px;
+    color:var(--text-mid);letter-spacing:.04em;
+  }
+  .install .chips .c .ok{color:var(--acid);margin-right:6px}
+
+  /* ─── TEAM (HOLO CARDS) ────────────────────── */
+  .team{padding:120px 0 120px}
+  .team-intro{display:flex;justify-content:space-between;align-items:end;gap:30px;margin-bottom:48px;flex-wrap:wrap}
+  .team-intro p{font-family:'Archivo';font-size:15px;color:var(--text-mid);max-width:380px;line-height:1.6}
+
+  .team-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;perspective:1600px}
+
+  .person{
+    position:relative;
+    border:1px solid var(--border-bright);
+    border-radius:18px;
+    padding:32px 28px 28px;
+    min-height:340px;
+    background:linear-gradient(150deg, #0E1122 0%, #12152A 50%, #181D35 100%);
+    overflow:hidden;
+    transform-style:preserve-3d;
+    transition:transform .12s ease-out, box-shadow .3s;
+    cursor:default;
+    will-change:transform;
+  }
+  .person *{transform-style:preserve-3d}
+
+  /* holo shimmer - conic rainbow */
+  .person::before{
+    content:'';position:absolute;inset:0;
+    background:conic-gradient(
+      from var(--shim-angle,0deg) at var(--mx,50%) var(--my,50%),
+      rgba(0,229,255,.2),
+      rgba(168,85,247,.25),
+      rgba(255,46,126,.22),
+      rgba(255,181,71,.15),
+      rgba(198,255,26,.22),
+      rgba(62,107,255,.22),
+      rgba(0,229,255,.2)
+    );
+    mix-blend-mode:screen;
+    opacity:0;
+    transition:opacity .3s;
+    pointer-events:none;
+    z-index:1;
+  }
+  /* holo diagonal stripe */
+  .person::after{
+    content:'';position:absolute;inset:0;
+    background:
+      repeating-linear-gradient(
+        115deg,
+        transparent 0,
+        transparent 6px,
+        rgba(255,255,255,.04) 7px,
+        transparent 9px,
+        rgba(255,255,255,.08) 10px,
+        transparent 14px
+      );
+    mix-blend-mode:overlay;
+    opacity:0;
+    transition:opacity .3s;
+    pointer-events:none;
+    z-index:2;
+  }
+  .person:hover::before{opacity:.8}
+  .person:hover::after{opacity:1}
+  .person:hover{
+    box-shadow:
+      0 0 0 1px rgba(198,255,26,.15),
+      0 30px 80px -20px rgba(168,85,247,.35),
+      0 10px 40px -10px rgba(0,229,255,.25);
+  }
+
+  .person .content{position:relative;z-index:5}
+  .person .stamp{
+    position:absolute;top:18px;right:22px;
+    font-family:'JetBrains Mono';font-size:9.5px;
+    text-transform:uppercase;letter-spacing:.14em;
+    color:var(--text-dim);
+    transform:translateZ(30px);
+  }
+  .person .stamp .no{color:var(--acid);font-weight:700}
+  .person h3{
+    font-family:'Archivo Black';
+    font-size:clamp(32px,3.3vw,44px);
+    letter-spacing:-.035em;line-height:.9;
+    text-transform:uppercase;color:var(--text);
+    transform:translateZ(40px);
+  }
+  .person .role{
+    font-family:'JetBrains Mono';font-size:10.5px;font-weight:600;
+    text-transform:uppercase;letter-spacing:.12em;
+    margin-top:10px;color:var(--acid);
+    transform:translateZ(35px);
+  }
+  .person p.bio{
+    margin-top:20px;font-size:14px;line-height:1.55;
+    color:var(--text-mid);font-weight:400;
+    transform:translateZ(30px);
+  }
+  .person .stats{
+    margin-top:22px;padding-top:16px;
+    border-top:1px dashed var(--border-bright);
+    display:flex;gap:18px;flex-wrap:wrap;
+    transform:translateZ(30px);
+  }
+  .person .stats .s{font-family:'JetBrains Mono';font-size:10.5px;color:var(--text-dim);letter-spacing:.04em}
+  .person .stats .s .n{color:var(--text);font-weight:700;margin-right:4px}
+
+  .person .links{
+    margin-top:18px;display:flex;gap:12px;
+    font-family:'JetBrains Mono';font-size:11px;
+    transform:translateZ(30px);
+  }
+  .person .links a{color:var(--text-mid);text-decoration:none;opacity:.85;transition:color .15s}
+  .person .links a:hover{color:var(--acid);opacity:1}
+  .person .links a .op{color:var(--text-dim)}
+
+  /* holographic tilt glow dot - follows cursor */
+  .person .gloss{
+    position:absolute;
+    width:300px;height:300px;
+    top:var(--my-px,0);left:var(--mx-px,0);
+    transform:translate(-50%,-50%);
+    background:radial-gradient(circle, rgba(255,255,255,.18), transparent 60%);
+    pointer-events:none;
+    opacity:0;transition:opacity .25s;
+    mix-blend-mode:overlay;
+    z-index:3;
+  }
+  .person:hover .gloss{opacity:1}
+
+  /* ─── FOOTER ───────────────────────────────── */
+  footer{
+    padding:80px 0 50px;border-top:1px solid var(--border);
+    background:linear-gradient(180deg, transparent, rgba(198,255,26,.02));
+    position:relative;overflow:hidden;
+  }
+  footer .mega{
+    font-family:'Archivo Black';
+    font-size:clamp(100px,22vw,380px);
+    line-height:.8;letter-spacing:-.065em;
+    text-transform:uppercase;
+    background:linear-gradient(180deg, var(--text) 20%, transparent 100%);
+    -webkit-background-clip:text;background-clip:text;
+    color:transparent;
+    margin-bottom:40px;
+    white-space:nowrap;
+  }
+  footer .mega em{
+    font-family:'Instrument Serif';font-style:italic;font-weight:400;
+    letter-spacing:-.03em;text-transform:lowercase;
+    background:linear-gradient(180deg, var(--acid) 0%, rgba(198,255,26,.1) 100%);
+    -webkit-background-clip:text;background-clip:text;
+    color:transparent;
+  }
+  footer .foot-row{
+    display:flex;justify-content:space-between;align-items:flex-start;
+    gap:30px;flex-wrap:wrap;
+    padding-top:26px;border-top:1px solid var(--border);
+  }
+  footer .foot-row .col{display:flex;flex-direction:column;gap:9px}
+  footer .foot-row .col-title{
+    font-family:'JetBrains Mono';font-size:10.5px;
+    text-transform:uppercase;letter-spacing:.14em;
+    color:var(--acid);margin-bottom:4px;
+  }
+  footer .foot-row a{
+    color:var(--text-mid);text-decoration:none;
+    font-family:'JetBrains Mono';font-size:12px;font-weight:500;
+    transition:color .15s;
+  }
+  footer .foot-row a:hover{color:var(--acid)}
+  footer .tiny{font-family:'JetBrains Mono';font-size:10.5px;color:var(--text-dim);margin-top:30px;letter-spacing:.04em}
+  footer .tiny .sep{color:var(--text-dim);opacity:.5;margin:0 8px}
+
+  /* ─── TOAST ────────────────────────────────── */
+  .toast{
+    position:fixed;bottom:24px;left:50%;
+    transform:translateX(-50%) translateY(200%);
+    background:var(--surface);color:var(--acid);
+    padding:10px 18px;border-radius:8px;
+    font-family:'JetBrains Mono';font-size:12px;font-weight:600;
+    border:1px solid rgba(198,255,26,.4);
+    box-shadow:0 10px 40px -10px rgba(198,255,26,.4);
+    transition:transform .3s var(--bounce);z-index:200;
+    letter-spacing:.02em;
+  }
+  .toast.show{transform:translateX(-50%) translateY(0)}
+
+  /* ─── ANATOMY · UNDER THE HOOD ─────────────── */
+  .anatomy{
+    margin:18px 0 20px;
+    border:1px solid var(--border-bright);
+    border-radius:14px;
+    background:
+      radial-gradient(60% 50% at 30% 50%, rgba(198,255,26,.04), transparent 70%),
+      linear-gradient(180deg, rgba(10,12,22,.85), rgba(7,8,13,.6));
+    padding:16px 18px 14px;
+    position:relative;overflow:hidden;
+    transition:box-shadow .5s, max-height .7s cubic-bezier(.4,0,.2,1), padding .5s;
+    max-height:640px;
+  }
+  /* collapsed at idle — just the header bar */
+  .anatomy[data-phase="idle"]{
+    max-height:44px;
+    padding-top:14px;padding-bottom:10px;
+    border-color:var(--border);
+  }
+  .anatomy[data-phase="idle"] .ana-svg{opacity:0;pointer-events:none}
+  .ana-svg{transition:opacity .4s .15s}
+  .anatomy::before{
+    content:'';position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(80% 60% at 50% 50%, transparent 40%, rgba(0,0,0,.35) 100%);
+  }
+  .anatomy[data-phase="fork"]{
+    box-shadow:0 0 0 1px rgba(198,255,26,.25), 0 0 60px -10px rgba(198,255,26,.3);
+  }
+
+  .ana-hdr{
+    display:flex;justify-content:space-between;align-items:center;
+    font-family:'JetBrains Mono';font-size:10px;
+    color:var(--text-dim);letter-spacing:.16em;text-transform:uppercase;
+    margin-bottom:4px;flex-wrap:wrap;gap:10px;
+    position:relative;
+  }
+  .ana-hdr .ana-hdr-l{display:flex;align-items:center;gap:10px;color:var(--acid)}
+  .ana-hdr .ana-hdr-l .dot{width:6px;height:6px;border-radius:50%;background:var(--acid);box-shadow:0 0 10px var(--acid);animation:pulse 1.4s infinite}
+  .ana-hdr .live-dot{color:var(--text);font-weight:600}
+  .ana-hdr .ana-hdr-r{display:flex;gap:18px;flex-wrap:wrap}
+  .ana-hdr .ana-status{display:inline-flex;gap:6px;align-items:center}
+  .ana-hdr .ana-status .lbl{color:var(--text-dim);opacity:.7}
+  .ana-hdr .ana-status #anaStatus{color:var(--acid);font-weight:700;letter-spacing:.14em}
+
+  .ana-svg{width:100%;height:auto;display:block;max-height:340px;margin-top:2px}
+
+  /* SVG elements */
+  .a-die-outer{fill:rgba(20,24,40,.45);stroke:rgba(255,255,255,.14);stroke-width:1}
+  .a-die-inner{fill:rgba(10,12,22,.55);stroke:rgba(255,255,255,.06);stroke-width:1}
+  .a-die-tag{fill:rgba(198,255,26,.1);stroke:rgba(198,255,26,.4);stroke-width:1}
+  .a-lbl{font-family:'JetBrains Mono';font-size:9px;fill:var(--text-dim);letter-spacing:.14em;text-transform:uppercase}
+  .a-lbl-chip{fill:var(--acid);font-weight:700;font-size:9.5px}
+  .a-lbl-val{fill:var(--text);font-weight:700}
+
+  /* SM grid */
+  .a-sm{
+    fill:rgba(110,117,136,.22);
+    stroke:rgba(255,255,255,.05);stroke-width:.5;
+    transition:fill .3s;
+  }
+  .anatomy[data-phase="prefill"] .a-sm,
+  .anatomy[data-phase="fork"] .a-sm{
+    animation: smPulse 1.6s ease-in-out infinite;
+    animation-delay: calc(var(--i, 0) * 22ms);
+  }
+  .anatomy[data-phase="branching"] .a-sm{
+    animation: smPulseMulti 1.4s ease-in-out infinite;
+    animation-delay: calc(var(--i, 0) * 18ms);
+  }
+  @keyframes smPulse{
+    0%,100%{fill:rgba(198,255,26,.2)}
+    50%{fill:rgba(198,255,26,.85);filter:drop-shadow(0 0 3px rgba(198,255,26,.7))}
+  }
+  @keyframes smPulseMulti{
+    0%,100%{fill:rgba(110,117,136,.3)}
+    25%{fill:rgba(198,255,26,.7)}
+    50%{fill:rgba(255,46,126,.65)}
+    75%{fill:rgba(0,229,255,.7)}
+  }
+
+  /* KV cache */
+  .a-kv-border{fill:rgba(10,12,22,.6);stroke:rgba(198,255,26,.5);stroke-width:1;stroke-dasharray:3 2}
+  .a-kv-rows line{stroke:rgba(198,255,26,.15);stroke-width:.6}
+  .a-kv-rows{transform:translate(0,0)}
+  .a-kv-fill{
+    fill:url(#kvFillGrad);
+    transform-box:fill-box;
+    transform-origin:50% 100%;
+    transform:scaleY(var(--kv, 0));
+    transition:transform .9s cubic-bezier(.4,0,.2,1);
+  }
+  .anatomy[data-phase="idle"]{--kv:0;--hbm:.05}
+  .anatomy[data-phase="prefill"]{--kv:.78;--hbm:.58}
+  .anatomy[data-phase="fork"]{--kv:.85;--hbm:.64}
+  .anatomy[data-phase="branching"]{--kv:.92;--hbm:.68}
+  .anatomy[data-phase="done"]{--kv:.4;--hbm:.28}
+
+  .anatomy[data-phase="fork"] .a-kv-border{
+    stroke:rgba(255,255,255,.9);
+    animation:kvFlash .7s ease-out;
+  }
+  @keyframes kvFlash{
+    0%{stroke:rgba(198,255,26,.5)}
+    30%{stroke:rgba(255,255,255,1);filter:drop-shadow(0 0 8px rgba(198,255,26,.9))}
+    100%{stroke:rgba(198,255,26,.5)}
+  }
+
+  /* HBM */
+  .a-hbm-track{fill:rgba(255,255,255,.04);stroke:rgba(255,255,255,.1);stroke-width:.5}
+  .a-hbm-fill{
+    fill:url(#hbmGrad);
+    transform-box:fill-box;
+    transform-origin:left center;
+    transform:scaleX(var(--hbm, .05));
+    transition:transform 1s cubic-bezier(.4,0,.2,1);
+  }
+  .a-hbm-ticks line{stroke:rgba(255,255,255,.12);stroke-width:.5}
+
+  /* Fork hub */
+  .a-path{
+    fill:none;stroke:rgba(255,255,255,.12);stroke-width:1.2;
+    stroke-dasharray:4 3;
+  }
+  .anatomy[data-phase="fork"] .a-path,
+  .anatomy[data-phase="branching"] .a-path{
+    stroke:rgba(198,255,26,.45);
+    animation:pathFlow 1.2s linear infinite;
+  }
+  @keyframes pathFlow{to{stroke-dashoffset:-14}}
+
+  .a-hub-glow{
+    fill:url(#hubGlow);opacity:.3;
+    transform-origin:420px 160px;
+    transform:scale(1);
+    transition:opacity .3s, transform .3s;
+  }
+  .anatomy[data-phase="fork"] .a-hub-glow{opacity:1;animation:hubPulse .8s ease-out}
+  @keyframes hubPulse{0%{transform:scale(.6);opacity:1}100%{transform:scale(2);opacity:0}}
+  .a-hub-ring{fill:none;stroke:rgba(198,255,26,.6);stroke-width:1.5;stroke-dasharray:3 2}
+  .anatomy[data-phase="fork"] .a-hub-ring,
+  .anatomy[data-phase="branching"] .a-hub-ring{animation:hubRingSpin 6s linear infinite;transform-origin:420px 160px}
+  @keyframes hubRingSpin{to{transform:rotate(360deg)}}
+  .a-hub-dot{fill:var(--acid);filter:drop-shadow(0 0 6px rgba(198,255,26,.8))}
+
+  /* Fork particles */
+  .a-fork-p{
+    opacity:0;
+    filter:drop-shadow(0 0 6px currentColor);
+  }
+  .a-fork-p[data-lane="0"]{fill:#C6FF1A;color:#C6FF1A}
+  .a-fork-p[data-lane="1"]{fill:#FF2E7E;color:#FF2E7E}
+  .a-fork-p[data-lane="2"]{fill:#3E6BFF;color:#3E6BFF}
+  .a-fork-p[data-lane="3"]{fill:#00E5FF;color:#00E5FF}
+  .anatomy[data-phase="fork"] .a-fork-p{opacity:1;animation:forkPartFade .9s ease-out forwards}
+  @keyframes forkPartFade{
+    0%{opacity:0;r:2}
+    15%{opacity:1;r:5}
+    80%{opacity:1;r:4}
+    100%{opacity:0;r:3}
+  }
+
+  /* Lanes */
+  .a-lane-track{fill:rgba(255,255,255,.02);stroke:rgba(255,255,255,.08);stroke-width:.8}
+  .a-lane-fill{
+    transform-box:fill-box;
+    transform-origin:left center;
+    transform:scaleX(var(--lp, 0));
+    transition:transform .12s linear;
+  }
+  .a-lane-kv{opacity:0;transition:opacity .2s}
+  .a-lane-kv-0{fill:rgba(198,255,26,.6);stroke:rgba(198,255,26,.9);stroke-width:1}
+  .a-lane-kv-1{fill:rgba(255,46,126,.6);stroke:rgba(255,46,126,.9);stroke-width:1}
+  .a-lane-kv-2{fill:rgba(62,107,255,.6);stroke:rgba(62,107,255,.9);stroke-width:1}
+  .a-lane-kv-3{fill:rgba(0,229,255,.6);stroke:rgba(0,229,255,.9);stroke-width:1}
+  .anatomy[data-phase="branching"] .a-lane-kv,
+  .anatomy[data-phase="done"] .a-lane-kv{opacity:1}
+
+  .a-toks circle{opacity:0;transition:opacity .2s}
+  .a-toks[data-lane="0"] circle{fill:#C6FF1A;filter:drop-shadow(0 0 3px rgba(198,255,26,.7))}
+  .a-toks[data-lane="1"] circle{fill:#FF2E7E;filter:drop-shadow(0 0 3px rgba(255,46,126,.7))}
+  .a-toks[data-lane="2"] circle{fill:#3E6BFF;filter:drop-shadow(0 0 3px rgba(62,107,255,.7))}
+  .a-toks[data-lane="3"] circle{fill:#00E5FF;filter:drop-shadow(0 0 3px rgba(0,229,255,.7))}
+  .anatomy[data-phase="branching"] .a-toks circle{
+    opacity:1;animation:tokEmit 1.4s ease-in-out infinite;
+  }
+  .a-toks circle:nth-child(1){animation-delay:0ms}
+  .a-toks circle:nth-child(2){animation-delay:160ms}
+  .a-toks circle:nth-child(3){animation-delay:320ms}
+  .a-toks circle:nth-child(4){animation-delay:480ms}
+  .a-toks circle:nth-child(5){animation-delay:640ms}
+  @keyframes tokEmit{
+    0%{opacity:0;transform:translateX(-8px) scale(.6)}
+    30%{opacity:1;transform:translateX(0) scale(1)}
+    80%{opacity:.7}
+    100%{opacity:0;transform:translateX(14px) scale(.7)}
+  }
+
+  .a-axis{stroke:rgba(255,255,255,.06);stroke-width:.5}
+  .a-divider{stroke:rgba(255,255,255,.06);stroke-width:.5;stroke-dasharray:2 4}
+
+  #anaLaneStatus{fill:var(--text-dim);letter-spacing:.1em}
+  .anatomy[data-phase="branching"] #anaLaneStatus{fill:var(--acid)}
+
+  @media(max-width:720px){
+    .anatomy{padding:12px}
+    .ana-hdr .ana-hdr-r{gap:10px;font-size:9px}
+  }
+
+  /* ─── ROADMAP / BUSINESS MODEL ─────────────── */
+  .roadmap{padding:120px 0 100px;position:relative;border-top:1px solid var(--border)}
+  .roadmap-intro{
+    display:flex;justify-content:space-between;align-items:end;
+    gap:30px;margin-bottom:56px;flex-wrap:wrap;
+  }
+  .roadmap-intro p{
+    font-family:'Archivo';font-size:15px;line-height:1.6;
+    color:var(--text-mid);max-width:440px;
+  }
+  .horizons{
+    display:grid;grid-template-columns:repeat(3,1fr);gap:18px;
+    position:relative;
+  }
+  .horizons::before{
+    content:'';position:absolute;
+    top:60px;left:8%;right:8%;height:1px;
+    background:linear-gradient(90deg,
+      transparent 0%,
+      rgba(198,255,26,.6) 15%,
+      rgba(168,85,247,.5) 55%,
+      rgba(255,46,126,.4) 90%,
+      transparent 100%
+    );
+    z-index:0;
+  }
+  .horizon{
+    position:relative;z-index:2;
+    background:linear-gradient(180deg, var(--surface-2) 0%, var(--surface) 100%);
+    border:1px solid var(--border-bright);
+    border-radius:14px;
+    padding:28px 26px 30px;
+    display:flex;flex-direction:column;
+    transition:transform .2s, border-color .2s, box-shadow .2s;
+  }
+  .horizon:hover{
+    transform:translateY(-4px);
+    border-color:rgba(198,255,26,.3);
+    box-shadow:0 20px 50px -20px rgba(198,255,26,.2);
+  }
+  .horizon .node{
+    width:14px;height:14px;border-radius:50%;
+    margin-bottom:22px;
+    position:relative;
+  }
+  .horizon .node::after{
+    content:'';position:absolute;inset:-6px;border-radius:50%;
+    border:1px solid currentColor;opacity:.35;
+  }
+  .horizon[data-h="1"] .node{background:var(--acid);color:var(--acid);box-shadow:0 0 22px rgba(198,255,26,.7)}
+  .horizon[data-h="2"] .node{background:var(--violet);color:var(--violet);box-shadow:0 0 22px rgba(168,85,247,.6)}
+  .horizon[data-h="3"] .node{background:var(--magenta);color:var(--magenta);box-shadow:0 0 22px rgba(255,46,126,.55)}
+  .horizon .phase{
+    font-family:'JetBrains Mono';font-size:10.5px;font-weight:600;
+    text-transform:uppercase;letter-spacing:.14em;
+    color:var(--text-dim);margin-bottom:8px;
+  }
+  .horizon .phase .when{color:var(--text)}
+  .horizon h3{
+    font-family:'Archivo Black';font-size:26px;line-height:1;
+    letter-spacing:-.03em;text-transform:uppercase;
+    color:var(--text);margin-bottom:6px;
+  }
+  .horizon h3 em{
+    font-family:'Instrument Serif';font-style:italic;font-weight:400;
+    text-transform:lowercase;letter-spacing:-.01em;
+  }
+  .horizon[data-h="1"] h3 em{color:var(--acid)}
+  .horizon[data-h="2"] h3 em{color:var(--violet)}
+  .horizon[data-h="3"] h3 em{color:var(--magenta)}
+  .horizon .status{
+    font-family:'JetBrains Mono';font-size:11px;font-weight:600;
+    letter-spacing:.04em;margin:10px 0 14px;
+  }
+  .horizon[data-h="1"] .status{color:var(--acid)}
+  .horizon[data-h="2"] .status{color:var(--violet)}
+  .horizon[data-h="3"] .status{color:var(--magenta)}
+  .horizon p.pitch{
+    font-size:13.5px;line-height:1.6;color:var(--text-mid);
+    margin-bottom:16px;
+  }
+  .horizon .deliverables{
+    margin-top:auto;padding-top:16px;
+    border-top:1px dashed var(--border-bright);
+    display:flex;flex-direction:column;gap:7px;
+  }
+  .horizon .deliverables .d{
+    font-family:'JetBrains Mono';font-size:11px;
+    color:var(--text-mid);letter-spacing:.02em;
+    display:flex;gap:8px;align-items:flex-start;
+  }
+  .horizon .deliverables .d::before{content:'//';color:var(--text-dim);flex-shrink:0}
+  .horizon .pricing{
+    margin-top:16px;padding:10px 12px;
+    background:rgba(0,0,0,.3);border:1px solid var(--border);
+    border-radius:8px;
+    font-family:'JetBrains Mono';font-size:11px;color:var(--text-mid);
+    line-height:1.5;letter-spacing:.02em;
+  }
+  .horizon .pricing .pk{color:var(--text-dim);margin-right:6px}
+  .horizon .pricing .pv{color:var(--text)}
+
+  /* ─── CAREERS ──────────────────────────────── */
+  .careers{
+    padding:110px 0;position:relative;
+    background:
+      radial-gradient(60% 40% at 80% 0%, rgba(62,107,255,.06), transparent 70%),
+      radial-gradient(60% 50% at 10% 100%, rgba(198,255,26,.04), transparent 70%);
+    border-top:1px solid var(--border);
+  }
+  .careers-intro{
+    display:flex;justify-content:space-between;align-items:end;
+    gap:30px;margin-bottom:44px;flex-wrap:wrap;
+  }
+  .careers-intro p{
+    font-family:'Archivo';font-size:15px;line-height:1.6;
+    color:var(--text-mid);max-width:420px;
+  }
+  .careers-intro .cta{
+    font-family:'JetBrains Mono';font-size:12px;
+    color:var(--acid);text-decoration:none;
+    border:1px dashed rgba(198,255,26,.5);
+    padding:10px 16px;border-radius:8px;
+    transition:all .2s;
+  }
+  .careers-intro .cta:hover{
+    background:rgba(198,255,26,.08);
+    border-color:var(--acid);
+  }
+  .roles{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+  .role-card{
+    position:relative;overflow:hidden;
+    background:linear-gradient(150deg, var(--surface) 0%, var(--surface-2) 100%);
+    border:1px solid var(--border-bright);
+    border-radius:14px;
+    padding:26px 26px 22px;
+    display:flex;flex-direction:column;gap:12px;
+    transition:all .25s;
+    text-decoration:none;color:inherit;
+  }
+  .role-card::after{
+    content:'';position:absolute;top:0;left:0;
+    width:3px;height:100%;
+    background:var(--acid);
+    transform:scaleY(0);transform-origin:top;
+    transition:transform .3s ease;
+  }
+  .role-card:hover{
+    border-color:rgba(198,255,26,.35);
+    transform:translateY(-3px);
+    box-shadow:0 20px 40px -15px rgba(0,0,0,.6);
+  }
+  .role-card:hover::after{transform:scaleY(1)}
+  .role-card .meta{
+    display:flex;justify-content:space-between;align-items:center;
+    font-family:'JetBrains Mono';font-size:10.5px;
+    letter-spacing:.12em;text-transform:uppercase;
+    color:var(--text-dim);
+  }
+  .role-card .meta .pill{
+    background:rgba(198,255,26,.08);
+    color:var(--acid);padding:3px 9px;border-radius:999px;
+    border:1px solid rgba(198,255,26,.25);
+    font-size:9.5px;letter-spacing:.1em;
+  }
+  .role-card h4{
+    font-family:'Archivo Black';font-size:21px;line-height:1.1;
+    letter-spacing:-.025em;color:var(--text);
+    text-transform:uppercase;
+  }
+  .role-card h4 em{
+    font-family:'Instrument Serif';font-style:italic;font-weight:400;
+    color:var(--acid);text-transform:lowercase;letter-spacing:-.01em;
+  }
+  .role-card .desc{
+    font-size:13.5px;line-height:1.55;color:var(--text-mid);
+  }
+  .role-card .tags{
+    display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;
+  }
+  .role-card .tags .tag{
+    font-family:'JetBrains Mono';font-size:10px;
+    color:var(--text-dim);letter-spacing:.04em;
+    padding:3px 8px;border:1px solid var(--border);
+    border-radius:4px;background:rgba(0,0,0,.2);
+  }
+  .role-card .send{
+    font-family:'JetBrains Mono';font-size:11px;
+    color:var(--text-dim);margin-top:6px;
+    display:flex;justify-content:space-between;align-items:center;gap:12px;
+    padding-top:12px;border-top:1px dashed var(--border);
+  }
+  .role-card .send .lbl{color:var(--text-dim);letter-spacing:.02em}
+  .role-card .send .addr{color:var(--acid);margin-left:4px}
+  .role-card .send .arrow{color:var(--acid);transition:transform .2s;font-family:'Archivo Black'}
+  .role-card:hover .send .arrow{transform:translateX(4px)}
+
+  .careers-footer{
+    margin-top:28px;padding:18px 22px;
+    border:1px dashed var(--border-bright);border-radius:12px;
+    font-family:'JetBrains Mono';font-size:12px;
+    color:var(--text-mid);line-height:1.6;
+    display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;
+  }
+  .careers-footer strong{color:var(--text)}
+  .careers-footer a{color:var(--acid);text-decoration:none}
+  .careers-footer a:hover{text-decoration:underline;text-underline-offset:3px}
+
+  /* ─── CONTACT / INVEST ─────────────────────── */
+  .contact{
+    padding:130px 0 120px;position:relative;overflow:hidden;
+    border-top:1px solid var(--border);
+  }
+  .contact::before{
+    content:'';position:absolute;inset:0;
+    background:
+      radial-gradient(60% 50% at 50% 0%, rgba(198,255,26,.07), transparent 70%),
+      radial-gradient(40% 40% at 80% 100%, rgba(255,46,126,.05), transparent 70%);
+    pointer-events:none;
+  }
+  .contact-head{
+    position:relative;text-align:center;margin-bottom:44px;
+  }
+  .contact-head .kicker-wrap{display:flex;justify-content:center;margin-bottom:0}
+  .contact-head .section-h{margin:0 auto}
+  .contact-head p.lead{
+    max-width:580px;margin:18px auto 0;
+    font-family:'Archivo';font-size:15.5px;line-height:1.6;color:var(--text-mid);
+  }
+  .contact-grid{
+    position:relative;
+    display:grid;grid-template-columns:repeat(3,1fr);gap:14px;
+  }
+  .contact-card{
+    position:relative;overflow:hidden;
+    background:linear-gradient(155deg, var(--surface-2) 0%, var(--surface) 60%, #141830 100%);
+    border:1px solid var(--border-bright);
+    border-radius:16px;
+    padding:32px 26px 28px;
+    text-decoration:none;color:inherit;
+    display:flex;flex-direction:column;gap:14px;
+    transition:all .3s;
+    min-height:260px;
+  }
+  .contact-card::before{
+    content:'';position:absolute;top:-1px;left:-1px;right:-1px;height:2px;
+    background:linear-gradient(90deg, transparent, var(--acid), transparent);
+    opacity:0;transition:opacity .3s;
+  }
+  .contact-card:hover{
+    transform:translateY(-5px);
+    border-color:rgba(198,255,26,.3);
+    box-shadow:
+      0 0 0 1px rgba(198,255,26,.1),
+      0 30px 60px -25px rgba(198,255,26,.25);
+  }
+  .contact-card:hover::before{opacity:1}
+  .contact-card .icon{
+    width:48px;height:48px;border-radius:10px;
+    display:flex;align-items:center;justify-content:center;
+    font-family:'Archivo Black';font-size:18px;
+    background:rgba(0,0,0,.3);
+    border:1px solid var(--border-bright);
+    letter-spacing:-.03em;
+  }
+  .contact-card[data-k="invest"] .icon{color:var(--acid);border-color:rgba(198,255,26,.35)}
+  .contact-card[data-k="customer"] .icon{color:var(--cyan);border-color:rgba(0,229,255,.35)}
+  .contact-card[data-k="hiring"] .icon{color:var(--magenta);border-color:rgba(255,46,126,.35)}
+  .contact-card .tag-top{
+    font-family:'JetBrains Mono';font-size:10.5px;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;
+    color:var(--text-dim);
+  }
+  .contact-card h4{
+    font-family:'Archivo Black';font-size:24px;line-height:1.05;
+    letter-spacing:-.03em;text-transform:uppercase;color:var(--text);
+  }
+  .contact-card h4 em{
+    font-family:'Instrument Serif';font-style:italic;font-weight:400;
+    text-transform:lowercase;letter-spacing:-.01em;
+  }
+  .contact-card[data-k="invest"] h4 em{color:var(--acid)}
+  .contact-card[data-k="customer"] h4 em{color:var(--cyan)}
+  .contact-card[data-k="hiring"] h4 em{color:var(--magenta)}
+  .contact-card p{
+    font-size:13.5px;line-height:1.55;color:var(--text-mid);
+    flex-grow:1;
+  }
+  .contact-card .email{
+    margin-top:auto;padding-top:14px;
+    border-top:1px dashed var(--border-bright);
+    font-family:'JetBrains Mono';font-size:12px;
+    display:flex;justify-content:space-between;align-items:center;
+    color:var(--text-mid);
+  }
+  .contact-card .email .addr{color:var(--text)}
+  .contact-card .email .send{
+    font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--text-dim);transition:all .2s;
+  }
+  .contact-card:hover .email .send{color:var(--acid);transform:translateX(4px)}
+
+  .contact-meta{
+    margin-top:44px;
+    display:grid;grid-template-columns:repeat(3,1fr);gap:14px;
+    padding-top:36px;border-top:1px dashed var(--border-bright);
+    font-family:'JetBrains Mono';font-size:11px;
+  }
+  .contact-meta .fact{
+    display:flex;flex-direction:column;gap:4px;
+    color:var(--text-mid);
+  }
+  .contact-meta .fact .k{color:var(--text-dim);letter-spacing:.1em;text-transform:uppercase;font-size:9.5px}
+  .contact-meta .fact .v{color:var(--text);font-size:13px;letter-spacing:.02em}
+  .contact-meta .fact .v em{
+    font-family:'Instrument Serif';font-style:italic;
+    color:var(--acid);font-size:14px;
+  }
+
+  /* ─── TESTIMONIAL PULL-QUOTE ───────────────── */
+  .testimonial{
+    padding:90px 0 100px;position:relative;
+    border-top:1px solid var(--border);
+    background:
+      radial-gradient(70% 50% at 50% 0%, rgba(255,181,71,.05), transparent 70%),
+      linear-gradient(180deg, rgba(255,255,255,.015), transparent);
+  }
+  .testimonial .tag{
+    font-family:'JetBrains Mono';font-size:10.5px;font-weight:600;
+    text-transform:uppercase;letter-spacing:.16em;
+    color:var(--acid);margin-bottom:28px;
+    display:flex;align-items:center;gap:10px;justify-content:center;
+  }
+  .testimonial .tag::before,
+  .testimonial .tag::after{
+    content:'';flex:0 0 40px;height:1px;
+    background:linear-gradient(90deg, transparent, var(--acid), transparent);
+  }
+  .testimonial blockquote{
+    max-width:920px;margin:0 auto;
+    font-family:'Instrument Serif';font-style:italic;font-weight:400;
+    font-size:clamp(28px,3.5vw,46px);line-height:1.2;
+    letter-spacing:-.015em;color:var(--text);
+    text-align:center;
+    position:relative;padding:0 30px;
+  }
+  .testimonial blockquote .mark{
+    position:absolute;
+    font-family:'Archivo Black';font-style:normal;
+    font-size:clamp(100px,13vw,180px);line-height:.7;
+    color:rgba(198,255,26,.12);
+    letter-spacing:-.05em;
+    pointer-events:none;user-select:none;
+  }
+  .testimonial blockquote .mark.open{top:-10px;left:-10px}
+  .testimonial blockquote .mark.close{bottom:-40px;right:-10px}
+  .testimonial blockquote .hi{
+    color:var(--acid);
+    font-family:'Instrument Serif';font-style:italic;
+    position:relative;
+  }
+  .testimonial blockquote .hi::after{
+    content:'';position:absolute;left:0;right:0;bottom:2px;height:10px;
+    background:rgba(198,255,26,.18);z-index:-1;
+    transform:skewX(-8deg);
+  }
+  .testimonial cite{
+    display:block;margin:36px auto 0;text-align:center;
+    font-style:normal;
+    font-family:'JetBrains Mono';font-size:12px;
+    color:var(--text-mid);letter-spacing:.04em;
+  }
+  .testimonial cite a{
+    color:var(--acid);text-decoration:none;
+    border-bottom:1px dashed rgba(198,255,26,.4);
+    padding-bottom:1px;transition:all .2s;
+  }
+  .testimonial cite a:hover{
+    color:var(--text);border-bottom-color:var(--acid);
+    background:rgba(198,255,26,.05);
+  }
+  .testimonial cite .source{color:var(--text);font-weight:600;margin:0 6px}
+  .testimonial .frame{
+    max-width:580px;margin:26px auto 0;
+    display:flex;justify-content:center;gap:18px;flex-wrap:wrap;
+    padding-top:22px;border-top:1px dashed var(--border-bright);
+    font-family:'JetBrains Mono';font-size:10.5px;
+    color:var(--text-dim);letter-spacing:.08em;text-transform:uppercase;
+  }
+  .testimonial .frame span strong{color:var(--acid);font-weight:700}
+
+  /* ─── responsive ───────────────────────────── */
+  @media(max-width:1000px){
+    .step-grid,.team-grid,.who-grid,.horizons,.roles,.contact-grid,.contact-meta{grid-template-columns:1fr}
+    .horizons::before{display:none}
+    .branches{grid-template-columns:repeat(2,1fr)}
+    .nav-links{display:none}
+    .compare .cmp-label{width:100px}
+  }
+  @media(max-width:560px){
+    .branches{grid-template-columns:1fr}
+    .install .code-block .row{font-size:13px}
+    .demo-header{flex-direction:column;gap:8px;align-items:flex-start}
+  }
+</style>
+</head>
+<body>
+<main>
+
+<nav>
+  <div class="container row">
+    <a href="#" class="wordmark"><span class="dot"></span>thaw</a>
+    <div class="nav-links">
+      <a href="#demo">/fork-demo</a>
+      <a href="#how">/how</a>
+      <a href="#receipts">/receipts</a>
+      <a href="#who">/who-for</a>
+      <a href="#install">/install</a>
+      <a href="#roadmap">/roadmap</a>
+      <a href="#careers">/careers</a>
+      <a href="#contact">/contact</a>
+      <a href="https://github.com/thaw-ai/thaw" target="_blank" rel="noopener">/github ↗</a>
+    </div>
+    <a href="#install" class="btn primary">pip install <span class="k">F</span></a>
+  </div>
+</nav>
+
+<section class="hero container">
+  <div class="beam"></div>
+
+  <div class="status-row">
+    <span class="chip live"><span class="sig"></span>reference impl · <strong>vLLM RFC #34303</strong></span>
+    <span class="chip"><span class="sig"></span><strong>0.88s</strong> median per fork round</span>
+    <span class="chip"><span class="sig"></span>bit-identical · reproducible</span>
+  </div>
+
+  <h1>
+    <span class="hi">Fork</span> a
+    <br>
+    <em>running</em> LLM.
+  </h1>
+
+  <p class="sub">A live inference session branches into N children. They skip prefill, inherit the KV cache, and diverge from the fork point — same process or across workers. Not a cache. Not a proxy. A primitive you <code>fork()</code> from Python.</p>
+
+  <div class="cta-row">
+    <button class="btn primary" onclick="document.querySelector('#demo').scrollIntoView({behavior:'smooth'});setTimeout(()=>startDemo(),600)">Run the demo <span class="k">F</span></button>
+    <a href="#install" class="btn">$ pip install thaw-vllm</a>
+    <a href="https://github.com/thaw-ai/thaw" target="_blank" rel="noopener" class="btn">GitHub ★</a>
+  </div>
+
+  <!-- ─── THE INTERACTIVE FORK DEMO ──────────── -->
+  <div class="demo-wrap">
+  <div id="demo" class="demo" role="region" aria-label="Interactive fork demo">
+    <div class="demo-header">
+      <div class="left">
+        <div class="dots"><span></span><span></span><span></span></div>
+        <span class="path">thaw@h100<span class="sep">›</span>fork_demo.py<span class="sep">·</span>llama-3.1-8b</span>
+      </div>
+      <div class="clock" id="clock">T+00.000s</div>
+    </div>
+
+    <div class="scenario-tabs" role="tablist">
+      <button class="tab active" data-s="0" role="tab" aria-selected="true">coding_assistant.py <span class="k">1</span></button>
+      <button class="tab" data-s="1" role="tab">rl_rollout.py <span class="k">2</span></button>
+      <button class="tab" data-s="2" role="tab">tree_search.py <span class="k">3</span></button>
+    </div>
+
+    <div class="demo-stage">
+      <div class="prompt-card">
+        <span class="role" id="promptRole">prompt · 8,127 tokens cached</span>
+        <div class="line" id="promptText"></div>
+      </div>
+
+      <div class="trunk" id="trunk">
+        <div class="role">assistant · pre-fork</div>
+        <div class="text"><span id="trunkText"></span><span class="cursor" id="trunkCursor" style="display:none"></span></div>
+      </div>
+
+      <div class="fork-marker" id="forkMarker">
+        <span class="diamond">◆</span>
+        <div class="bar"></div>
+        <span>FORK POINT — <span id="markerInfo">KV cached · 4 branches hydrated · prefill skipped</span></span>
+        <div class="bar"></div>
+        <span class="diamond">◆</span>
+      </div>
+
+      <!-- ─── ANATOMY · UNDER THE HOOD ─────────────── -->
+      <div class="anatomy" id="anatomy" data-phase="idle">
+        <div class="ana-hdr">
+          <div class="ana-hdr-l"><span class="dot"></span>under the hood · <span class="live-dot">live</span></div>
+          <div class="ana-hdr-r">
+            <span class="ana-status"><span class="lbl">phase</span><span id="anaStatus">idle</span></span>
+            <span class="ana-status"><span class="lbl">gpu</span>h100 sxm · 80 gb hbm3</span>
+            <span class="ana-status"><span class="lbl">model</span>llama-3.1-8b · bf16</span>
+          </div>
+        </div>
+        <svg class="ana-svg" viewBox="0 0 1000 320" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+          <defs>
+            <linearGradient id="hbmGrad" x1="0" x2="1">
+              <stop offset="0%" stop-color="#C6FF1A" stop-opacity=".9"/>
+              <stop offset="60%" stop-color="#A855F7" stop-opacity=".75"/>
+              <stop offset="100%" stop-color="#FF2E7E" stop-opacity=".7"/>
+            </linearGradient>
+            <linearGradient id="kvFillGrad" x1="0" x2="0" y1="1" y2="0">
+              <stop offset="0%" stop-color="#C6FF1A" stop-opacity=".55"/>
+              <stop offset="100%" stop-color="#C6FF1A" stop-opacity=".15"/>
+            </linearGradient>
+            <linearGradient id="laneAcid" x1="0" x2="1"><stop offset="0%" stop-color="#C6FF1A" stop-opacity=".45"/><stop offset="100%" stop-color="#C6FF1A" stop-opacity=".02"/></linearGradient>
+            <linearGradient id="laneMagenta" x1="0" x2="1"><stop offset="0%" stop-color="#FF2E7E" stop-opacity=".45"/><stop offset="100%" stop-color="#FF2E7E" stop-opacity=".02"/></linearGradient>
+            <linearGradient id="laneBlue" x1="0" x2="1"><stop offset="0%" stop-color="#3E6BFF" stop-opacity=".45"/><stop offset="100%" stop-color="#3E6BFF" stop-opacity=".02"/></linearGradient>
+            <linearGradient id="laneCyan" x1="0" x2="1"><stop offset="0%" stop-color="#00E5FF" stop-opacity=".45"/><stop offset="100%" stop-color="#00E5FF" stop-opacity=".02"/></linearGradient>
+            <radialGradient id="hubGlow"><stop offset="0%" stop-color="#C6FF1A" stop-opacity=".9"/><stop offset="100%" stop-color="#C6FF1A" stop-opacity="0"/></radialGradient>
+            <filter id="smBlur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="1.5"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+            <pattern id="anaGrid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="rgba(255,255,255,.025)" stroke-width="1"/></pattern>
+            <path id="forkPath0" d="M365 160 C 420 160, 440 54, 500 54" fill="none"/>
+            <path id="forkPath1" d="M365 160 C 420 160, 440 98, 500 98" fill="none"/>
+            <path id="forkPath2" d="M365 160 C 420 160, 440 222, 500 222" fill="none"/>
+            <path id="forkPath3" d="M365 160 C 420 160, 440 266, 500 266" fill="none"/>
+          </defs>
+
+          <rect width="1000" height="320" fill="url(#anaGrid)"/>
+
+          <!-- ─── GPU DIE ─────────────────────────── -->
+          <g class="ana-die">
+            <rect x="20" y="20" width="340" height="280" rx="14" class="a-die-outer"/>
+            <rect x="30" y="30" width="320" height="240" rx="9" class="a-die-inner"/>
+            <rect x="34" y="34" width="52" height="14" rx="2" class="a-die-tag"/>
+            <text x="60" y="44" class="a-lbl a-lbl-chip" text-anchor="middle">H100</text>
+            <text x="350" y="44" class="a-lbl" text-anchor="end">132 SM · HBM3 · NVLink</text>
+
+            <g id="anaSms" class="a-sms"></g>
+
+            <g class="a-kv" transform="translate(252, 60)">
+              <rect x="0" y="0" width="90" height="130" rx="5" class="a-kv-border"/>
+              <g class="a-kv-clip">
+                <rect x="2" y="2" width="86" height="126" rx="4" class="a-kv-fill"/>
+              </g>
+              <g class="a-kv-rows">
+                <line x1="2" y1="22" x2="88" y2="22"/>
+                <line x1="2" y1="42" x2="88" y2="42"/>
+                <line x1="2" y1="62" x2="88" y2="62"/>
+                <line x1="2" y1="82" x2="88" y2="82"/>
+                <line x1="2" y1="102" x2="88" y2="102"/>
+              </g>
+              <text x="45" y="14" class="a-lbl a-lbl-chip" text-anchor="middle">KV CACHE</text>
+              <text x="45" y="122" class="a-lbl a-lbl-val" text-anchor="middle"><tspan id="anaKvVal">0</tspan> tok</text>
+            </g>
+
+            <g class="a-hbm" transform="translate(40, 216)">
+              <text x="0" y="-5" class="a-lbl">HBM3</text>
+              <text x="302" y="-5" class="a-lbl" text-anchor="end"><tspan class="a-lbl-val" id="anaHbmVal">4</tspan>/80 GB</text>
+              <rect x="0" y="0" width="302" height="14" rx="3" class="a-hbm-track"/>
+              <rect x="0" y="0" width="302" height="14" rx="3" class="a-hbm-fill"/>
+              <g class="a-hbm-ticks">
+                <line x1="75.5" y1="0" x2="75.5" y2="14"/>
+                <line x1="151" y1="0" x2="151" y2="14"/>
+                <line x1="226.5" y1="0" x2="226.5" y2="14"/>
+              </g>
+            </g>
+
+            <text x="40" y="254" class="a-lbl">COMPUTE <tspan class="a-lbl-val" id="anaCompute">·idle</tspan></text>
+          </g>
+
+          <!-- ─── FORK CONNECTOR ──────────────────── -->
+          <g class="ana-flow">
+            <use href="#forkPath0" class="a-path"/>
+            <use href="#forkPath1" class="a-path"/>
+            <use href="#forkPath2" class="a-path"/>
+            <use href="#forkPath3" class="a-path"/>
+
+            <circle cx="420" cy="160" r="24" class="a-hub-glow"/>
+            <circle cx="420" cy="160" r="14" class="a-hub-ring"/>
+            <circle cx="420" cy="160" r="5" class="a-hub-dot"/>
+            <text x="420" y="200" class="a-lbl a-lbl-val" text-anchor="middle">fork()</text>
+            <text x="420" y="212" class="a-lbl" text-anchor="middle">N=4</text>
+
+            <g class="a-particles">
+              <circle r="5" class="a-fork-p" data-lane="0"><animateMotion dur="0.55s" begin="indefinite" fill="freeze" rotate="auto"><mpath href="#forkPath0"/></animateMotion></circle>
+              <circle r="5" class="a-fork-p" data-lane="1"><animateMotion dur="0.6s" begin="indefinite" fill="freeze" rotate="auto"><mpath href="#forkPath1"/></animateMotion></circle>
+              <circle r="5" class="a-fork-p" data-lane="2"><animateMotion dur="0.65s" begin="indefinite" fill="freeze" rotate="auto"><mpath href="#forkPath2"/></animateMotion></circle>
+              <circle r="5" class="a-fork-p" data-lane="3"><animateMotion dur="0.5s" begin="indefinite" fill="freeze" rotate="auto"><mpath href="#forkPath3"/></animateMotion></circle>
+            </g>
+          </g>
+
+          <!-- ─── BRANCH LANES ────────────────────── -->
+          <g class="ana-lanes">
+            <g class="a-lane" data-lane="0" transform="translate(500, 44)">
+              <rect x="0" y="0" width="480" height="20" rx="4" class="a-lane-track"/>
+              <rect x="0" y="0" width="480" height="20" rx="4" fill="url(#laneAcid)" class="a-lane-fill" data-i="0"/>
+              <rect x="-14" y="3" width="14" height="14" rx="2" class="a-lane-kv a-lane-kv-0"/>
+              <text x="-22" y="14" class="a-lbl" text-anchor="end">#1</text>
+              <g class="a-toks" data-lane="0">
+                <circle cx="80" cy="10" r="2.5"/><circle cx="160" cy="10" r="2.5"/><circle cx="240" cy="10" r="2.5"/><circle cx="320" cy="10" r="2.5"/><circle cx="400" cy="10" r="2.5"/>
+              </g>
+            </g>
+            <g class="a-lane" data-lane="1" transform="translate(500, 88)">
+              <rect x="0" y="0" width="480" height="20" rx="4" class="a-lane-track"/>
+              <rect x="0" y="0" width="480" height="20" rx="4" fill="url(#laneMagenta)" class="a-lane-fill" data-i="1"/>
+              <rect x="-14" y="3" width="14" height="14" rx="2" class="a-lane-kv a-lane-kv-1"/>
+              <text x="-22" y="14" class="a-lbl" text-anchor="end">#2</text>
+              <g class="a-toks" data-lane="1">
+                <circle cx="70" cy="10" r="2.5"/><circle cx="150" cy="10" r="2.5"/><circle cx="230" cy="10" r="2.5"/><circle cx="310" cy="10" r="2.5"/><circle cx="390" cy="10" r="2.5"/>
+              </g>
+            </g>
+            <g class="a-lane" data-lane="2" transform="translate(500, 212)">
+              <rect x="0" y="0" width="480" height="20" rx="4" class="a-lane-track"/>
+              <rect x="0" y="0" width="480" height="20" rx="4" fill="url(#laneBlue)" class="a-lane-fill" data-i="2"/>
+              <rect x="-14" y="3" width="14" height="14" rx="2" class="a-lane-kv a-lane-kv-2"/>
+              <text x="-22" y="14" class="a-lbl" text-anchor="end">#3</text>
+              <g class="a-toks" data-lane="2">
+                <circle cx="90" cy="10" r="2.5"/><circle cx="170" cy="10" r="2.5"/><circle cx="250" cy="10" r="2.5"/><circle cx="330" cy="10" r="2.5"/><circle cx="410" cy="10" r="2.5"/>
+              </g>
+            </g>
+            <g class="a-lane" data-lane="3" transform="translate(500, 256)">
+              <rect x="0" y="0" width="480" height="20" rx="4" class="a-lane-track"/>
+              <rect x="0" y="0" width="480" height="20" rx="4" fill="url(#laneCyan)" class="a-lane-fill" data-i="3"/>
+              <rect x="-14" y="3" width="14" height="14" rx="2" class="a-lane-kv a-lane-kv-3"/>
+              <text x="-22" y="14" class="a-lbl" text-anchor="end">#4</text>
+              <g class="a-toks" data-lane="3">
+                <circle cx="60" cy="10" r="2.5"/><circle cx="140" cy="10" r="2.5"/><circle cx="220" cy="10" r="2.5"/><circle cx="300" cy="10" r="2.5"/><circle cx="380" cy="10" r="2.5"/>
+              </g>
+            </g>
+
+            <text x="500" y="140" class="a-lbl">branch lanes · 4 divergent streams</text>
+            <text x="980" y="140" class="a-lbl" text-anchor="end"><tspan class="a-lbl-val" id="anaLaneStatus">queued</tspan></text>
+            <line x1="500" y1="148" x2="980" y2="148" class="a-divider"/>
+            <text x="500" y="300" class="a-lbl">0s</text>
+            <text x="740" y="300" class="a-lbl" text-anchor="middle">0.5s</text>
+            <text x="980" y="300" class="a-lbl" text-anchor="end">1.0s</text>
+            <line x1="500" y1="286" x2="980" y2="286" class="a-axis"/>
+          </g>
+        </svg>
+      </div>
+
+      <div class="branches" id="branches" hidden>
+        <div class="branch" data-accent="acid"><span class="tag accent">◆ #1</span><div class="role">completion A</div><div class="text" id="b0"></div></div>
+        <div class="branch" data-accent="magenta"><span class="tag accent">◆ #2</span><div class="role">completion B</div><div class="text" id="b1"></div></div>
+        <div class="branch" data-accent="blue"><span class="tag accent">◆ #3</span><div class="role">completion C</div><div class="text" id="b2"></div></div>
+        <div class="branch" data-accent="cyan"><span class="tag accent">◆ #4</span><div class="role">completion D</div><div class="text" id="b3"></div></div>
+      </div>
+
+      <!-- timeline viz -->
+      <div class="timeline" id="timeline">
+        <div class="timeline-head">
+          <span>per-branch latency</span>
+          <div class="axis"><span>0s</span><span>0.5s</span><span>1.0s</span></div>
+        </div>
+        <div class="tl-row" data-accent="acid"><span class="tl-label">#1</span><div class="tl-track"><div class="tl-fill" id="tl0"></div></div><span class="tl-time" id="tlt0">—</span></div>
+        <div class="tl-row" data-accent="magenta"><span class="tl-label">#2</span><div class="tl-track"><div class="tl-fill" id="tl1"></div></div><span class="tl-time" id="tlt1">—</span></div>
+        <div class="tl-row" data-accent="blue"><span class="tl-label">#3</span><div class="tl-track"><div class="tl-fill" id="tl2"></div></div><span class="tl-time" id="tlt2">—</span></div>
+        <div class="tl-row" data-accent="cyan"><span class="tl-label">#4</span><div class="tl-track"><div class="tl-fill" id="tl3"></div></div><span class="tl-time" id="tlt3">—</span></div>
+      </div>
+
+      <!-- comparison chart -->
+      <div class="compare" id="compare">
+        <div class="compare-head">
+          <span>cold path vs thaw path — same 4 completions, same tokens</span>
+          <span class="speedup" id="speedup">— <em>—</em></span>
+        </div>
+        <div class="cmp-row">
+          <div class="cmp-label"><strong>Cold engine × 4</strong>re-prefill each time</div>
+          <div class="cmp-bar"><div class="cmp-fill slow" id="cmpSlow"></div></div>
+          <span class="cmp-time" id="cmpSlowT">—</span>
+        </div>
+        <div class="cmp-row">
+          <div class="cmp-label"><strong>thaw fork × 4</strong>prefill once, fork N</div>
+          <div class="cmp-bar"><div class="cmp-fill fast" id="cmpFast"></div></div>
+          <span class="cmp-time" id="cmpFastT">—</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="demo-foot">
+      <div class="meta">
+        <span>fork handle<span class="val" id="statFork">—</span></span>
+        <span>4 completions<span class="val" id="statBranch">—</span></span>
+        <span>prefill saved<span class="val" id="statSkip">—</span></span>
+      </div>
+      <div class="actions">
+        <button class="btn" id="resetBtn" onclick="resetDemo()">Reset <span class="k">R</span></button>
+        <button class="btn primary" id="forkBtn" onclick="startDemo()">Run <span class="k">F</span></button>
+      </div>
+    </div>
+  </div>
+  </div>
+</section>
+
+<div class="marquee" aria-hidden="true">
+  <div class="marquee-inner">
+    <span class="hi">0.88s per fork round</span><span class="sep">◆</span>
+    <span>14 GB/s restore</span><span class="sep">✦</span>
+    <span class="hi">bit-identical</span><span class="sep">◆</span>
+    <span>open source · apache-2.0</span><span class="sep">✦</span>
+    <span class="hi">vLLM + SGLang</span><span class="sep">◆</span>
+    <span>fork() for LLMs</span><span class="sep">✦</span>
+    <span class="hi">70B TP=2 validated</span><span class="sep">◆</span>
+    <span>zero prefill</span><span class="sep">✦</span>
+    <span class="hi">2×H100 SXM</span><span class="sep">◆</span>
+    <!-- duplicate -->
+    <span class="hi">0.88s per fork round</span><span class="sep">◆</span>
+    <span>14 GB/s restore</span><span class="sep">✦</span>
+    <span class="hi">bit-identical</span><span class="sep">◆</span>
+    <span>open source · apache-2.0</span><span class="sep">✦</span>
+    <span class="hi">vLLM + SGLang</span><span class="sep">◆</span>
+    <span>fork() for LLMs</span><span class="sep">✦</span>
+    <span class="hi">70B TP=2 validated</span><span class="sep">◆</span>
+    <span>zero prefill</span><span class="sep">✦</span>
+    <span class="hi">2×H100 SXM</span><span class="sep">◆</span>
+  </div>
+</div>
+
+<!-- ─── HOW IT WORKS ─────────────────────────── -->
+<section id="how" class="steps container">
+  <div class="kicker"><span class="dot"></span><span class="num">01/</span> how it works</div>
+  <h2 class="section-h">
+    <span class="line">It's just <em>fork()</em> —</span>
+    <span class="line">but for a <span class="hi">running LLM</span>.</span>
+  </h2>
+
+  <div class="step-grid">
+    <article class="step">
+      <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="6" y1="9" x2="6" y2="15"/><path d="M18 9a9 9 0 0 1-9 9"/><circle cx="18" cy="6" r="3"/></svg></div>
+      <div class="num">01</div>
+      <h3>Snapshot a <span class="acc">live</span> session.</h3>
+      <p>Weights, KV cache, scheduler state, prefix-hash table — captured in place without tearing down the engine. Pinned memory, pipelined DMA, O_DIRECT writes. The session stays hot.</p>
+      <span class="codeline">handle = thaw.fork(llm)</span>
+    </article>
+
+    <article class="step">
+      <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+      <div class="num">02</div>
+      <h3>Hydrate <span class="acc">N children.</span></h3>
+      <p>Each child inherits the fork point and starts generating at the exact token you forked at. No prefill. No re-reading of the prompt. Same process, or farmed out to pre-warmed workers — your call.</p>
+      <span class="codeline">handle.completions(n=4)</span>
+    </article>
+
+    <article class="step">
+      <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg></div>
+      <div class="num">03</div>
+      <h3>Diverge. <span class="acc">Rank. Keep one.</span></h3>
+      <p>RL rollouts, tool-call fan-out, tree search, best-of-N — each branch runs to completion, you score, you keep the winners. Sub-second per round after a one-time warmup.</p>
+      <span class="codeline">pool.fork_completions(...)</span>
+    </article>
+  </div>
+</section>
+
+<!-- ─── RECEIPTS ─────────────────────────────── -->
+<section id="receipts" class="receipts-section">
+  <div class="container">
+    <div class="kicker"><span class="dot"></span><span class="num">02/</span> real numbers · real hardware</div>
+    <h2 class="section-h">
+      <span class="line"><em>receipts</em>, not</span>
+      <span class="line"><span class="hi">benchmarks</span>.</span>
+    </h2>
+
+    <div class="receipt-grid">
+      <div class="receipt size-lg">
+        <div class="big">0.88s</div>
+        <div class="label">Median per fork round</div>
+        <div class="desc">5 rounds × 4 branches × 64 tokens on H100 80 GB, Llama-3.1-8B. First round 1.16s. One-time warmup: 22.3s. Amortizes to 400× over cold-boot.</div>
+        <div class="meta">2026-04-20 · fork_pool_rl.py · receipt JSON in repo</div>
+      </div>
+
+      <div class="receipt size-md" data-accent="magenta">
+        <div class="big">14 GB/s</div>
+        <div class="label">Peak restore bandwidth</div>
+        <div class="desc">Parallel CRC32C + pipelined DMA. 2.89× over serial CRC fold.</div>
+        <div class="meta">2026-04-23 · pipeline.rs</div>
+      </div>
+
+      <div class="receipt size-sm" data-accent="cream">
+        <div class="big">55 GB/s</div>
+        <div class="label">Slot-warm hot-swap</div>
+        <div class="desc">PCIe Gen5-saturating throughput.</div>
+        <div class="meta">H100 SXM</div>
+      </div>
+
+      <div class="receipt size-sm" data-accent="blue">
+        <div class="big">8/8</div>
+        <div class="label">Architectures bit-identical</div>
+        <div class="desc">Llama · Qwen · Mistral · Gemma · Phi · DeepSeek · GLM · Yi</div>
+        <div class="meta">Stress-tested 2×H100 SXM</div>
+      </div>
+
+      <div class="receipt size-md">
+        <div class="big">1.43s</div>
+        <div class="label">LangGraph PR-review fan-out</div>
+        <div class="desc">Round 1: 64.55s. Rounds 2–3: 1.43s. 4 reviewers forked from one parent session.</div>
+        <div class="meta">2026-04-21 · H100 SXM</div>
+      </div>
+
+      <div class="receipt size-md" data-accent="magenta">
+        <div class="big">141 GB</div>
+        <div class="label">70B TP=2 sleep snapshot</div>
+        <div class="desc">Sleep 16.1s (9.04 GB/s aggregate). Wake 11.1s. Bit-identical after wake.</div>
+        <div class="meta">2026-04-22 · 2×H100 SXM</div>
+      </div>
+
+      <div class="receipt size-md" data-accent="cyan">
+        <div class="big">$0</div>
+        <div class="label">Apache-2.0 · forever</div>
+        <div class="desc">Open source, pip-installable, runs on any CUDA 12+ GPU. No license key, no managed-service gate.</div>
+        <div class="meta">github.com/thaw-ai/thaw</div>
+      </div>
+    </div>
+
+    <div class="receipts-foot">
+      <div class="note">Every receipt above is one <code>pip install + python demos/…py</code> away. JSON outputs checked into the repo — reproduce them, don't trust us.</div>
+      <a href="https://github.com/thaw-ai/thaw/tree/main/site/receipts" class="btn">See the JSON →</a>
+    </div>
+  </div>
+</section>
+
+<!-- ─── WHO IT'S FOR ─────────────────────────── -->
+<section id="who" class="who">
+  <div class="container">
+    <div class="kicker"><span class="dot"></span><span class="num">03/</span> audience</div>
+    <h2 class="section-h">You probably <em>need this</em> if:</h2>
+
+    <div class="who-grid">
+      <div class="who-card">
+        <div class="type">_ RL post-training</div>
+        <h4>You pay prefill N times per rollout.</h4>
+        <p>PPO, GRPO, rejection sampling — every retry reprocesses the same prompt prefix. With thaw, prefill happens once; the 16 rollouts fork off the same KV cache.</p>
+        <div class="sig">Arithmetic ROI on re-prefill cost</div>
+      </div>
+
+      <div class="who-card">
+        <div class="type">_ Coding-agent companies</div>
+        <h4>Your agent branches five times per turn.</h4>
+        <p>Tool-call fan-out, self-consistency, best-of-N code gen. Every branch is the same 8k-token context with a different decoding path. Don't reprocess prefill each time.</p>
+        <div class="sig">Fan-out without paying prefill</div>
+      </div>
+
+      <div class="who-card">
+        <div class="type">_ Agent framework authors</div>
+        <h4>You're building LangGraph, CrewAI, Autogen…</h4>
+        <p>Tree-of-thought, MCTS over agents, parallel reviewer fan-out — all of it wants a fork primitive at the runtime layer, not a cache proxy in front.</p>
+        <div class="sig">A real primitive, not a proxy</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── TESTIMONIAL / EXTERNAL VALIDATION ────── -->
+<section class="testimonial">
+  <div class="container">
+    <div class="tag">external validation · 2026</div>
+    <blockquote>
+      <span class="mark open">“</span>
+      DEEP-GRPO's pivot resampling <em>requires saving KV cache state at pivot points</em>, which <span class="hi">no current async library supports out of the box</span>.
+      <span class="mark close">”</span>
+    </blockquote>
+    <cite>
+      — <span class="source">HuggingFace</span> · Async-RL Training Landscape ·
+      <a href="https://huggingface.co/blog/async-rl-training-landscape" target="_blank" rel="noopener">huggingface.co/blog/async-rl-training-landscape ↗</a>
+    </cite>
+    <div class="frame">
+      <span>the gap is <strong>public</strong></span>
+      <span>/</span>
+      <span><strong>thaw</strong> fills it</span>
+      <span>/</span>
+      <span>receipts <strong>below</strong></span>
+    </div>
+  </div>
+</section>
+
+<!-- ─── INSTALL ──────────────────────────────── -->
+<section id="install" class="install">
+  <div class="container">
+    <div class="kicker"><span class="dot"></span><span class="num">04/</span> install</div>
+    <h2 class="section-h">One line. <em>No build step.</em></h2>
+
+    <div class="code-block">
+      <div class="row">
+        <span class="prompt">$</span><span class="cmd">pip install</span><span class="arg">thaw-vllm thaw-native</span>
+        <button class="copy" onclick="copyInstall()">copy</button>
+      </div>
+    </div>
+
+    <div class="chips">
+      <span class="c"><span class="ok">✓</span>manylinux wheels</span>
+      <span class="c"><span class="ok">✓</span>CUDA 12+</span>
+      <span class="c"><span class="ok">✓</span>Python ≥ 3.9</span>
+      <span class="c"><span class="ok">✓</span>vLLM + SGLang</span>
+      <span class="c"><span class="ok">✓</span>no Rust toolchain</span>
+    </div>
+
+    <div class="sub">
+      Pre-built manylinux wheels on PyPI.
+      <code>from thaw_vllm import ForkPool</code> and you're off.
+      Full quickstart on <a href="https://github.com/thaw-ai/thaw#quickstart">GitHub</a>.
+    </div>
+  </div>
+</section>
+
+<!-- ─── TEAM HOLO CARDS ──────────────────────── -->
+<section class="team container">
+  <div class="team-intro">
+    <div>
+      <div class="kicker"><span class="dot"></span><span class="num">05/</span> team</div>
+      <h2 class="section-h">Three <em>seniors</em>, one primitive.</h2>
+    </div>
+    <p>Shipping from Madison, WI. All three graduating May 2026. Equity not formalized yet — flag before any term-sheet conversation.</p>
+  </div>
+
+  <div class="team-grid" id="teamGrid">
+    <article class="person" data-holo>
+      <div class="gloss"></div>
+      <div class="content">
+        <div class="stamp"><span class="no">#01</span> · founder</div>
+        <h3>Nils<br>Matteson</h3>
+        <div class="role">product · python · integration</div>
+        <p class="bio">Built the codebase. Runs product, Python integration, vLLM + SGLang loaders, fork pool, streaming server.</p>
+        <div class="stats">
+          <div class="s"><span class="n">9.4k</span>LOC · rust</div>
+          <div class="s"><span class="n">5.5k</span>LOC · python</div>
+          <div class="s"><span class="n">CS·DS</span>'26</div>
+        </div>
+        <div class="links">
+          <a href="https://www.linkedin.com/in/nilsmatteson/" target="_blank" rel="noopener"><span class="op">in/</span>nilsmatteson</a>
+          <a href="https://github.com/matteso1" target="_blank" rel="noopener"><span class="op">gh/</span>matteso1</a>
+        </div>
+      </div>
+    </article>
+
+    <article class="person" data-holo>
+      <div class="gloss"></div>
+      <div class="content">
+        <div class="stamp"><span class="no">#02</span> · co-founder</div>
+        <h3>Matthew<br>Yu</h3>
+        <div class="role">rust · cuda · os</div>
+        <p class="bio">Rust + CUDA throughput. Pinned memory, O_DIRECT, pipelined DMA. Up next: GPUDirect Storage.</p>
+        <div class="stats">
+          <div class="s"><span class="n">sys</span>programming</div>
+          <div class="s"><span class="n">CS·DS</span>'26</div>
+        </div>
+        <div class="links">
+          <a href="https://www.linkedin.com/in/matthewyu-dev/" target="_blank" rel="noopener"><span class="op">in/</span>matthewyu-dev</a>
+        </div>
+      </div>
+    </article>
+
+    <article class="person" data-holo>
+      <div class="gloss"></div>
+      <div class="content">
+        <div class="stamp"><span class="no">#03</span> · co-founder</div>
+        <h3>Karan<br>Kapur</h3>
+        <div class="role">rust · cloud · networking</div>
+        <p class="bio">Rust cloud storage. Parallel ranged S3/GCS restore. Algorithms and distributed-systems background.</p>
+        <div class="stats">
+          <div class="s"><span class="n">dist</span>systems</div>
+          <div class="s"><span class="n">CS·DS</span>'26</div>
+        </div>
+        <div class="links">
+          <a href="https://www.linkedin.com/in/karankapur5/" target="_blank" rel="noopener"><span class="op">in/</span>karankapur5</a>
+        </div>
+      </div>
+    </article>
+  </div>
+</section>
+
+<!-- ─── ROADMAP / WHERE THIS IS GOING ─────────── -->
+<section id="roadmap" class="roadmap container">
+  <div class="roadmap-intro">
+    <div>
+      <div class="kicker"><span class="dot"></span><span class="num">06/</span> where this is going</div>
+      <h2 class="section-h">OSS primitive. <em>Managed</em> fabric. <em>Memory</em> layer.</h2>
+    </div>
+    <p>thaw is an open-source library today. The product ladder climbs from primitive → managed service → the universal memory layer every agent framework reaches for.</p>
+  </div>
+
+  <div class="horizons">
+    <article class="horizon" data-h="1">
+      <div class="node"></div>
+      <div class="phase"><span class="when">NOW</span> &nbsp;//&nbsp; 2026</div>
+      <h3>OSS <em>primitive</em></h3>
+      <div class="status">● shipped · v0.5.1</div>
+      <p class="pitch">Fork a running LLM in sub-second. Open source, Apache-2.0, on PyPI. Every RL team and agent framework author can call it today — no signup, no credit card.</p>
+      <div class="deliverables">
+        <span class="d">pip install thaw-vllm</span>
+        <span class="d">vLLM + SGLang loaders</span>
+        <span class="d">ForkPool · sleep/wake · KV snapshot</span>
+        <span class="d">vLLM RFC #34303 reference</span>
+      </div>
+      <div class="pricing"><span class="pk">cost</span><span class="pv">free forever — distribution moat</span></div>
+    </article>
+
+    <article class="horizon" data-h="2">
+      <div class="node"></div>
+      <div class="phase"><span class="when">NEXT</span> &nbsp;//&nbsp; Q3 2026</div>
+      <h3>thaw <em>cloud</em></h3>
+      <div class="status">◔ building · design partners open</div>
+      <p class="pitch">Hosted ForkPool as an API. Point your RL loop at <code>fork.thaw.sh</code>, get N divergent rollouts per prompt without owning a single GPU. Pay per fork round, not per idle hour.</p>
+      <div class="deliverables">
+        <span class="d">POST /v1/fork — N children, 1 prefill</span>
+        <span class="d">Global snapshot CDN · warm pods</span>
+        <span class="d">SOC2-lite · VPC peering</span>
+        <span class="d">OpenAI-compatible endpoints</span>
+      </div>
+      <div class="pricing"><span class="pk">price</span><span class="pv">$/fork round · volume tiers</span></div>
+    </article>
+
+    <article class="horizon" data-h="3">
+      <div class="node"></div>
+      <div class="phase"><span class="when">AFTER</span> &nbsp;//&nbsp; 2027</div>
+      <h3>memory <em>layer</em></h3>
+      <div class="status">○ horizon</div>
+      <p class="pitch">Cross-node RDMA restore. LoRA hot-swap in &lt;1s. Fork across clusters. The primitive every framework reaches for when their state needs to move. Think <span style="color:var(--text)">S3 for live GPU memory</span>.</p>
+      <div class="deliverables">
+        <span class="d">RDMA · cross-node fork</span>
+        <span class="d">LoRA hot-swap · 100 tunes on 1 base</span>
+        <span class="d">GPUDirect Storage · NVMe→GPU</span>
+        <span class="d">Universal snapshot format</span>
+      </div>
+      <div class="pricing"><span class="pk">moat</span><span class="pv">every framework depends on it</span></div>
+    </article>
+  </div>
+</section>
+
+<!-- ─── CAREERS ──────────────────────────────── -->
+<section id="careers" class="careers">
+  <div class="container">
+    <div class="careers-intro">
+      <div>
+        <div class="kicker"><span class="dot"></span><span class="num">07/</span> careers</div>
+        <h2 class="section-h">Help build the <em>primitive</em>.</h2>
+      </div>
+      <a class="cta" href="mailto:jobs@thaw.sh?subject=Resume%20—%20thaw">send resume → jobs@thaw.sh</a>
+    </div>
+
+    <div class="roles">
+      <a class="role-card" href="mailto:jobs@thaw.sh?subject=Role%3A%20Founding%20Engineer%20—%20ML%20Runtime">
+        <div class="meta"><span>// founding · eng · sf or remote</span><span class="pill">open</span></div>
+        <h4>Founding Engineer — <em>ML runtime</em></h4>
+        <div class="desc">Own the vLLM + SGLang loaders and the fork primitive's Python layer. Read engine source code for fun. Write demos that turn into receipts.</div>
+        <div class="tags">
+          <span class="tag">python</span>
+          <span class="tag">vllm</span>
+          <span class="tag">sglang</span>
+          <span class="tag">pytorch</span>
+        </div>
+        <div class="send"><span class="lbl">apply → <span class="addr">jobs@thaw.sh</span></span><span class="arrow">→</span></div>
+      </a>
+
+      <a class="role-card" href="mailto:jobs@thaw.sh?subject=Role%3A%20Founding%20Engineer%20—%20Systems%20(Rust%2FCUDA)">
+        <div class="meta"><span>// founding · eng · sf or remote</span><span class="pill">open</span></div>
+        <h4>Founding Engineer — <em>systems</em></h4>
+        <div class="desc">Push Rust + CUDA past safetensors. Pinned memory, O_DIRECT, GPUDirect Storage, DMA pipelines. NVMe-saturating restore is the arena.</div>
+        <div class="tags">
+          <span class="tag">rust</span>
+          <span class="tag">cuda</span>
+          <span class="tag">gds</span>
+          <span class="tag">linux os</span>
+        </div>
+        <div class="send"><span class="lbl">apply → <span class="addr">jobs@thaw.sh</span></span><span class="arrow">→</span></div>
+      </a>
+
+      <a class="role-card" href="mailto:jobs@thaw.sh?subject=Role%3A%20Founding%20Engineer%20—%20Distributed%20%2F%20Cloud">
+        <div class="meta"><span>// founding · eng · sf or remote</span><span class="pill">open</span></div>
+        <h4>Founding Engineer — <em>distributed</em></h4>
+        <div class="desc">Parallel ranged-GET from S3/GCS into a pinned ring. RDMA cross-node restore. You've saturated 100 Gbps before and you want to do it again for LLMs.</div>
+        <div class="tags">
+          <span class="tag">rust</span>
+          <span class="tag">s3 · gcs</span>
+          <span class="tag">rdma</span>
+          <span class="tag">networking</span>
+        </div>
+        <div class="send"><span class="lbl">apply → <span class="addr">jobs@thaw.sh</span></span><span class="arrow">→</span></div>
+      </a>
+
+      <a class="role-card" href="mailto:jobs@thaw.sh?subject=Role%3A%20Founding%20Integrations%20%2F%20DevRel">
+        <div class="meta"><span>// founding · devrel · sf or remote</span><span class="pill">open</span></div>
+        <h4>Founding <em>integrations</em> / devrel</h4>
+        <div class="desc">Embed the fork primitive inside LangGraph, TRL, accelerate. Write the demo that makes an RL team's training loop 10× cheaper. Ship receipts publicly.</div>
+        <div class="tags">
+          <span class="tag">python</span>
+          <span class="tag">langgraph</span>
+          <span class="tag">trl</span>
+          <span class="tag">writing</span>
+        </div>
+        <div class="send"><span class="lbl">apply → <span class="addr">jobs@thaw.sh</span></span><span class="arrow">→</span></div>
+      </a>
+    </div>
+
+    <div class="careers-footer">
+      <div><strong>Don't see your role?</strong> &nbsp; If you've shipped a primitive someone else depends on, we want to talk. &nbsp;</div>
+      <div>→ <a href="mailto:jobs@thaw.sh?subject=Reach%20out%20—%20open%20interest">jobs@thaw.sh</a></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── CONTACT / INVEST ─────────────────────── -->
+<section id="contact" class="contact">
+  <div class="container">
+    <div class="contact-head">
+      <div class="kicker-wrap"><div class="kicker"><span class="dot"></span><span class="num">08/</span> get in touch</div></div>
+      <h2 class="section-h">Big plans. <em>Small team.</em> Fast doors.</h2>
+      <p class="lead">Investing, piloting, or shipping — we're building in public and moving weekly. Pick the path that fits and drop a line; we answer within a day.</p>
+    </div>
+
+    <div class="contact-grid">
+      <a class="contact-card" data-k="invest" href="mailto:nils@thaw.sh?subject=Invest%20—%20thaw%20pre-seed">
+        <div class="icon">$</div>
+        <div class="tag-top">// for investors</div>
+        <h4>Back <em>the primitive</em></h4>
+        <p>Raising pre-seed to take the team full-time. OSS distribution, managed revenue in Q3, memory-layer moat after. Deck + receipts on request.</p>
+        <div class="email">
+          <span class="addr">nils@thaw.sh</span>
+          <span class="send">write ↗</span>
+        </div>
+      </a>
+
+      <a class="contact-card" data-k="customer" href="mailto:nils@thaw.sh?subject=Pilot%20—%20thaw%20for%20our%20workload">
+        <div class="icon">⟶</div>
+        <div class="tag-top">// for customers</div>
+        <h4>Run <em>a pilot</em></h4>
+        <p>RL teams and agent companies — we'll embed with you for a week, stand thaw up against your workload, and publish the receipt. No charge, no lock-in.</p>
+        <div class="email">
+          <span class="addr">nils@thaw.sh</span>
+          <span class="send">write ↗</span>
+        </div>
+      </a>
+
+      <a class="contact-card" data-k="hiring" href="mailto:jobs@thaw.sh?subject=Resume%20—%20interested%20in%20building%20at%20thaw">
+        <div class="icon">◈</div>
+        <div class="tag-top">// for engineers</div>
+        <h4>Come <em>build</em></h4>
+        <p>Four founding roles open (see above). Send a resume and one paragraph on a systems primitive you shipped that someone else still depends on.</p>
+        <div class="email">
+          <span class="addr">jobs@thaw.sh</span>
+          <span class="send">write ↗</span>
+        </div>
+      </a>
+    </div>
+
+    <div class="contact-meta">
+      <div class="fact"><span class="k">// status</span><span class="v"><em>actively raising</em> · pre-seed</span></div>
+      <div class="fact"><span class="k">// stage</span><span class="v">OSS shipped · YC S26 applicant</span></div>
+      <div class="fact"><span class="k">// location</span><span class="v">Madison WI · SF-bound for batch</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── FOOTER ───────────────────────────────── -->
+<footer>
+  <div class="container">
+    <div class="mega">thaw<em>.sh</em></div>
+    <div class="foot-row">
+      <div class="col">
+        <div class="col-title">// primitive</div>
+        <a href="#demo">fork demo</a>
+        <a href="#how">how it works</a>
+        <a href="#receipts">receipts</a>
+      </div>
+      <div class="col">
+        <div class="col-title">// code</div>
+        <a href="https://github.com/thaw-ai/thaw">github</a>
+        <a href="https://pypi.org/project/thaw-vllm/">pypi: thaw-vllm</a>
+        <a href="https://pypi.org/project/thaw-native/">pypi: thaw-native</a>
+      </div>
+      <div class="col">
+        <div class="col-title">// upstream</div>
+        <a href="https://github.com/vllm-project/vllm/issues/34303">vLLM RFC #34303</a>
+        <a href="#who">who it's for</a>
+        <a href="#roadmap">roadmap</a>
+      </div>
+      <div class="col">
+        <div class="col-title">// company</div>
+        <a href="#careers">careers</a>
+        <a href="#contact">invest</a>
+        <a href="mailto:nils@thaw.sh">nils@thaw.sh</a>
+        <a href="mailto:jobs@thaw.sh">jobs@thaw.sh</a>
+        <a href="https://www.linkedin.com/in/nilsmatteson/">linkedin</a>
+      </div>
+    </div>
+    <div class="tiny">© 2026 thaw<span class="sep">/</span>apache-2.0<span class="sep">/</span>built in madison, wi<span class="sep">/</span>not a proxy</div>
+  </div>
+</footer>
+
+</main>
+
+<div class="toast" id="toast">✓ copied</div>
+
+<script>
+/* ─────────────────────────────────────────────
+   SCENARIO CONTENT
+   ───────────────────────────────────────────── */
+const SCENARIOS = [
+  {
+    key:'coding',
+    prompt:'[SYSTEM] You are a senior Python engineer reviewing code.\n[USER] My pipeline iterates a 10M-element list and runs a scoring function per element. It takes 90s — what are the best levers for speeding it up?',
+    cacheLabel:'prompt + context · 8,127 tokens cached',
+    trunk:'Good question — there\'s rarely one answer. Before optimizing, I\'d profile with cProfile to confirm where the time actually goes; Python intuition about hotspots is wrong more often than right. Given a naive 10M-element loop, the right fix depends on what\'s inside it',
+    trunkDuration:3400,
+    branches:[
+      { accent:'acid',
+        label:'NumPy / vectorize',
+        text:'— if the body is arithmetic on numbers (even with simple conditionals), vectorize with <span class="hl">NumPy</span>. A single <span class="hl">np.where</span> or broadcast replaces the whole loop with one C call. Expect <span class="hl">50–200×</span> on well-shaped data. Catch: only works if the op is element-wise and branch-free.' },
+      { accent:'magenta',
+        label:'multiprocessing',
+        text:'— if iterations are independent and CPU-bound, the <span class="hl">GIL</span> is the wall. <span class="hl">multiprocessing.Pool.map</span> fans out across cores; each worker runs Python freely. Scales near-linearly with core count up to chunk overhead. Start with <span class="hl">chunksize=1000</span>.' },
+      { accent:'blue',
+        label:'Rust via PyO3',
+        text:'— if the loop has branching, state, or custom logic, the real cost is <span class="hl">bytecode dispatch</span>. Port the hot path to a tiny <span class="hl">PyO3</span> extension — Rust compiles to native, calls back into Python for glue. Near-C speed, ~50 LOC. Best for one hotspot.' },
+      { accent:'cyan',
+        label:'algorithmic',
+        text:'— profile first. Real bottlenecks are almost always algorithmic: an <span class="hl">O(n²)</span> scan hiding in a loop, a missing index, a dict used where a set would do. Replace scans with hash lookups, precompute invariants, cache. <span class="hl">10,000×</span> wins often hide here.' },
+    ],
+    stats:{ fork:'0.289s', branch:'0.633s', skip:'8,127 tokens × 4' },
+    compare:{ coldMs:21400, forkMs:880, speedup:'24×' },
+  },
+  {
+    key:'rl',
+    prompt:'[SYSTEM] You are a PPO rollout worker.\n[USER] From this 8k-token code-review trace, sample 4 divergent continuations. The reviewer flagged: race in retry path, unbounded retry count, missing timeout.',
+    cacheLabel:'code-review trace · 8,192 tokens cached',
+    trunk:'Reading the trace. Three concerns, each with a different root cause — and the fix you pick determines how the other two land. Four candidate policies, scored for safety-vs-diff-size. I\'ll address',
+    trunkDuration:3100,
+    branches:[
+      { accent:'acid',
+        label:'policy A',
+        text:' <span class="hl">the retry bound first</span> — cap at 3 attempts with exponential backoff, then layer a per-key mutex for the race, and wrap the whole block in a timeout. Trades ~15ms of latency for safety. Diff: ~25 LOC, touches three call sites. Defensible in code review.' },
+      { accent:'magenta',
+        label:'policy B',
+        text:' <span class="hl">the timeout first</span> — a 5s deadline makes the other two concerns fall out naturally because no retry loops forever, and the race window becomes bounded. Simplest patch, ~8 LOC, one call site. Arguably sufficient if latency budget tolerates a few extra 5s failures.' },
+      { accent:'blue',
+        label:'policy C',
+        text:' <span class="hl">the race directly</span> — single-flight guard keyed on request ID. Retries and timeouts become independent knobs you can tune later. More code (~40 LOC, new helper), but the cleanest separation of concerns. Right call if this is a hot path for downstream services.' },
+      { accent:'cyan',
+        label:'policy D',
+        text:' <span class="hl">all three, with a CircuitBreaker wrapper</span>. Heaviest patch (~75 LOC) but bounds every failure mode: retry count, timeout, cascading failures. Appropriate if SLOs matter or if many upstream services call this. Logs + metrics included.' },
+    ],
+    stats:{ fork:'0.321s', branch:'0.41s', skip:'8,192 tokens × 4' },
+    compare:{ coldMs:19700, forkMs:730, speedup:'27×' },
+  },
+  {
+    key:'tree',
+    prompt:'[SYSTEM] You are searching a game tree. Position encoded as FEN, centipawn eval from prior move.\n[USER] From this middlegame, explore the top-4 candidates in parallel with a 3-ply lookahead.',
+    cacheLabel:'position · 6,308 tokens cached',
+    trunk:'Position analyzed. Four plausible responses to the threat on f7, each with a distinct strategic signature. I\'ll explore each with 3-ply lookahead, report centipawn eval plus positional factors. The candidates are',
+    trunkDuration:3000,
+    branches:[
+      { accent:'acid',
+        label:'e4 → exd5',
+        text:' <span class="hl">open</span>. Central pawn exchange opens the e-file — rook+queen battery gives <span class="hl">+40 cp</span>. Risky if black castles quickly; the same line loses ~25 cp if they hold with Nc6. Deeper search prefers this in ~60% of similar structures.' },
+      { accent:'magenta',
+        label:'Nxd5',
+        text:' <span class="hl">forcing</span>. Knight trade simplifies to a nearly symmetrical endgame. Engine sees <span class="hl">+15 cp</span>, close to equal. Solid — flat eval but low variance. Right for playing a prize or maintaining an edge without risk.' },
+      { accent:'blue',
+        label:'f4',
+        text:' <span class="hl">ambitious</span>. Kingside space grab. Short-term eval drops to <span class="hl">−20 cp</span> as you commit pawns, but structural pressure builds every move. Matches deeper search preferences at 6+ ply. Losing option if black hits back with e5.' },
+      { accent:'cyan',
+        label:'Qd2',
+        text:' <span class="hl">prophylactic</span>. No immediate gain, <span class="hl">+5 cp</span> — but keeps options open and prepares long castling. Low-variance move that relies on later tactics. Good when you don\'t know what opponent will do.' },
+    ],
+    stats:{ fork:'0.246s', branch:'0.58s', skip:'6,308 tokens × 4' },
+    compare:{ coldMs:16200, forkMs:840, speedup:'19×' },
+  },
+];
+
+/* ─────────────────────────────────────────────
+   STATE
+   ───────────────────────────────────────────── */
+let scenarioIdx = 0;
+let forked = false;
+let running = false;
+let typingTimers = [];
+let clockRAF = null;
+let clockStart = 0;
+
+const $ = id => document.getElementById(id);
+const clearT = () => { typingTimers.forEach(clearTimeout); typingTimers = []; if (clockRAF) { cancelAnimationFrame(clockRAF); clockRAF = null; } };
+
+/* ─── CLOCK ───────────────────────────────── */
+function startClock(){
+  clockStart = performance.now();
+  const tick = () => {
+    const t = (performance.now() - clockStart) / 1000;
+    $('clock').textContent = 'T+' + t.toFixed(3).padStart(6,'0') + 's';
+    clockRAF = requestAnimationFrame(tick);
+  };
+  tick();
+}
+function stopClock(final){
+  if (clockRAF) { cancelAnimationFrame(clockRAF); clockRAF = null; }
+  if (final != null) $('clock').textContent = 'T+' + final.toFixed(3).padStart(6,'0') + 's';
+}
+
+/* ─── TYPEWRITER ──────────────────────────── */
+function typeInto(el, text, speed){
+  return new Promise(resolve => {
+    let i = 0;
+    el.innerHTML = '';
+    const step = () => {
+      if (i >= text.length) return resolve();
+      if (text[i] === '<') {
+        const close = text.indexOf('>', i);
+        el.innerHTML += text.slice(i, close+1);
+        i = close + 1;
+      } else {
+        el.innerHTML += text[i];
+        i += 1;
+      }
+      typingTimers.push(setTimeout(step, speed));
+    };
+    step();
+  });
+}
+
+/* ─── LOAD SCENARIO ───────────────────────── */
+function loadScenario(idx){
+  scenarioIdx = idx;
+  forked = false;
+  running = false;
+  clearT();
+
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active', i===idx));
+
+  const s = SCENARIOS[idx];
+  $('promptRole').textContent = s.cacheLabel;
+  $('promptText').textContent = s.prompt;
+
+  $('trunkText').textContent = '';
+  $('trunkCursor').style.display = 'none';
+  $('trunk').classList.remove('dimmed');
+  $('forkMarker').classList.remove('show');
+  $('markerInfo').textContent = 'KV cached · 4 branches hydrated · prefill skipped';
+  $('branches').hidden = true;
+  ['b0','b1','b2','b3'].forEach(id => $(id).innerHTML = '');
+  document.querySelectorAll('.branch').forEach(b => b.classList.remove('in'));
+
+  $('timeline').classList.remove('show');
+  $('compare').classList.remove('show');
+  ['tl0','tl1','tl2','tl3'].forEach(id => $(id).style.width = '0%');
+  ['tlt0','tlt1','tlt2','tlt3'].forEach(id => { $(id).textContent = '—'; $(id).classList.remove('done'); });
+  $('cmpSlow').style.width = '0%';
+  $('cmpSlow').textContent = '';
+  $('cmpFast').style.width = '0%';
+  $('cmpFast').textContent = '';
+  $('cmpSlowT').textContent = '—';
+  $('cmpFastT').textContent = '—';
+  $('speedup').innerHTML = '— <em>—</em>';
+
+  $('statFork').textContent = ' —';
+  $('statBranch').textContent = ' —';
+  $('statSkip').textContent = ' —';
+
+  $('forkBtn').innerHTML = 'Run <span class="k">F</span>';
+  $('forkBtn').classList.remove('magenta');
+  $('forkBtn').classList.add('primary');
+  $('forkBtn').disabled = false;
+
+  stopClock(0);
+  $('clock').textContent = 'T+00.000s';
+
+  // anatomy reset
+  if (typeof resetAnaLanes === 'function') resetAnaLanes();
+  if (typeof setAnaPhase === 'function') setAnaPhase('idle');
+}
+
+/* ─── RUN THE DEMO (stream trunk → auto-fork → branches → charts) ─── */
+async function startDemo(){
+  if (running) return;
+  const s = SCENARIOS[scenarioIdx];
+  running = true;
+  forked = false;
+
+  $('forkBtn').innerHTML = 'Running…';
+  $('forkBtn').disabled = true;
+
+  startClock();
+  resetAnaLanes();
+  setAnaPhase('prefill');
+
+  // prompt type-in instantaneously (already set) — now stream trunk
+  $('trunkCursor').style.display = 'inline-block';
+  const speed = Math.max(12, Math.floor(s.trunkDuration / s.trunk.length));
+  await typeInto($('trunkText'), s.trunk, speed);
+
+  // brief pause for the viewer
+  await new Promise(r => { typingTimers.push(setTimeout(r, 260)); });
+
+  // FORK
+  await doFork(s);
+}
+
+async function doFork(s){
+  forked = true;
+
+  // confetti "FORK" words off the button
+  const btn = $('forkBtn');
+  const rect = btn.getBoundingClientRect();
+  const demoEl = document.querySelector('.demo');
+  const demoRect = demoEl.getBoundingClientRect();
+  const colors = ['var(--acid)','var(--magenta)','var(--blue)','var(--cyan)'];
+  for (let i=0;i<5;i++){
+    const w = document.createElement('div');
+    w.className = 'float-word';
+    w.textContent = 'FORK';
+    w.style.left = (rect.left - demoRect.left + rect.width/2 + (Math.random()*60-30)) + 'px';
+    w.style.top = (rect.top - demoRect.top - 10) + 'px';
+    w.style.color = colors[i%colors.length];
+    w.style.animationDelay = (i*0.05)+'s';
+    demoEl.appendChild(w);
+    setTimeout(()=>w.remove(), 1100);
+  }
+
+  // fork marker + dim trunk + fire anatomy fork flash
+  await new Promise(r => typingTimers.push(setTimeout(r, 140)));
+  $('forkMarker').classList.add('show');
+  $('trunk').classList.add('dimmed');
+  $('trunkCursor').style.display = 'none';
+  setAnaPhase('fork');
+
+  // stats
+  $('statFork').textContent = ' ' + s.stats.fork;
+  $('statBranch').textContent = ' ' + s.stats.branch;
+  $('statSkip').textContent = ' ' + s.stats.skip;
+
+  // reveal branches + timeline
+  await new Promise(r => typingTimers.push(setTimeout(r, 200)));
+  $('branches').hidden = false;
+  document.querySelectorAll('.branch').forEach(b => b.classList.add('in'));
+  $('timeline').classList.add('show');
+
+  // type into each branch + fill timeline simultaneously
+  await new Promise(r => typingTimers.push(setTimeout(r, 320)));
+  setAnaPhase('branching');
+
+  // per-branch durations (ms) — realistic sub-second spread
+  const durs = [880, 830, 940, 710];
+  const tlIds = ['tl0','tl1','tl2','tl3'];
+  const tlTimes = ['tlt0','tlt1','tlt2','tlt3'];
+  const branchIds = ['b0','b1','b2','b3'];
+  const axisMax = 1000; // 1s = 100%
+
+  // timeline fill + text type
+  const startedAt = performance.now();
+  durs.forEach((dur, i) => {
+    const txt = s.branches[i].text;
+    const target = $(branchIds[i]);
+    target.innerHTML = '';
+    let pos = 0;
+    let buf = '';
+    const steps = Math.max(8, Math.floor(dur / 26));
+    const charsPerStep = Math.ceil(txt.length / steps);
+    const stepDur = dur / steps;
+    let stepsDone = 0;
+
+    const step = () => {
+      // advance timeline
+      const elapsed = performance.now() - startedAt;
+      const pct = Math.min(100, (elapsed / axisMax) * 100);
+      $(tlIds[i]).style.width = Math.min(pct, (elapsed/dur)*100) + '%';
+      // mirror into anatomy lane
+      setAnaLaneProgress(i, Math.min(1, elapsed / dur));
+
+      // advance text — consume characters until we've added charsPerStep non-tag characters
+      let consumed = 0;
+      while (pos < txt.length && consumed < charsPerStep) {
+        if (txt[pos] === '<') {
+          const close = txt.indexOf('>', pos);
+          buf += txt.slice(pos, close+1);
+          pos = close + 1;
+        } else {
+          buf += txt[pos];
+          pos += 1;
+          consumed += 1;
+        }
+      }
+      target.innerHTML = buf + (pos < txt.length ? '<span class="cursor"></span>' : '');
+
+      stepsDone += 1;
+      if (pos < txt.length || stepsDone < steps) {
+        typingTimers.push(setTimeout(step, stepDur));
+      } else {
+        // finalize
+        target.innerHTML = buf;
+        $(tlIds[i]).style.width = ((dur/axisMax)*100) + '%';
+        setAnaLaneProgress(i, 1);
+        const tEl = $(tlTimes[i]);
+        tEl.textContent = (dur/1000).toFixed(3) + 's';
+        tEl.classList.add('done');
+      }
+    };
+    step();
+  });
+
+  // after the longest branch, reveal comparison chart
+  await new Promise(r => typingTimers.push(setTimeout(r, Math.max(...durs) + 300)));
+
+  setAnaPhase('done');
+
+  // stop clock at realistic total
+  stopClock((s.compare.forkMs)/1000 + 0.08); // small overhead
+
+  // comparison bars
+  $('compare').classList.add('show');
+  const cold = s.compare.coldMs;
+  const fork = s.compare.forkMs;
+  const maxMs = Math.max(cold, fork);
+  // slow fills ~2s, fast fills ~300ms
+  requestAnimationFrame(() => {
+    $('cmpSlow').style.width = ((cold/maxMs)*100) + '%';
+    $('cmpSlow').textContent = ' × 4 cold prefills';
+    $('cmpSlowT').textContent = (cold/1000).toFixed(1) + 's';
+  });
+  setTimeout(() => {
+    $('cmpFast').style.width = ((fork/maxMs)*100) + '%';
+    $('cmpFast').textContent = ' prefill saved';
+    $('cmpFastT').textContent = (fork/1000).toFixed(2) + 's';
+    $('speedup').innerHTML = s.compare.speedup + ' <em>faster</em>';
+  }, 500);
+
+  // button state: reset
+  setTimeout(() => {
+    $('forkBtn').innerHTML = 'Run again <span class="k">F</span>';
+    $('forkBtn').classList.remove('primary');
+    $('forkBtn').classList.add('magenta');
+    $('forkBtn').disabled = false;
+    running = false;
+  }, 2400);
+}
+
+function resetDemo(){
+  loadScenario(scenarioIdx);
+}
+
+/* ─── ANATOMY · populate SM grid + phase controller ─── */
+(function initAnatomy(){
+  const host = document.getElementById('anaSms');
+  if (!host) return;
+  // 10 cols × 6 rows = 60 SMs; start at (44, 60), cell 18×7, gap 2
+  const cols = 10, rows = 6;
+  const cellW = 18, cellH = 7, gapX = 2, gapY = 3;
+  const startX = 44, startY = 64;
+  const ns = 'http://www.w3.org/2000/svg';
+  for (let r = 0; r < rows; r++){
+    for (let c = 0; c < cols; c++){
+      const x = startX + c * (cellW + gapX);
+      const y = startY + r * (cellH + gapY);
+      const i = r * cols + c;
+      const rect = document.createElementNS(ns, 'rect');
+      rect.setAttribute('x', x);
+      rect.setAttribute('y', y);
+      rect.setAttribute('width', cellW);
+      rect.setAttribute('height', cellH);
+      rect.setAttribute('rx', 1.5);
+      rect.setAttribute('class', 'a-sm');
+      rect.style.setProperty('--i', i);
+      host.appendChild(rect);
+    }
+  }
+  // Label under SM grid
+  const ns2 = 'http://www.w3.org/2000/svg';
+  const label = document.createElementNS(ns2, 'text');
+  label.setAttribute('x', 44);
+  label.setAttribute('y', startY + rows*(cellH+gapY) + 12);
+  label.setAttribute('class', 'a-lbl');
+  label.textContent = 'STREAMING MULTIPROCESSORS · ×60';
+  host.parentNode.appendChild(label);
+})();
+
+const ANA_STATUS_LABELS = {
+  idle:     { status:'idle',       compute:'·idle',             lane:'queued',            kv:'0' },
+  prefill:  { status:'prefill',    compute:'·loading kv cache', lane:'waiting…',          kv:'8,127' },
+  fork:     { status:'fork()',     compute:'·hydrating ×4',     lane:'hydrating…',        kv:'8,127 × 4' },
+  branching:{ status:'branching',  compute:'·4 streams',        lane:'4 divergent streams', kv:'8,127 × 4' },
+  done:     { status:'done',       compute:'·returned',         lane:'complete · 0.88s',  kv:'reclaimed' }
+};
+
+function setAnaPhase(phase){
+  const el = document.getElementById('anatomy');
+  if (!el) return;
+  const prev = el.getAttribute('data-phase');
+  el.setAttribute('data-phase', phase);
+  const meta = ANA_STATUS_LABELS[phase];
+  if (meta){
+    const s = document.getElementById('anaStatus'); if (s) s.textContent = meta.status;
+    const c = document.getElementById('anaCompute'); if (c) c.textContent = meta.compute;
+    const l = document.getElementById('anaLaneStatus'); if (l) l.textContent = meta.lane;
+    const k = document.getElementById('anaKvVal'); if (k) k.textContent = meta.kv;
+  }
+  // HBM value label ticks alongside --hbm
+  const hbmPct = { idle:.05, prefill:.58, fork:.64, branching:.68, done:.28 }[phase] || .05;
+  const hbmEl = document.getElementById('anaHbmVal');
+  if (hbmEl) hbmEl.textContent = Math.round(hbmPct * 80);
+
+  // When expanding out of idle → gently scroll anatomy into view so reveal is visible
+  if (prev === 'idle' && phase !== 'idle'){
+    setTimeout(() => {
+      try { el.scrollIntoView({behavior:'smooth', block:'center'}); } catch(e) {}
+    }, 240);
+  }
+
+  // Kick off fork particle animations via SMIL beginElement
+  if (phase === 'fork'){
+    document.querySelectorAll('.a-fork-p animateMotion').forEach(a => {
+      try { a.beginElement(); } catch(e) {}
+    });
+  }
+  // When entering branching, scroll branches section near bottom into view
+  if (phase === 'branching'){
+    setTimeout(() => {
+      const b = document.getElementById('branches');
+      if (b && !b.hidden){
+        try { b.scrollIntoView({behavior:'smooth', block:'center'}); } catch(e) {}
+      }
+    }, 420);
+  }
+}
+
+function setAnaLaneProgress(laneIdx, pct01){
+  const fill = document.querySelector(`.a-lane-fill[data-i="${laneIdx}"]`);
+  if (fill) fill.style.setProperty('--lp', pct01);
+}
+function resetAnaLanes(){
+  document.querySelectorAll('.a-lane-fill').forEach(f => f.style.setProperty('--lp', 0));
+}
+
+/* tab clicks */
+document.querySelectorAll('.tab').forEach((t,i) => {
+  t.addEventListener('click', () => {
+    if (running) return;
+    loadScenario(i);
+  });
+});
+
+/* keyboard shortcuts */
+window.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'f' || e.key === 'F') { e.preventDefault(); if (!running) startDemo(); }
+  else if (e.key === 'r' || e.key === 'R') { e.preventDefault(); resetDemo(); }
+  else if (e.key === '1') { if (!running) loadScenario(0); }
+  else if (e.key === '2') { if (!running) loadScenario(1); }
+  else if (e.key === '3') { if (!running) loadScenario(2); }
+});
+
+/* copy install */
+function copyInstall(){
+  const text = 'pip install thaw-vllm thaw-native';
+  navigator.clipboard.writeText(text).then(()=>{
+    const t = $('toast');
+    t.textContent = '✓ copied — ' + text;
+    t.classList.add('show');
+    setTimeout(()=>t.classList.remove('show'), 1800);
+  });
+}
+
+/* ─────────────────────────────────────────────
+   HOLOGRAPHIC TEAM CARDS — mouse-tracked 3D tilt + shimmer
+   ───────────────────────────────────────────── */
+document.querySelectorAll('[data-holo]').forEach(card => {
+  let raf = null;
+  let target = { rx:0, ry:0, mx:50, my:50, mxp:0, myp:0, shim:0 };
+  let current = { ...target };
+
+  const animate = () => {
+    const ease = 0.16;
+    current.rx += (target.rx - current.rx) * ease;
+    current.ry += (target.ry - current.ry) * ease;
+    current.mx += (target.mx - current.mx) * ease;
+    current.my += (target.my - current.my) * ease;
+    current.mxp += (target.mxp - current.mxp) * ease;
+    current.myp += (target.myp - current.myp) * ease;
+    current.shim += (target.shim - current.shim) * ease;
+
+    card.style.transform = `perspective(1200px) rotateX(${current.rx}deg) rotateY(${current.ry}deg)`;
+    card.style.setProperty('--mx', current.mx + '%');
+    card.style.setProperty('--my', current.my + '%');
+    card.style.setProperty('--mx-px', current.mxp + 'px');
+    card.style.setProperty('--my-px', current.myp + 'px');
+    card.style.setProperty('--shim-angle', current.shim + 'deg');
+
+    if (Math.abs(target.rx - current.rx) > 0.01 || Math.abs(target.ry - current.ry) > 0.01) {
+      raf = requestAnimationFrame(animate);
+    } else {
+      raf = null;
+    }
+  };
+
+  card.addEventListener('mousemove', (e) => {
+    const rect = card.getBoundingClientRect();
+    const x = (e.clientX - rect.left);
+    const y = (e.clientY - rect.top);
+    const px = x / rect.width;
+    const py = y / rect.height;
+    target.ry = (px - 0.5) * 16;
+    target.rx = (0.5 - py) * 16;
+    target.mx = px * 100;
+    target.my = py * 100;
+    target.mxp = x;
+    target.myp = y;
+    target.shim = (px + py) * 180;
+    if (!raf) raf = requestAnimationFrame(animate);
+  });
+
+  card.addEventListener('mouseleave', () => {
+    target.rx = 0;
+    target.ry = 0;
+    target.mx = 50;
+    target.my = 50;
+    target.mxp = 0;
+    target.myp = 0;
+    if (!raf) raf = requestAnimationFrame(animate);
+  });
+});
+
+/* ─── boot ─── */
+loadScenario(0);
+
+/* scroll reveal for sections */
+const io = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      e.target.style.opacity = 1;
+      e.target.style.transform = 'translateY(0)';
+    }
+  });
+}, { threshold: 0.1 });
+
+document.querySelectorAll('section').forEach(s => {
+  if (s.classList.contains('hero')) return;
+  s.style.opacity = 0;
+  s.style.transform = 'translateY(20px)';
+  s.style.transition = 'opacity .6s var(--ease), transform .6s var(--ease)';
+  io.observe(s);
+});
+</script>
+</body>
+</html>
