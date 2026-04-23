@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "thaw-native"
-version = "0.3.1"
+version = "0.3.2"
 description = "Rust+CUDA native extension for thaw (pipelined DMA freeze/restore)"
 requires-python = ">=3.8"
 
