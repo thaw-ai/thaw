@@ -1,0 +1,40 @@
+{
+  "timestamp_utc": "2026-04-27T16:38:29.303018+00:00",
+  "platform": {
+    "uname": "posix.uname_result(sysname='Darwin', nodename='nilsnet', release='25.4.0', version='Darwin Kernel Version 25.4.0: Thu Mar 19 19:33:50 PDT 2026; root:xnu-12377.101.15~1/RELEASE_ARM64_T6050', machine='arm64')",
+    "python": "3.14.4"
+  },
+  "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+  "snapshot_path": "/tmp/mlx-community__Llama-3.2-1B-Instruct-4bit.thaw",
+  "rounds": 4,
+  "prompt": "Write a haiku about Apple Silicon.",
+  "max_tokens": 16,
+  "freeze_stats": {
+    "num_regions": 372,
+    "num_weight_regions": 372,
+    "total_bytes": 695242752,
+    "elapsed_s": 0.1537755000172183,
+    "throughput_gb_s": 4.52115422757301,
+    "backend": "mlx_safetensors",
+    "path": "/tmp/mlx-community__Llama-3.2-1B-Instruct-4bit.thaw"
+  },
+  "baseline_mlx_lm_load_s": [
+    0.5561074160505086,
+    0.5724657499231398,
+    0.5074355829274282,
+    0.47429570904932916
+  ],
+  "baseline_median_s": 0.5561074160505086,
+  "pool_warm_s": 0.504239666974172,
+  "pool_hot_swap_s": [
+    0.019914000062271953,
+    0.023122790968045592,
+    0.020057457964867353,
+    0.020039333030581474
+  ],
+  "pool_median_s": 0.020057457964867353,
+  "hot_swap_speedup_x": 27.7257176370299,
+  "bit_identical_generation": true,
+  "baseline_text": "Apple Silicon is a new line of processors designed by Apple, which will be used",
+  "pool_text": "Apple Silicon is a new line of processors designed by Apple, which will be used"
+}

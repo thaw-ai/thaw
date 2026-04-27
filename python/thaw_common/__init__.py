@@ -15,15 +15,6 @@ from thaw_common.format import (
     KIND_KV_LIVE_BLOCK,
     KIND_METADATA,
 )
-from thaw_common.snapshot import (
-    freeze_model,
-    freeze_model_pipelined,
-    restore_model,
-    restore_model_pipelined,
-    restore_model_from_ram,
-    make_pinned_mmap,
-    restore_model_from_pinned_mmap,
-)
 from thaw_common.util import rank_snapshot_path
 from thaw_common.cloud import (
     is_remote,
@@ -35,6 +26,22 @@ from thaw_common.telemetry import (
     strict_mode,
     check_pinned,
 )
+
+# CUDA-bound snapshot helpers depend on torch. On Apple Silicon (thaw_mlx)
+# torch isn't required, so don't break the package import if it's missing —
+# users who need these helpers will have torch installed already.
+try:
+    from thaw_common.snapshot import (
+        freeze_model,
+        freeze_model_pipelined,
+        restore_model,
+        restore_model_pipelined,
+        restore_model_from_ram,
+        make_pinned_mmap,
+        restore_model_from_pinned_mmap,
+    )
+except ImportError:
+    pass
 
 __all__ = [
     "MAGIC",
