@@ -40,10 +40,10 @@ sys.path.insert(0, str(REPO_ROOT / "python"))
 
 
 def _phase(name):
-    """Context manager that prints a phase banner and dumps the full
-    traceback on any exception, preserving the original error for the
-    receipt to see. Without this, mlx-lm errors come back as a single
-    line and we can't tell which phase blew up."""
+    """Context manager that prints a phase banner and a single-line
+    failure summary on any exception. The full traceback is printed
+    once at the top level — never twice — and only when the failure
+    isn't a known upstream bug we can name."""
     import contextlib
 
     @contextlib.contextmanager
@@ -52,11 +52,54 @@ def _phase(name):
         try:
             yield
         except BaseException as exc:
-            print(f"[bench] !!! phase '{name}' raised {type(exc).__name__}: {exc}",
+            print(f"[bench] !!! phase '{name}' failed: {type(exc).__name__}: {exc}",
                   file=sys.stderr, flush=True)
-            traceback.print_exc()
             raise
     return _cm()
+
+
+def _preflight_known_incompat(model_id):
+    """Catch known model × library version mismatches BEFORE mlx_lm.load
+    spends time on a 17GB download. Returns a banner string if a known
+    incompatibility was found, else None.
+
+    Each entry in the table is: (model-id-substring, predicate, banner).
+    Add new entries here as we hit them — preflighting is cheap and the
+    UX win is huge (Jackson hit this twice in a row with the post-mortem
+    diagnosis buried under a duplicate traceback)."""
+    import importlib.metadata as md
+
+    def _ver(pkg):
+        try:
+            v = md.version(pkg)
+            return tuple(int(x) for x in v.split(".")[:2] if x.isdigit())
+        except Exception:
+            return None
+
+    transformers_v = _ver("transformers")
+
+    # transformers ≥ 5 + mlx-community/EXAONE-4 ships sliding_window_pattern
+    # as a string ("LLLG"); Exaone4Config.__post_init__ does
+    # `(i+1) % sliding_window_pattern` and crashes. transformers 4.x works.
+    if (
+        "exaone-4" in model_id.lower()
+        and transformers_v is not None
+        and transformers_v[0] >= 5
+    ):
+        return (
+            "[bench] === KNOWN INCOMPAT — STOP, FIX THIS FIRST ===\n"
+            f"[bench]   model: {model_id}\n"
+            f"[bench]   transformers: {'.'.join(str(x) for x in transformers_v)} (need < 5)\n"
+            "[bench]   why: Exaone4Config.__post_init__ does\n"
+            "[bench]        `(i+1) % sliding_window_pattern`, but the model\n"
+            "[bench]        ships sliding_window_pattern as a string ('LLLG').\n"
+            "[bench]        vanilla mlx_lm.load() fails identically.\n"
+            "[bench]   fix: pip install 'transformers<5'\n"
+            "[bench]        (then re-run the same command — no other changes)\n"
+            "[bench] ============================================="
+        )
+
+    return None
 
 
 def _logits_parity(model_a, model_b, prompt_tokens):
@@ -133,7 +176,15 @@ def main():
         import mlx
     except ImportError as e:
         print(f"[bench] mlx_lm not installed: {e}")
-        print("[bench] run: pip install mlx mlx-lm")
+        print("[bench] run: pip install mlx mlx-lm 'transformers<5'")
+        sys.exit(2)
+
+    # Preflight known-incompatible (model × dependency-version) combos so
+    # the user gets a clear fix message BEFORE we burn time on a download.
+    incompat_banner = _preflight_known_incompat(args.model)
+    if incompat_banner:
+        sys.stdout.flush()
+        print(incompat_banner, flush=True)
         sys.exit(2)
 
     import thaw_mlx
@@ -382,12 +433,19 @@ def _diagnose_known_bug(exc):
         and "unsupported operand type(s) for %" in msg
     ):
         print(
-            "\n[bench] === DIAGNOSIS ===\n"
-            "[bench] This is a transformers 5.x bug, NOT a thaw bug.\n"
-            "[bench] Exaone4Config.__post_init__ does `(i+1) % sliding_window_pattern`,\n"
-            "[bench] but mlx-community/EXAONE-4.0-32B-4bit ships sliding_window_pattern\n"
-            "[bench] as a string ('LLLG'). vanilla `mlx_lm.load(...)` fails identically.\n"
-            "[bench] fix: `pip install 'transformers<5'` and re-run.\n",
+            "\n"
+            "[bench] ============================================\n"
+            "[bench]   STOP — KNOWN INCOMPAT, NOT A THAW BUG\n"
+            "[bench] ============================================\n"
+            "[bench]   transformers 5.x crashes loading EXAONE-4\n"
+            "[bench]   (config ships sliding_window_pattern='LLLG').\n"
+            "[bench]   vanilla mlx_lm.load() fails identically.\n"
+            "[bench]\n"
+            "[bench]   FIX (one command):\n"
+            "[bench]     pip install 'transformers<5'\n"
+            "[bench]\n"
+            "[bench]   then re-run the same bench command.\n"
+            "[bench] ============================================\n",
             file=sys.stderr, flush=True,
         )
         return True
@@ -400,8 +458,13 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except BaseException as exc:
+        # Known-bug path: print the LOUD diagnosis FIRST and skip the stack
+        # — the user only needs the fix, not a wall of frames.
+        if _diagnose_known_bug(exc):
+            sys.exit(1)
+        # Unknown bug: print the full traceback exactly once so we have
+        # something actionable to copy into a bug report.
         print(f"\n[bench] !!! unhandled error: {type(exc).__name__}: {exc}",
               file=sys.stderr, flush=True)
         traceback.print_exc()
-        _diagnose_known_bug(exc)
         sys.exit(1)
