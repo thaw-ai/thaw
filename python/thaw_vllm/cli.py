@@ -15,6 +15,32 @@ import sys
 os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
+def _cli_progress():
+    """Closure-based stderr progress printer for S3 downloads. Updates once/sec."""
+    import time
+    last = {"t": time.monotonic(), "bytes": 0, "start": time.monotonic()}
+
+    def cb(done: int, total: int):
+        now = time.monotonic()
+        if now - last["t"] < 1.0 and done < total:
+            return
+        elapsed = now - last["start"]
+        avg_mb = (done / 1024 / 1024 / elapsed) if elapsed > 0 else 0
+        inst_dt = now - last["t"]
+        inst_mb = ((done - last["bytes"]) / 1024 / 1024 / inst_dt) if inst_dt > 0 else 0
+        pct = 100.0 * done / total if total else 100.0
+        sys.stderr.write(
+            f"\r[thaw]   {pct:5.1f}%  {done / 1024 / 1024:7.0f}/{total / 1024 / 1024:.0f} MiB  "
+            f"{inst_mb:6.1f} MB/s (avg {avg_mb:.1f} MB/s)"
+        )
+        sys.stderr.flush()
+        last["t"] = now
+        last["bytes"] = done
+        if done >= total and total > 0:
+            sys.stderr.write("\n")
+    return cb
+
+
 def cmd_freeze(args):
     """Freeze model weights (and optionally KV cache) to snapshot files."""
     engine_choice = getattr(args, 'engine', 'vllm')
@@ -124,6 +150,17 @@ def cmd_serve(args):
     if not is_remote(args.snapshot) and not os.path.exists(args.snapshot):
         print(f"[thaw] Error: snapshot not found: {args.snapshot}", file=sys.stderr)
         sys.exit(1)
+
+    # Remote URIs: pre-download with a live progress bar before the engine
+    # pool spins up. Subsequent pool.preload() resolves hit the warm cache.
+    if is_remote(args.snapshot):
+        print(f"[thaw] Downloading snapshot from {args.snapshot}...")
+        t0 = time.perf_counter()
+        local = resolve_snapshot_path(args.snapshot, progress=_cli_progress())
+        elapsed = time.perf_counter() - t0
+        size = os.path.getsize(local)
+        mb_s = size / 1024 / 1024 / elapsed if elapsed > 0 else 0
+        print(f"[thaw] Downloaded {size / 1e9:.2f} GB in {elapsed:.1f}s ({mb_s:.1f} MB/s)")
 
     from thaw_vllm.pool import EnginePool, create_pool_app
 
