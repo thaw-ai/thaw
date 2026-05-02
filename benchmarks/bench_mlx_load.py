@@ -65,8 +65,8 @@ def _preflight_known_incompat(model_id):
 
     Each entry in the table is: (model-id-substring, predicate, banner).
     Add new entries here as we hit them — preflighting is cheap and the
-    UX win is huge (Jackson hit this twice in a row with the post-mortem
-    diagnosis buried under a duplicate traceback)."""
+    UX win is huge (the alternative is a wall of traceback frames where
+    the actual fix is buried at the bottom)."""
     import importlib.metadata as md
 
     def _ver(pkg):
@@ -99,6 +99,108 @@ def _preflight_known_incompat(model_id):
             "[bench] ============================================="
         )
 
+    return None
+
+
+def _patch_extra_special_tokens_list_bug():
+    """Monkey-patch transformers to gracefully accept `extra_special_tokens`
+    as a list of token strings, not just a {name: token} dict.
+
+    Why this is needed: mlx-community/Qwen3-Coder-Next-8bit (and likely other
+    mlx-community quants of Qwen3-Next) ships tokenizer_config.json with
+    `extra_special_tokens: ['<|im_start|>', ...]` — a list. Upstream Qwen3
+    has the field absent/None. transformers 4.57.6 + 5.x both call
+    `_set_model_specific_special_tokens(special_tokens)` then do
+    `special_tokens.keys()`, which AttributeErrors on the list. The function
+    signature even claims `list[str]` but the body assumes dict.
+
+    This is a model-config bug, not a transformers version bug — fails on
+    transformers 4.57.6, 5.6.x, and 5.7.x all the same. Fix is in-process so
+    no cache mutation, no `pip install` flags, no surprise to the user."""
+    try:
+        from transformers import tokenization_utils_base as _tub
+    except Exception:
+        return  # transformers not installed — let the real load surface that
+
+    cls = getattr(_tub, "SpecialTokensMixin", None)
+    if cls is None or getattr(cls, "_thaw_patched_extra_special_tokens", False):
+        return
+
+    original = cls._set_model_specific_special_tokens
+
+    def _patched(self, special_tokens):
+        # If we got a list (mlx-community Qwen3-Coder-Next style), coerce to
+        # the dict shape transformers actually wants. Use the token string
+        # itself as both the attribute name (slug-ified) and the value.
+        if isinstance(special_tokens, list):
+            coerced = {}
+            for tok in special_tokens:
+                # name = token with non-alphanum stripped, e.g. <|im_start|>
+                # -> "im_start". Good enough for SPECIAL_TOKENS_ATTRIBUTES.
+                name = "".join(c if c.isalnum() else "_" for c in str(tok)).strip("_")
+                if not name:
+                    continue
+                coerced[name] = tok
+            special_tokens = coerced
+        return original(self, special_tokens)
+
+    cls._set_model_specific_special_tokens = _patched
+    cls._thaw_patched_extra_special_tokens = True
+
+
+def _disk_space_preflight(snapshot_path, model_id):
+    """Best-effort check that the snapshot path has room for the freeze.
+    Returns a banner string on probable-failure, else None.
+
+    We don't know the exact frozen size before download, but the .thaw blob
+    is roughly the same size as the on-disk model in HF cache (it's the same
+    weights). For models like GLM-4.5-Air-8bit (~115 GB), writing to /tmp on
+    a Mac with little free disk on the boot volume fails mid-write with a
+    cryptic `RuntimeError: [write] Unable to write N bytes`.
+
+    Heuristic: warn if free space at the snapshot dir is < 20 GB. If we can
+    figure out the HF cache size (model is already downloaded), use that as
+    a more precise lower bound."""
+    import shutil
+
+    snap_dir = os.path.dirname(os.path.abspath(snapshot_path)) or "."
+    try:
+        free_b = shutil.disk_usage(snap_dir).free
+    except OSError:
+        return None
+
+    # Try to get a precise estimate from the HF cache, if the model is there.
+    estimated = None
+    try:
+        from huggingface_hub import scan_cache_dir
+        scan = scan_cache_dir()
+        for repo in scan.repos:
+            if repo.repo_id == model_id:
+                # size_on_disk includes blobs (the actual safetensors files).
+                estimated = int(repo.size_on_disk)
+                break
+    except Exception:
+        pass
+
+    # Default safety margin if we can't estimate model size.
+    threshold = max(estimated * 1.1 if estimated else 0, 20 * 1024**3)
+
+    if free_b < threshold:
+        return (
+            "[bench] === DISK SPACE PROBLEM — WILL CRASH MID-FREEZE ===\n"
+            f"[bench]   snapshot path: {snapshot_path}\n"
+            f"[bench]   free at {snap_dir}: {_human_bytes(free_b)}\n"
+            + (f"[bench]   model on disk:  {_human_bytes(estimated)}\n"
+               if estimated else "")
+            + f"[bench]   need (≥1.1×):   {_human_bytes(int(threshold))}\n"
+            "[bench]   why: thaw_mlx.freeze writes a single .safetensors blob\n"
+            "[bench]        roughly the size of the model. macOS /tmp lives on\n"
+            "[bench]        the boot volume; if it fills you get a cryptic\n"
+            "[bench]        `RuntimeError: [write] Unable to write N bytes`.\n"
+            "[bench]   fix: pass --snapshot to a path with more headroom, e.g.\n"
+            f"[bench]        --snapshot ~/snapshots/{model_id.replace('/', '__')}.thaw\n"
+            "[bench] ================================================="
+        )
     return None
 
 
@@ -203,10 +305,20 @@ def main():
     mlx_lm_version = _pkg_ver("mlx-lm")
     print(f"[bench] mlx={mlx_version}  mlx_lm={mlx_lm_version}  python={sys.version.split()[0]}")
 
-    snapshot_path = (
-        args.snapshot
-        or f"/tmp/{args.model.replace('/', '__')}.thaw"
-    )
+    # Default to ~/.cache/thaw/ — /tmp on macOS lives on the boot volume and
+    # fills up mid-write for large MoE models (e.g. GLM-4.5-Air-8bit at
+    # ~115 GB) with a cryptic `RuntimeError: [write] Unable to write N bytes`.
+    if args.snapshot:
+        snapshot_path = args.snapshot
+    else:
+        cache_dir = Path.home() / ".cache" / "thaw"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_path = str(cache_dir / f"{args.model.replace('/', '__')}.thaw")
+
+    # Apply in-process patch for mlx-community models that ship
+    # `extra_special_tokens` as a list (Qwen3-Coder-Next-8bit, etc.).
+    # Idempotent — safe to call even if the model doesn't need it.
+    _patch_extra_special_tokens_list_bug()
 
     # Defaults that may stay None depending on the chosen mode.
     baseline_load_s = None
@@ -265,6 +377,14 @@ def main():
             print(f"[bench] baseline-logits failed ({type(exc).__name__}: {exc}); "
                   f"parity check will be skipped if target-generate also fails.")
             baseline_logits_argmax = None
+
+        # Disk-space preflight — best-effort check that the snapshot path has
+        # room for the freeze. Catches the `[write] Unable to write N bytes`
+        # crash that hits when freezing a 100+ GB model into /tmp on macOS.
+        disk_banner = _disk_space_preflight(snapshot_path, args.model)
+        if disk_banner:
+            print(disk_banner, flush=True)
+            sys.exit(2)
 
         with _phase("freeze"):
             print(f"[bench] thaw_mlx.freeze() -> {snapshot_path}")
@@ -445,6 +565,63 @@ def _diagnose_known_bug(exc):
             "[bench]     pip install 'transformers<5'\n"
             "[bench]\n"
             "[bench]   then re-run the same bench command.\n"
+            "[bench] ============================================\n",
+            file=sys.stderr, flush=True,
+        )
+        return True
+
+    # mlx-community Qwen3-Coder-Next-8bit ships `extra_special_tokens` as a
+    # list; transformers' _set_model_specific_special_tokens does .keys() on
+    # it. We monkey-patch this in main() — if it fires here, the patch was
+    # bypassed (someone called us as a library? edited the file?).
+    if (
+        "_set_model_specific_special_tokens" in tb
+        and "'list' object has no attribute 'keys'" in msg
+    ):
+        print(
+            "\n"
+            "[bench] ============================================\n"
+            "[bench]   STOP — KNOWN MODEL-CONFIG BUG\n"
+            "[bench] ============================================\n"
+            "[bench]   This model's tokenizer_config.json ships\n"
+            "[bench]   `extra_special_tokens` as a list of strings, but\n"
+            "[bench]   transformers expects a {name: token} dict and calls\n"
+            "[bench]   .keys() on it. Reproduces with vanilla mlx_lm.load —\n"
+            "[bench]   not a thaw bug. Affects mlx-community/Qwen3-Coder-\n"
+            "[bench]   Next-8bit and likely other Qwen3-Next quants.\n"
+            "[bench]\n"
+            "[bench]   FIX: bench applies an in-process monkey-patch by\n"
+            "[bench]   default — if you're seeing this, run the bench\n"
+            "[bench]   directly (not as an import) and re-pull main:\n"
+            "[bench]     git pull && python benchmarks/bench_mlx_load.py ...\n"
+            "[bench] ============================================\n",
+            file=sys.stderr, flush=True,
+        )
+        return True
+
+    # Cryptic `[write] Unable to write N bytes` from mx.save_safetensors —
+    # almost always disk-full at the snapshot path (macOS /tmp lives on the
+    # boot volume). Bench preflights this in main(), so this is the catch
+    # for cases where preflight under-estimated.
+    if (
+        "Unable to write" in msg
+        and "bytes" in msg
+    ):
+        print(
+            "\n"
+            "[bench] ============================================\n"
+            "[bench]   STOP — DISK FILLED MID-FREEZE\n"
+            "[bench] ============================================\n"
+            "[bench]   thaw_mlx.freeze writes one large .safetensors blob.\n"
+            "[bench]   On macOS, /tmp is on the boot volume — a 100+ GB\n"
+            "[bench]   model can fill it before the write completes.\n"
+            "[bench]\n"
+            "[bench]   FIX: re-run with --snapshot pointing at a roomier\n"
+            "[bench]   volume, e.g.:\n"
+            "[bench]     --snapshot ~/snapshots/<model>.thaw\n"
+            "[bench]\n"
+            "[bench]   Bench now defaults to ~/.cache/thaw/ — pull main if\n"
+            "[bench]   you're still hitting this from /tmp.\n"
             "[bench] ============================================\n",
             file=sys.stderr, flush=True,
         )
