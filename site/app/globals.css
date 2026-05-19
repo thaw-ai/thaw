@@ -1,0 +1,355 @@
+@import "tailwindcss";
+
+:root {
+  /* Cool quicksilver / ultraviolet base — leans cooler than Matteson's
+     pure black, with a violet undertone that catches the chrome material
+     and reads as "infra" rather than "consumer SaaS". */
+  --bg: #07080d;
+  --bg-2: #0d1019;
+  --bg-3: #161a26;
+  --bg-raised: #1f2435;
+  --ink: #f4f5fa;
+  --ink-soft: #a4a8bc;
+  --ink-dim: #5e6378;
+  --ink-faint: #383c4d;
+  --rule: rgba(220, 225, 245, 0.07);
+  --rule-strong: rgba(220, 225, 245, 0.14);
+
+  /* Quicksilver: pure chrome ramp used for surfaces, type accents,
+     and the 3D material color. Slightly cooler than warm metallic gold. */
+  --chrome-1: #f4f5fa;
+  --chrome-2: #c0c5d3;
+  --chrome-3: #7e8492;
+  --quicksilver-1: #e4e7f0;
+  --quicksilver-2: #aab0c2;
+  --quicksilver-deep: #3a3f55;
+
+  /* Ultraviolet: the new accent. Used sparingly for hot beats. */
+  --uv: #a78bfa;
+  --uv-bright: #c4b5fd;
+  --uv-deep: #6d28d9;
+  --uv-glow: rgba(167, 139, 250, 0.32);
+
+  /* Signal stays green — the thaw logo green is part of the brand mark,
+     but we use it ONLY for status pulses, never as a primary accent now. */
+  --signal: #4ade80;
+  --signal-bright: #86efac;
+  --signal-deep: #16a34a;
+  --signal-glow: rgba(74, 222, 128, 0.30);
+
+  /* Frost: secondary cool blue, used on the chrome env-map and code strings */
+  --frost: #b5d8ff;
+  --frost-deep: #4a7ab8;
+
+  /* legacy accent → maps to uv for legacy class references */
+  --accent: var(--uv);
+}
+
+html {
+  background: var(--bg);
+  color-scheme: dark;
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-manrope), system-ui, sans-serif;
+  font-feature-settings: "ss01", "ss03";
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  position: relative;
+}
+
+/* — Atmospheric background: layered quicksilver + UV gradient mesh.
+   Fixed to viewport so the cool tint persists through scroll. — */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      ellipse 80% 60% at 15% 12%,
+      rgba(167, 139, 250, 0.13) 0%,
+      transparent 55%
+    ),
+    radial-gradient(
+      ellipse 70% 55% at 85% 8%,
+      rgba(181, 216, 255, 0.07) 0%,
+      transparent 55%
+    ),
+    radial-gradient(
+      ellipse 100% 70% at 50% 100%,
+      rgba(109, 40, 217, 0.10) 0%,
+      transparent 60%
+    ),
+    radial-gradient(
+      ellipse 60% 50% at 50% 50%,
+      rgba(134, 239, 172, 0.025) 0%,
+      transparent 70%
+    );
+  filter: blur(0);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-2: var(--bg-2);
+  --color-bg-3: var(--bg-3);
+  --color-bg-raised: var(--bg-raised);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-dim: var(--ink-dim);
+  --color-ink-faint: var(--ink-faint);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-chrome-1: var(--chrome-1);
+  --color-chrome-2: var(--chrome-2);
+  --color-chrome-3: var(--chrome-3);
+  --color-quicksilver-1: var(--quicksilver-1);
+  --color-quicksilver-2: var(--quicksilver-2);
+  --color-quicksilver-deep: var(--quicksilver-deep);
+  --color-uv: var(--uv);
+  --color-uv-bright: var(--uv-bright);
+  --color-uv-deep: var(--uv-deep);
+  --color-signal: var(--signal);
+  --color-signal-bright: var(--signal-bright);
+  --color-signal-deep: var(--signal-deep);
+  --color-frost: var(--frost);
+  --color-accent: var(--uv);
+  --font-sans: var(--font-manrope);
+  --font-mono: var(--font-jetbrains);
+  --font-display: var(--font-onest);
+}
+
+/* — Display: refined modern grotesque — */
+.display {
+  font-family: var(--font-display), system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+  line-height: 0.95;
+  font-feature-settings: "ss01", "ss02";
+}
+
+.display-tight {
+  letter-spacing: -0.055em;
+  line-height: 0.88;
+}
+
+/* — Quicksilver text gradient: brushed-metal white → cool steel — */
+.text-chrome {
+  background: linear-gradient(
+    180deg,
+    #f6f7fb 0%,
+    #e4e7f0 35%,
+    #c0c5d3 75%,
+    #7e8492 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+.text-chrome-deep {
+  background: linear-gradient(
+    180deg,
+    #c0c5d3 0%,
+    #7e8492 50%,
+    #4a4e5e 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+/* — UV-tinted gradient text — used for "vision/future" beats — */
+.text-uv-gradient {
+  background: linear-gradient(
+    135deg,
+    #c4b5fd 0%,
+    #a78bfa 45%,
+    #818cf8 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+/* — Mono meta — */
+.font-mono-meta {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-feature-settings: "ss01", "zero";
+}
+
+.font-mono-data {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-weight: 400;
+  font-feature-settings: "ss01", "zero";
+  letter-spacing: -0.01em;
+}
+
+/* — Body refinements — */
+.body-lg {
+  font-family: var(--font-sans);
+  font-weight: 400;
+  font-size: clamp(1.05rem, 1.4vw, 1.25rem);
+  line-height: 1.55;
+  letter-spacing: -0.005em;
+}
+
+/* — Grain overlay — */
+.grain::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.92' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.7 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  mix-blend-mode: screen;
+}
+
+/* — Hairline rules — */
+.rule-t { border-top: 1px solid var(--rule); }
+.rule-b { border-bottom: 1px solid var(--rule); }
+
+/* — Pill nav backdrop — */
+.pill-nav {
+  background: rgba(13, 16, 25, 0.72);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid rgba(220, 225, 245, 0.08);
+}
+
+/* — Quicksilver surfaces — */
+.surface-quicksilver {
+  background:
+    linear-gradient(
+      180deg,
+      rgba(228, 231, 240, 0.04) 0%,
+      rgba(170, 176, 194, 0.02) 50%,
+      rgba(58, 63, 85, 0.04) 100%
+    ),
+    linear-gradient(180deg, #11141d 0%, #0a0c14 100%);
+  border: 1px solid var(--rule-strong);
+}
+
+.surface-quicksilver-hot {
+  background:
+    radial-gradient(circle at 30% 0%, rgba(167, 139, 250, 0.10), transparent 55%),
+    linear-gradient(180deg, #161927 0%, #0a0c14 100%);
+  border: 1px solid rgba(167, 139, 250, 0.22);
+  box-shadow:
+    0 0 60px -20px rgba(167, 139, 250, 0.20),
+    inset 0 1px 0 rgba(228, 231, 240, 0.06);
+}
+
+/* — Card hover: cool, restrained. UV tint on edge only — */
+.card-sweep,
+.surface-quicksilver,
+.surface-quicksilver-hot {
+  position: relative;
+  transition:
+    background-color 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.surface-quicksilver,
+.surface-quicksilver-hot {
+  overflow: hidden;
+}
+
+.card-sweep:hover {
+  background-color: rgba(22, 25, 39, 0.6);
+  border-color: rgba(167, 139, 250, 0.20);
+  box-shadow:
+    inset 0 1px 0 rgba(228, 231, 240, 0.06),
+    0 18px 40px -22px rgba(0, 0, 0, 0.55);
+}
+
+.surface-quicksilver:hover {
+  border-color: rgba(167, 139, 250, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(228, 231, 240, 0.08),
+    0 22px 48px -22px rgba(0, 0, 0, 0.55);
+}
+
+.surface-quicksilver-hot:hover {
+  border-color: rgba(167, 139, 250, 0.40);
+  box-shadow:
+    0 0 70px -16px rgba(167, 139, 250, 0.26),
+    inset 0 1px 0 rgba(228, 231, 240, 0.10),
+    0 26px 56px -22px rgba(0, 0, 0, 0.55);
+}
+
+/* — Keyframes — */
+@keyframes pulse-ring {
+  0% { transform: scale(0.9); opacity: 0.9; }
+  70% { transform: scale(2.4); opacity: 0; }
+  100% { transform: scale(0.9); opacity: 0; }
+}
+
+@keyframes shimmer {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+@keyframes float-y {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes drift {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  50% { transform: translate(2%, -1%) rotate(0.3deg); }
+}
+
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+@keyframes uv-pulse {
+  0%, 100% { opacity: 0.6; filter: blur(40px); }
+  50% { opacity: 1; filter: blur(50px); }
+}
+
+.float-y { animation: float-y 6s ease-in-out infinite; }
+.drift { animation: drift 18s ease-in-out infinite; }
+.uv-pulse { animation: uv-pulse 6s ease-in-out infinite; }
+
+::selection {
+  background: var(--uv);
+  color: var(--bg);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--uv);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--uv);
+  outline-offset: 3px;
+}
