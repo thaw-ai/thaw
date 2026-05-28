@@ -12,7 +12,7 @@ import { Install } from "@/components/sections/Install";
 
 const marqueeItems = [
   "thaw",
-  "fork() for live LLM inference",
+  "fork() for AI agents",
   "Rust + CUDA",
   "vLLM · SGLang · LangGraph · MLX",
   "0.88s median fork · H100",

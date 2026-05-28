@@ -70,7 +70,7 @@ export function Receipts() {
           </motion.h2>
 
           <motion.a
-            href="https://github.com/matteso1/thaw/tree/main/site/receipts"
+            href="https://github.com/thaw-ai/thaw/tree/main/site/receipts"
             target="_blank"
             rel="noopener"
             initial={{ opacity: 0, y: 12 }}

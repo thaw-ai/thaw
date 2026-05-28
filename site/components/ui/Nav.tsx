@@ -117,13 +117,13 @@ export function Nav() {
                   ))}
                   <li className="mt-1.5 pt-2 border-t border-rule space-y-0.5">
                     <a
-                      href="https://github.com/matteso1/thaw"
+                      href="https://github.com/thaw-ai/thaw"
                       target="_blank"
                       rel="noopener"
                       onClick={() => setOpen(false)}
                       className="block px-3.5 py-2 font-mono-meta text-[10px] text-ink-soft hover:text-accent transition-colors"
                     >
-                      github.com/matteso1/thaw ↗
+                      github.com/thaw-ai/thaw ↗
                     </a>
                     <a
                       href="mailto:nils@thaw.sh"

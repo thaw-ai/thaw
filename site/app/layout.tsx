@@ -21,14 +21,14 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "thaw — fork() for live LLM inference",
+  title: "thaw — fork() for AI agents",
   description:
-    "Snapshot a running vLLM or SGLang session — weights, KV cache, scheduler state, prefix-hash table — and fork it into N divergent children that skip prefill. The primitive for agent branching, RL rollouts, and parallel coding agents.",
+    "When your agent forks N ways to explore a problem, thaw skips the cold prefill and runs them in parallel from one shared memory. The substrate for RL rollouts, multi-agent reasoning, and parallel coding agents.",
   metadataBase: new URL("https://thaw.sh"),
   openGraph: {
-    title: "thaw — fork() for live LLM inference",
+    title: "thaw — fork() for AI agents",
     description:
-      "Snapshot a running inference engine and fork it into N children that skip prefill. The primitive for agent branching and RL rollouts.",
+      "The fork primitive for AI agents. Snapshot a running session, hydrate N divergent children that share memory at the fork point. For RL rollouts, multi-agent reasoning, and parallel coding agents.",
     url: "https://thaw.sh",
     siteName: "thaw",
     type: "website",

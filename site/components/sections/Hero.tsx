@@ -82,8 +82,8 @@ export function Hero() {
           <span className="text-ink">
             <code className="font-mono">fork()</code>
           </span>
-          <span className="text-chrome-deep"> for a running </span>
-          <span className="text-ink">LLM.</span>
+          <span className="text-chrome-deep"> for AI </span>
+          <span className="text-ink">agents.</span>
         </motion.h1>
 
         {/* — Tagline — */}
@@ -93,13 +93,13 @@ export function Hero() {
           transition={{ duration: 1.0, ease, delay: 0.7 }}
           className="mt-5 mx-auto max-w-[640px] text-center text-ink-soft text-[15px] md:text-[16.5px] leading-relaxed"
         >
-          Snapshot a live vLLM or SGLang session — weights, KV cache, scheduler
-          state, prefix-hash table — into a single file. Restore it into{" "}
-          <span className="text-ink">N divergent children</span> that skip
-          prefill.{" "}
+          When your agent forks N ways to explore a problem, thaw skips the
+          cold prefill and runs them in parallel from{" "}
+          <span className="text-ink">one shared memory</span>. The substrate
+          for RL rollouts, multi-agent reasoning, and parallel coding agents.{" "}
           <span className="font-mono text-uv-bright">Not a cache.</span>{" "}
           <span className="font-mono text-uv-bright">Not a proxy.</span> A
-          primitive for agentic workloads.
+          primitive.
         </motion.p>
 
         {/* — Centered CTAs — */}
@@ -124,7 +124,7 @@ export function Hero() {
             </span>
           </a>
           <a
-            href="https://github.com/matteso1/thaw"
+            href="https://github.com/thaw-ai/thaw"
             target="_blank"
             rel="noopener"
             className="group inline-flex items-center justify-between gap-3 rounded-full border border-rule-strong text-ink hover:border-ink hover:bg-bg-2/60 transition-all duration-300 px-6 py-3.5 text-[14px] min-w-[200px]"
