@@ -122,7 +122,7 @@ export function Install() {
 
           <div className="flex flex-col gap-3 md:items-end">
             <a
-              href="https://github.com/matteso1/thaw"
+              href="https://github.com/thaw-ai/thaw"
               target="_blank"
               rel="noopener"
               className="group inline-flex items-center justify-between gap-3 rounded-full bg-ink text-bg hover:bg-chrome-2 transition-all duration-300 px-6 py-3.5 text-sm font-medium min-w-[220px]"
@@ -133,7 +133,7 @@ export function Install() {
               </span>
             </a>
             <a
-              href="https://github.com/matteso1/thaw/tree/main/demos"
+              href="https://github.com/thaw-ai/thaw/tree/main/demos"
               target="_blank"
               rel="noopener"
               className="group inline-flex items-center justify-between gap-3 rounded-full border border-rule-strong hover:border-ink text-ink hover:bg-bg-2/60 transition-all px-6 py-3.5 text-sm min-w-[220px]"

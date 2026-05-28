@@ -10,9 +10,9 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Downloads](https://static.pepy.tech/badge/thaw-vllm)](https://pepy.tech/project/thaw-vllm)
 
-**The fork primitive for LLM inference.**
+**The fork primitive for AI agents.**
 
-Snapshot a running AI agent — weights, KV cache, scheduler state, and prefix-hash table — into a single durable file. Restore it. Fork it N times. Each child shares the parent's state at the fork point and diverges from there. `git branch` for live GPU inference.
+When your agent forks N ways to explore a problem, thaw skips the cold prefill and runs them in parallel from one shared memory. Snapshot a running session — weights, KV cache, scheduler state, prefix-hash table — and hydrate N divergent children at the fork point. `git branch` for live AI agents.
 
 ```bash
 pip install thaw-vllm
@@ -507,7 +507,7 @@ Full technical architecture, file format spec, and rationale: [DESIGN.md](./DESI
 
 ## Get in touch
 
-thaw is built by a Madison, WI team — Nils Matteson (founder), Matt Yu, Karan Kapur.
+Built by Nils Matteson in Madison, WI.
 
 - **Evaluating for a real workload?** Email [nils@thaw.sh](mailto:nils@thaw.sh) — include your rollout shape or fork pattern and we'll help you wire it up.
 - **Training RL models or running parallel agents at scale?** DM on LinkedIn: [Nils Matteson](https://www.linkedin.com/in/nilsmatteson/) — happy to screen-share and profile your loop.

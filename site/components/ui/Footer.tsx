@@ -9,8 +9,8 @@ export function Footer() {
           <div className="md:col-span-5">
             <Logo />
             <p className="mt-5 max-w-sm text-ink-soft text-[13.5px] leading-relaxed">
-              fork() for live LLM inference. Snapshot a running engine, ship
-              the handle, resume into N divergent children. Open source, Rust
+              fork() for AI agents. Snapshot a running session, ship the
+              handle, resume into N divergent children. Open source, Rust
               + CUDA, Apache-2.0.
             </p>
           </div>
@@ -50,7 +50,7 @@ export function Footer() {
             <ul className="space-y-2.5 text-[13.5px] text-ink/85">
               <li>
                 <a
-                  href="https://github.com/matteso1/thaw"
+                  href="https://github.com/thaw-ai/thaw"
                   target="_blank"
                   rel="noopener"
                   className="hover:text-uv-bright transition-colors"

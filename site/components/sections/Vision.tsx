@@ -9,20 +9,20 @@ const pillars = [
   {
     label: "TODAY",
     title: "Open-source primitive.",
-    body: "The fork() runtime is Apache-2.0, written in Rust + CUDA, integrated with the engines real production traffic runs on. Anyone can pip install thaw-vllm and snapshot a live inference engine.",
+    body: "The fork() runtime is Apache-2.0, written in Rust + CUDA, integrated with the engines real production traffic runs on. Anyone can pip install thaw-vllm and snapshot a live agent session.",
     tag: "v0.4 · pre-tagged · production preview",
   },
   {
     label: "PARTNERS",
     title: "Wired with the teams building agents.",
-    body: "Working with Courier (SLC) on MLX-side inference for the Apple-silicon agentic stack — pro bono integration to get the snapshot/restore semantics tested against a non-vLLM engine in production. RFC #34303 upstream with vLLM.",
+    body: "Working with Courier (SLC) on MLX-side inference for the Apple-silicon agentic stack — paid integration sprint validates the snapshot/restore semantics against a non-vLLM engine in production. RFC #34303 upstream with vLLM.",
     tag: "courier · vllm · sglang · langgraph",
   },
   {
     label: "TOMORROW",
-    title: "Managed thaw, the way Databricks managed Spark.",
-    body: "The OSS framework is the wedge. The company is the hosting and wiring for teams that don't want to operate Rust + CUDA + Gen5 PCIe themselves. Agentic multi-agent training, RL rollouts, parallel coding agents — pay-per-fork compute on warm pools.",
-    tag: "framework → hosted → ecosystem",
+    title: "The fork primitive every agent framework calls.",
+    body: "The OSS primitive is the wedge. The company is the framework-layer integrations — TRL, slime, verl, LangGraph, Temporal — that make fork() a first-class verb in every agent loop. Agent branching, RL rollouts, parallel coding agents, multi-agent reasoning. Not a platform. A primitive.",
+    tag: "primitive → framework integrations → ecosystem",
   },
 ];
 
@@ -60,7 +60,7 @@ export function Vision() {
           }}
         >
           <span className="text-ink">The primitive is open.</span>{" "}
-          <span className="text-uv-gradient">The hosting is the company.</span>
+          <span className="text-uv-gradient">The integrations are the company.</span>
         </motion.h2>
 
         <motion.p
@@ -70,11 +70,11 @@ export function Vision() {
           transition={{ duration: 1.1, ease, delay: 0.15 }}
           className="mt-7 max-w-[640px] text-ink-soft leading-relaxed text-[15.5px]"
         >
-          Databricks shipped managed Spark on top of an Apache project they
-          contributed to. Modal shipped managed Python containers on a runtime
-          they built. thaw ships the fork() primitive for live LLM inference —
-          and, eventually, the hosted runway for teams who&apos;d rather not operate
-          Rust + CUDA + Gen5 PCIe.
+          Pinecone became a company by being the easiest vector DB the moment
+          RAG mattered. LangChain became a company by being the orchestration
+          layer everyone calls. thaw becomes a company by being the fork
+          primitive every agent framework — TRL, slime, verl, LangGraph,
+          Temporal — calls when an agent loop needs to branch.
         </motion.p>
 
         {/* Three horizontal positioning bands — Today / Partners / Tomorrow */}
