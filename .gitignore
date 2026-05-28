@@ -115,9 +115,24 @@ dist/
 # ============================================================================
 # Internal / strategy docs — not for public repo
 # ============================================================================
+# This repo IS the public repo. Anything internal (plans, decks, research,
+# strategy docs, partner notes) lives locally but is never tracked. The
+# old private→public sync workflow is gone — work directly here and PR.
 DESIGN.md
 /plans/
+/private/
+/legacy-site/
+/pitch-deck.html
+/sync-public.sh
+CLAUDE.md
 docs/STRATEGY.md
 docs/LANDSCAPE.md
-docs/notes/READING_NOTES.md
+docs/STACK.md
+docs/TESTING.md
+docs/GLOSSARY.md
+docs/KEY_INSIGHTS.md
+docs/ONBOARDING.md
+docs/READING.md
+docs/RELEASING.md
+docs/notes/
 .claude/
