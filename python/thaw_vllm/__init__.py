@@ -6,73 +6,92 @@ import os as _os
 # so callers can still override if they need hardened serialization.
 _os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-# thaw_vllm — GPU snapshot/restore for vLLM model weights.
+# thaw_vllm — GPU snapshot/restore for vLLM model weights + KV cache, plus
+# the fork() primitive that makes a live session portable.
 #
-# This module provides two operations:
-#
-#   freeze_model(model, path)   — snapshot all model weights to a .thaw file
-#   restore_model(model, path)  — load weights from a .thaw file back onto GPU
-#
-# The file format is thaw's binary format (see crates/thaw-core). This
-# Python implementation reads/writes the same byte layout as the Rust
-# side, so files are interchangeable. The Python path uses PyTorch's
-# own CUDA memory operations under the hood — no custom FFI required.
-#
-# This is the MVP integration layer. In production, the Rust
-# implementation (via thaw-py/PyO3) replaces this for higher
-# throughput. The file format is identical either way.
+# Lazy imports (PEP 562 __getattr__): `import thaw_vllm` must NOT pull in
+# torch / vLLM. The heavy submodules (snapshot, kv_snapshot, pool,
+# fork_pool, sleep_mode, loader) are imported only when one of their
+# symbols is actually accessed. This is what lets the lightweight CLI
+# (`thaw info` / `inspect` / `diff`) and `ForkHandle` inspection run on a
+# laptop with no GPU stack installed. Heavy work still imports torch/vLLM
+# on demand, exactly as before — just not at package-import time.
 
-# Engine-agnostic functions from thaw_common
-from thaw_common.snapshot import (
-    freeze_model,
-    freeze_model_pipelined,
-    restore_model,
-    restore_model_from_ram,
-    restore_model_pipelined,
-)
+# Exported name -> submodule that defines it. Resolved on first access.
+_LAZY = {
+    # thaw_common.snapshot (engine-agnostic weight freeze/restore)
+    "freeze_model": "thaw_common.snapshot",
+    "freeze_model_pipelined": "thaw_common.snapshot",
+    "restore_model": "thaw_common.snapshot",
+    "restore_model_from_ram": "thaw_common.snapshot",
+    "restore_model_pipelined": "thaw_common.snapshot",
+    # thaw_vllm.snapshot (vLLM TP weight freeze/restore)
+    "freeze_model_tp": "thaw_vllm.snapshot",
+    "restore_model_tp": "thaw_vllm.snapshot",
+    # thaw_vllm.kv_snapshot (KV cache freeze/restore — the moat)
+    "freeze_kv_cache": "thaw_vllm.kv_snapshot",
+    "freeze_kv_cache_tp": "thaw_vllm.kv_snapshot",
+    "restore_kv_cache": "thaw_vllm.kv_snapshot",
+    "restore_kv_cache_tp": "thaw_vllm.kv_snapshot",
+    # thaw_vllm.fork (fork primitive — module top is stdlib-only)
+    "fork": "thaw_vllm.fork",
+    "fork_completions": "thaw_vllm.fork",
+    "ForkHandle": "thaw_vllm.fork",
+    "ForkCompletionResult": "thaw_vllm.fork",
+    "ForkError": "thaw_vllm.fork",
+    "ModelMismatchError": "thaw_vllm.fork",
+    "BlockShapeMismatchError": "thaw_vllm.fork",
+    "BlockPoolTooSmallError": "thaw_vllm.fork",
+    "PrefixCachingDisabledError": "thaw_vllm.fork",
+    "UnfinishedRequestsError": "thaw_vllm.fork",
+    "HandleClosedError": "thaw_vllm.fork",
+    # thaw_vllm.pool (pre-warmed engine pool + OpenAI server)
+    "EnginePool": "thaw_vllm.pool",
+    "create_pool_app": "thaw_vllm.pool",
+    # thaw_vllm.fork_pool (pre-warmed subprocess workers)
+    "ForkPool": "thaw_vllm.fork_pool",
+    "ForkPoolError": "thaw_vllm.fork_pool",
+    "WorkerBootTimeout": "thaw_vllm.fork_pool",
+    "WorkerDead": "thaw_vllm.fork_pool",
+    "WorkerProtocolError": "thaw_vllm.fork_pool",
+    # thaw_vllm.loader (load_format="thaw" ModelLoader)
+    "ThawModelLoader": "thaw_vllm.loader",
+}
 
-# vLLM-specific TP functions
-from thaw_vllm.snapshot import (
-    freeze_model_tp,
-    restore_model_tp,
-)
 
-from thaw_vllm.kv_snapshot import (
-    freeze_kv_cache,
-    freeze_kv_cache_tp,
-    restore_kv_cache,
-    restore_kv_cache_tp,
-)
-from thaw_vllm.fork import (
-    fork,
-    fork_completions,
-    ForkHandle,
-    ForkCompletionResult,
-    ForkError,
-    ModelMismatchError,
-    BlockShapeMismatchError,
-    BlockPoolTooSmallError,
-    PrefixCachingDisabledError,
-    UnfinishedRequestsError,
-    HandleClosedError,
-)
-from thaw_vllm.pool import EnginePool, create_pool_app
-from thaw_vllm.fork_pool import (
-    ForkPool,
-    ForkPoolError,
-    WorkerBootTimeout,
-    WorkerDead,
-    WorkerProtocolError,
-)
-from thaw_vllm import sleep_mode
+def __getattr__(name):
+    """PEP 562 lazy attribute access. Imports the owning submodule on
+    first touch, caches the result in module globals, and returns it."""
+    import importlib
 
-# Register load_format="thaw" with vLLM when available.
-# vLLM also auto-discovers this via the `vllm.general_plugins` entrypoint
-# in pyproject.toml, so `LLM(load_format="thaw", ...)` works without an
+    if name == "sleep_mode":
+        mod = importlib.import_module("thaw_vllm.sleep_mode")
+        globals()["sleep_mode"] = mod
+        return mod
+
+    target = _LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module 'thaw_vllm' has no attribute {name!r}")
+    mod = importlib.import_module(target)
+    val = getattr(mod, name)
+    globals()[name] = val  # cache: subsequent access skips __getattr__
+    return val
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY) | {"sleep_mode", "load"})
+
+
+# Register load_format="thaw" with vLLM when available. vLLM also
+# auto-discovers this via the `vllm.general_plugins` entrypoint in
+# pyproject.toml, so `LLM(load_format="thaw", ...)` works without an
 # explicit `import thaw_vllm` once thaw-native is installed. This block
-# preserves the existing `import thaw_vllm` path; register() is idempotent.
+# preserves the existing `import thaw_vllm` side effect; register() is
+# idempotent. The ImportError guard makes a torch/vLLM-free import a
+# no-op rather than a crash.
 try:
-    from thaw_vllm.loader import ThawModelLoader, register as _register_loader
+    from thaw_vllm.loader import register as _register_loader
+
     _register_loader()
 except ImportError:
     # vLLM not installed — loader registration is optional.
@@ -115,6 +134,8 @@ def load(model: str, snapshot: str, kv_snapshot: str = None, **kwargs):
             load_format="dummy",
             **kwargs,
         )
+        from thaw_vllm.snapshot import restore_model_tp
+
         restore_model_tp(llm, snapshot)
     else:
         llm = LLM(
@@ -125,6 +146,8 @@ def load(model: str, snapshot: str, kv_snapshot: str = None, **kwargs):
         )
 
     if kv_snapshot:
+        from thaw_vllm.kv_snapshot import restore_kv_cache, restore_kv_cache_tp
+
         if tp_size > 1:
             restore_kv_cache_tp(llm, kv_snapshot)
         else:

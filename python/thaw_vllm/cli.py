@@ -2,9 +2,11 @@
 thaw CLI — freeze, restore, and serve LLM inference snapshots.
 
 Usage:
-    thaw freeze  --model MODEL --output snapshot.thaw [--kv-output kv.thawkv]
-    thaw serve   --model MODEL --snapshot snapshot.thaw [--kv-snapshot kv.thawkv]
-    thaw info    --snapshot snapshot.thaw
+    thaw freeze   --model MODEL --output snapshot.thaw [--kv-output kv.thawkv]
+    thaw serve    --model MODEL --snapshot snapshot.thaw [--kv-snapshot kv.thawkv]
+    thaw info     snapshot.thaw
+    thaw inspect  HANDLE_DIR          # summarize a fork handle (no GPU)
+    thaw diff     HANDLE_A HANDLE_B   # shared KV + divergence (no GPU)
 """
 
 import argparse
@@ -296,6 +298,28 @@ def cmd_info(args):
         sys.exit(1)
 
 
+def cmd_inspect(args):
+    """Summarize a thaw fork handle (handle.json + KV sidecar). GPU-free."""
+    from thaw_vllm.agentfs import inspect_handle
+
+    try:
+        print(inspect_handle(args.handle))
+    except FileNotFoundError as e:
+        print(f"[thaw] {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_diff(args):
+    """Diff two thaw fork handles — shared KV, divergence, params. GPU-free."""
+    from thaw_vllm.agentfs import diff_handles
+
+    try:
+        print(diff_handles(args.a, args.b))
+    except FileNotFoundError as e:
+        print(f"[thaw] {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="thaw",
@@ -338,6 +362,21 @@ def main():
     p_info = sub.add_parser("info", help="Print snapshot file info")
     p_info.add_argument("snapshot", help=".thaw or .thawkv file")
 
+    # thaw inspect — handle-level summary, no GPU
+    p_inspect = sub.add_parser(
+        "inspect", help="Summarize a fork handle directory (no GPU)"
+    )
+    p_inspect.add_argument(
+        "handle", help="Path to a fork handle directory (contains handle.json)"
+    )
+
+    # thaw diff — compare two handles, no GPU
+    p_diff = sub.add_parser(
+        "diff", help="Diff two fork handles: shared KV + divergence (no GPU)"
+    )
+    p_diff.add_argument("a", help="First handle directory")
+    p_diff.add_argument("b", help="Second handle directory")
+
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
@@ -349,6 +388,10 @@ def main():
         cmd_serve(args)
     elif args.command == "info":
         cmd_info(args)
+    elif args.command == "inspect":
+        cmd_inspect(args)
+    elif args.command == "diff":
+        cmd_diff(args)
 
 
 if __name__ == "__main__":
