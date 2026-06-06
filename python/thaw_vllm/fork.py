@@ -154,6 +154,8 @@ class ForkHandle:
     handle_id: str = ""
     parent_id: Optional[str] = None
     label: Optional[str] = None
+    prefix_token_ids: Optional[list] = None
+    prefix_preview: Optional[str] = None
     tensor_parallel_size: int = 1
     vllm_version: Optional[str] = None
     created_at: float = 0.0
@@ -249,6 +251,8 @@ class ForkHandle:
             handle_id=self.handle_id,
             parent_id=self.parent_id,
             label=self.label,
+            prefix_token_ids=self.prefix_token_ids,
+            prefix_preview=self.prefix_preview,
             tensor_parallel_size=self.tensor_parallel_size,
             vllm_version=self.vllm_version,
             created_at=self.created_at,
@@ -480,6 +484,32 @@ def _validate_child(llm, handle: ForkHandle) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _capture_prefix(llm, prompt, prompt_token_ids, max_ids=2048, max_chars=1500):
+    """Best-effort capture of the session's prompt as token IDs + a decoded
+    preview, for ``thaw inspect`` / ``diff``. vLLM's cached blocks carry only
+    opaque hashes, so readable text must come from the caller's prompt at fork
+    time. Returns ``(token_ids | None, preview | None)``; never raises."""
+    ids = None
+    if prompt_token_ids is not None:
+        ids = list(prompt_token_ids)
+    elif prompt is not None:
+        try:
+            ids = list(llm.get_tokenizer().encode(prompt))
+        except Exception:
+            ids = None
+    if not ids:
+        return None, None
+    ids = ids[:max_ids]
+    preview = None
+    try:
+        preview = llm.get_tokenizer().decode(ids)
+        if len(preview) > max_chars:
+            preview = preview[:max_chars] + "…"
+    except Exception:
+        preview = None
+    return ids, preview
+
+
 def fork(
     llm,
     *,
@@ -487,6 +517,8 @@ def fork(
     state_dir: Optional[str] = None,
     label: Optional[str] = None,
     parent_id: Optional[str] = None,
+    prompt: Optional[str] = None,
+    prompt_token_ids: Optional[Sequence[int]] = None,
 ) -> ForkHandle:
     """Freeze a running vLLM session into a portable handle.
 
@@ -573,6 +605,9 @@ def fork(
             vllm_version=_vllm_version(),
             created_at=time.time(),
         )
+        pids, ppreview = _capture_prefix(llm, prompt, prompt_token_ids)
+        handle.prefix_token_ids = pids
+        handle.prefix_preview = ppreview
         handle._owns_state_dir = owns_dir
         handle._write_manifest()
         return handle
@@ -589,15 +624,26 @@ def checkpoint(
     label: Optional[str] = None,
     include_weights: bool = False,
     state_dir: Optional[str] = None,
+    parent_id: Optional[str] = None,
+    prompt: Optional[str] = None,
+    prompt_token_ids: Optional[Sequence[int]] = None,
 ) -> ForkHandle:
     """git-style alias for :func:`fork` — snapshot the live session ("commit").
 
     Thin wrapper so the API reads like git: ``checkpoint`` a session,
-    ``branch`` a handle, ``checkout`` (hydrate) it back. Identical behavior
-    and constraints as :func:`fork`.
+    ``branch`` a handle, ``checkout`` (hydrate) it back. Pass ``prompt`` (or
+    ``prompt_token_ids``) to record a readable prefix for ``thaw inspect`` /
+    ``diff``, and ``parent_id`` to record lineage. Identical behavior and
+    constraints as :func:`fork`.
     """
     return fork(
-        llm, include_weights=include_weights, state_dir=state_dir, label=label
+        llm,
+        include_weights=include_weights,
+        state_dir=state_dir,
+        label=label,
+        parent_id=parent_id,
+        prompt=prompt,
+        prompt_token_ids=prompt_token_ids,
     )
 
 

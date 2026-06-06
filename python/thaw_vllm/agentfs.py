@@ -128,6 +128,8 @@ def summarize_handle(path: str) -> dict:
         "handle_id": manifest.get("handle_id", ""),
         "parent_id": manifest.get("parent_id"),
         "label": manifest.get("label"),
+        "prefix_preview": manifest.get("prefix_preview"),
+        "prefix_token_ids": manifest.get("prefix_token_ids") or [],
         "model_id": manifest.get("model_id", "?"),
         "created_at": manifest.get("created_at", 0.0),
         "prefix_tokens": manifest.get("prefix_tokens", 0),
@@ -187,6 +189,9 @@ def inspect_handle(path: str) -> str:
     else:
         row("prefix", "empty (no cached KV blocks)")
 
+    if s["prefix_preview"]:
+        row("preview", s["prefix_preview"][:200].replace("\n", " "))
+
     if s["has_weights"]:
         row("weights", f"included ({_fmt_size(s['weights_bytes'])})")
     else:
@@ -240,6 +245,32 @@ def diff_handles(path_a: str, path_b: str) -> str:
         "prefix",
         f"A ~{_fmt_int(a['prefix_tokens'])} tok · B ~{_fmt_int(b['prefix_tokens'])} tok",
     )
+
+    # readable divergence — only when prompts were recorded at fork() time
+    ta, tb = a["prefix_token_ids"], b["prefix_token_ids"]
+    if ta and tb:
+        common = 0
+        for x, y in zip(ta, tb):
+            if x != y:
+                break
+            common += 1
+        row("text split", f"first {_fmt_int(common)} tokens identical, diverge at token {_fmt_int(common)}")
+    pa, pb = a["prefix_preview"], b["prefix_preview"]
+    if pa and pb:
+        c = 0
+        for x, y in zip(pa, pb):
+            if x != y:
+                break
+            c += 1
+        atail = pa[c : c + 70].replace("\n", " ")
+        btail = pb[c : c + 70].replace("\n", " ")
+        if atail or btail:
+            row("A diverges", ("…" + atail) if atail else "(identical to end)")
+            row("B diverges", ("…" + btail) if btail else "(identical to end)")
+        else:
+            row("text", "identical within captured preview")
+    elif pa or pb:
+        row("text", "preview recorded on only one side")
 
     # block shape
     if a["block_shape"] == b["block_shape"]:
