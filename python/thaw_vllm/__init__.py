@@ -35,6 +35,8 @@ _LAZY = {
     "restore_kv_cache_tp": "thaw_vllm.kv_snapshot",
     # thaw_vllm.fork (fork primitive — module top is stdlib-only)
     "fork": "thaw_vllm.fork",
+    "checkpoint": "thaw_vllm.fork",
+    "checkout": "thaw_vllm.fork",
     "fork_completions": "thaw_vllm.fork",
     "ForkHandle": "thaw_vllm.fork",
     "ForkCompletionResult": "thaw_vllm.fork",
@@ -174,6 +176,8 @@ __all__ = [
     "create_pool_app",
     # Fork primitive — make GPU session state portable.
     "fork",
+    "checkpoint",
+    "checkout",
     "fork_completions",
     "ForkHandle",
     "ForkCompletionResult",

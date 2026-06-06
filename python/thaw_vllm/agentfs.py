@@ -125,6 +125,9 @@ def summarize_handle(path: str) -> dict:
     return {
         "name": os.path.basename(state_dir.rstrip("/")) or state_dir,
         "state_dir": state_dir,
+        "handle_id": manifest.get("handle_id", ""),
+        "parent_id": manifest.get("parent_id"),
+        "label": manifest.get("label"),
         "model_id": manifest.get("model_id", "?"),
         "created_at": manifest.get("created_at", 0.0),
         "prefix_tokens": manifest.get("prefix_tokens", 0),
@@ -152,12 +155,17 @@ def summarize_handle(path: str) -> dict:
 
 def inspect_handle(path: str) -> str:
     s = summarize_handle(path)
-    lines = [f"thaw session  {s['name']}"]
+    header = s["label"] or s["name"]
+    lines = [f"thaw session  {header}"]
 
     def row(label, value):
         lines.append(f"  {label:<12} {value}")
 
     row("model", s["model_id"])
+    if s["handle_id"]:
+        row("id", s["handle_id"][:12])
+    if s["parent_id"]:
+        row("parent", s["parent_id"][:12])
     row("created", _fmt_time(s["created_at"]))
 
     blocks = s["num_kv_blocks"]
@@ -246,4 +254,75 @@ def diff_handles(path_a: str, path_b: str) -> str:
         f"B {'included' if b['has_weights'] else 'no'}",
     )
     row("created", f"A {_fmt_time(a['created_at'])} · B {_fmt_time(b['created_at'])}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# render: log (lineage tree over a directory of handles)
+# ---------------------------------------------------------------------------
+
+
+def _collect_handle_dirs(root: str) -> list:
+    """A handle dir contains handle.json. ``root`` may itself be a handle, or
+    a parent folder whose immediate subdirs are handles (a 'repo')."""
+    root = os.path.abspath(root)
+    if os.path.isfile(os.path.join(root, HANDLE_FILENAME)):
+        return [root]
+    out = []
+    if os.path.isdir(root):
+        for entry in sorted(os.listdir(root)):
+            p = os.path.join(root, entry)
+            if os.path.isdir(p) and os.path.isfile(os.path.join(p, HANDLE_FILENAME)):
+                out.append(p)
+    return out
+
+
+def log_handles(root: str) -> str:
+    """Render the lineage tree of fork handles under ``root``. GPU-free.
+
+    Handles link to their parent via ``parent_id``; roots are handles with
+    no known parent. Children are nested under their parent, like ``git log
+    --graph`` for sessions.
+    """
+    root = os.path.abspath(root)
+    dirs = _collect_handle_dirs(root)
+    if not dirs:
+        return f"thaw log  {root}\n  (no thaw handles found)"
+
+    handles = []
+    for d in dirs:
+        try:
+            handles.append(summarize_handle(d))
+        except (FileNotFoundError, ValueError, json.JSONDecodeError):
+            continue
+
+    by_id = {h["handle_id"]: h for h in handles if h["handle_id"]}
+    children: dict = {}
+    roots = []
+    for h in handles:
+        pid = h["parent_id"]
+        if pid and pid in by_id:
+            children.setdefault(pid, []).append(h)
+        else:
+            roots.append(h)
+    roots.sort(key=lambda h: h["created_at"] or 0)
+
+    lines = [f"thaw log  {root}"]
+
+    def render(h, depth):
+        short = (h["handle_id"] or "")[:8] or "--------"
+        name = h["label"] or h["name"]
+        indent = "  " + "  " * depth
+        lines.append(
+            f"{indent}* {name}  ({short})  {h['model_id']}  "
+            f"~{_fmt_int(h['prefix_tokens'])} tok  {_fmt_time(h['created_at'])}"
+        )
+        kids = sorted(
+            children.get(h["handle_id"], []), key=lambda c: c["created_at"] or 0
+        )
+        for k in kids:
+            render(k, depth + 1)
+
+    for r in roots:
+        render(r, 0)
     return "\n".join(lines)

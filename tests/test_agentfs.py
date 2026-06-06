@@ -12,7 +12,13 @@ import struct
 import tempfile
 import unittest
 
-from thaw_vllm.agentfs import summarize_handle, inspect_handle, diff_handles
+from thaw_vllm.agentfs import (
+    summarize_handle,
+    inspect_handle,
+    diff_handles,
+    log_handles,
+)
+from thaw_vllm.fork import ForkHandle
 
 
 def _write_meta(d, hashes, block_size=16):
@@ -32,7 +38,16 @@ def _write_meta(d, hashes, block_size=16):
         f.write(b)
 
 
-def _make(root, name, hashes, weights=False, created=1776200000.0):
+def _make(
+    root,
+    name,
+    hashes,
+    weights=False,
+    created=1776200000.0,
+    handle_id="",
+    parent_id=None,
+    label=None,
+):
     d = os.path.join(root, name)
     os.makedirs(d, exist_ok=True)
     nb = len(hashes)
@@ -48,6 +63,9 @@ def _make(root, name, hashes, weights=False, created=1776200000.0):
                 "num_layers": 32,
                 "max_block_id": 104,
                 "num_kv_blocks": nb,
+                "handle_id": handle_id,
+                "parent_id": parent_id,
+                "label": label,
                 "tensor_parallel_size": 1,
                 "vllm_version": "0.19.1",
                 "created_at": created,
@@ -67,7 +85,13 @@ def _make(root, name, hashes, weights=False, created=1776200000.0):
 class AgentfsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="agentfs_test_")
-        self.a = _make(self.tmp, "feat-a", ["h0", "h1", "h2", "h3", "h4"], weights=True)
+        self.a = _make(
+            self.tmp,
+            "feat-a",
+            ["h0", "h1", "h2", "h3", "h4"],
+            weights=True,
+            handle_id="a0a0a0a0a0a0",
+        )
         self.b = _make(self.tmp, "rev-1", ["h0", "h1", "h2", "r3", "r4", "r5", "r6"])
 
     def tearDown(self):
@@ -127,6 +151,47 @@ class AgentfsTest(unittest.TestCase):
             )
         out = inspect_handle(d)
         self.assertIn("empty", out)
+
+    def test_branch_sets_lineage(self):
+        # ForkHandle.branch() is pure file I/O — no GPU.
+        parent = ForkHandle.load(self.a)
+        self.assertEqual(parent.handle_id, "a0a0a0a0a0a0")
+        child_dir = os.path.join(self.tmp, "child-1")
+        child = parent.branch(child_dir, label="reviewer-x")
+        self.assertNotEqual(child.handle_id, parent.handle_id)
+        self.assertTrue(child.handle_id)  # a fresh id was stamped
+        self.assertEqual(child.parent_id, parent.handle_id)
+        self.assertEqual(child.label, "reviewer-x")
+        # payload copied
+        self.assertTrue(os.path.isfile(os.path.join(child_dir, "kv.thawkv")))
+        self.assertTrue(os.path.isfile(os.path.join(child_dir, "kv.thawkv.meta")))
+        # and it round-trips through the manifest
+        reloaded = summarize_handle(child_dir)
+        self.assertEqual(reloaded["parent_id"], parent.handle_id)
+        self.assertEqual(reloaded["label"], "reviewer-x")
+
+    def test_log_renders_lineage_tree(self):
+        repo = os.path.join(self.tmp, "repo")
+        _make(repo, "trunk", ["h0", "h1"], handle_id="T", created=1.0, label="trunk")
+        _make(
+            repo,
+            "branch-a",
+            ["h0", "h1", "a2"],
+            handle_id="A",
+            parent_id="T",
+            created=2.0,
+            label="branch-a",
+        )
+        out = log_handles(repo)
+        lines = out.splitlines()
+        trunk_line = next(line for line in lines if "trunk" in line)
+        branch_line = next(line for line in lines if "branch-a" in line)
+        # child is nested one level deeper than its parent
+        trunk_indent = len(trunk_line) - len(trunk_line.lstrip(" "))
+        branch_indent = len(branch_line) - len(branch_line.lstrip(" "))
+        self.assertGreater(branch_indent, trunk_indent)
+        # parent rendered before child
+        self.assertLess(lines.index(trunk_line), lines.index(branch_line))
 
 
 if __name__ == "__main__":

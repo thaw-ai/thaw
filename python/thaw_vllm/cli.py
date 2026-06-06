@@ -7,6 +7,7 @@ Usage:
     thaw info     snapshot.thaw
     thaw inspect  HANDLE_DIR          # summarize a fork handle (no GPU)
     thaw diff     HANDLE_A HANDLE_B   # shared KV + divergence (no GPU)
+    thaw log      DIR                 # lineage tree of handles (no GPU)
 """
 
 import argparse
@@ -320,6 +321,13 @@ def cmd_diff(args):
         sys.exit(1)
 
 
+def cmd_log(args):
+    """Show the lineage tree of fork handles under a directory. GPU-free."""
+    from thaw_vllm.agentfs import log_handles
+
+    print(log_handles(args.root))
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="thaw",
@@ -377,6 +385,14 @@ def main():
     p_diff.add_argument("a", help="First handle directory")
     p_diff.add_argument("b", help="Second handle directory")
 
+    # thaw log — lineage tree over a directory of handles, no GPU
+    p_log = sub.add_parser(
+        "log", help="Show the lineage tree of fork handles in a directory (no GPU)"
+    )
+    p_log.add_argument(
+        "root", help="A handle directory, or a folder containing handle subdirs"
+    )
+
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
@@ -392,6 +408,8 @@ def main():
         cmd_inspect(args)
     elif args.command == "diff":
         cmd_diff(args)
+    elif args.command == "log":
+        cmd_log(args)
 
 
 if __name__ == "__main__":
