@@ -328,6 +328,28 @@ def cmd_log(args):
     print(log_handles(args.root))
 
 
+def cmd_rewind(args):
+    """Inspect / diff / rank RL rollouts by per-token logprob. GPU-free."""
+    from thaw_vllm import rewind
+
+    try:
+        if args.rewind_cmd == "inspect":
+            print(rewind.inspect_rollout(args.rollout))
+        elif args.rewind_cmd == "diff":
+            print(rewind.diff_rollouts(args.a, args.b))
+        elif args.rewind_cmd == "pivot":
+            print(rewind.pivot_rollouts(args.root))
+        else:
+            print(
+                "[thaw] usage: thaw rewind {inspect|diff|pivot} ...",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    except FileNotFoundError as e:
+        print(f"[thaw] {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="thaw",
@@ -393,6 +415,23 @@ def main():
         "root", help="A handle directory, or a folder containing handle subdirs"
     )
 
+    # thaw rewind — RL rollout inspection in logprob space, no GPU
+    p_rewind = sub.add_parser(
+        "rewind", help="Inspect & diff RL rollouts in logprob space (no GPU)"
+    )
+    rsub = p_rewind.add_subparsers(dest="rewind_cmd")
+    r_inspect = rsub.add_parser("inspect", help="Summarize one rollout (scores + text)")
+    r_inspect.add_argument("rollout", help="Path to a rollout dir or rollout.json")
+    r_diff = rsub.add_parser(
+        "diff", help="Find where two rollouts split, in logprob space"
+    )
+    r_diff.add_argument("a", help="First rollout dir or rollout.json")
+    r_diff.add_argument("b", help="Second rollout dir or rollout.json")
+    r_pivot = rsub.add_parser(
+        "pivot", help="Across N rollouts: find the fork point + rank by logprob"
+    )
+    r_pivot.add_argument("root", help="Folder containing rollout subdirs")
+
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
@@ -410,6 +449,8 @@ def main():
         cmd_diff(args)
     elif args.command == "log":
         cmd_log(args)
+    elif args.command == "rewind":
+        cmd_rewind(args)
 
 
 if __name__ == "__main__":
