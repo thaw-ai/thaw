@@ -33,8 +33,8 @@ export function Primitive() {
         <div className="border-t border-rule">
           {verbs.map((v, i) => (
             <Reveal key={v.cmd} as="div" delay={i * 0.04}>
-              <div className="relative grid grid-cols-1 sm:grid-cols-[180px_1fr_auto] sm:items-center gap-1 sm:gap-6 py-5 border-b border-rule hover:bg-bg-2/40 transition-colors">
-                {v.tick && <span className="absolute left-0 top-0 bottom-0 w-px bg-uv" aria-hidden />}
+              <div className="relative grid grid-cols-1 sm:grid-cols-[180px_1fr_auto] sm:items-center gap-1 sm:gap-6 py-5 pl-6 md:pl-8 border-b border-rule hover:bg-bg-2/40 transition-colors">
+                {v.tick && <span className="absolute left-0 top-[18%] bottom-[18%] w-[2px] rounded-full bg-uv" aria-hidden />}
                 <code className="font-mono text-[15px] text-ink">
                   <span className="text-ink-faint">thaw </span>
                   {v.cmd}

@@ -16,7 +16,10 @@ export function Hero() {
           transition={{ duration: 0.6, ease }}
           className="inline-flex items-center gap-2 rounded-md border border-rule-strong px-3 py-1"
         >
-          <span className="size-1.5 rounded-full bg-uv" />
+          <span className="relative inline-flex size-1.5">
+            <span className="absolute inset-0 rounded-full bg-uv" style={{ animation: "pulse-ring 2.6s ease-out infinite" }} />
+            <span className="relative size-1.5 rounded-full bg-uv" />
+          </span>
           <span className="font-mono text-[12px] text-ink-soft">
             v0.3.3 · git for live agent sessions
           </span>
