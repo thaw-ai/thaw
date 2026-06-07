@@ -15,14 +15,14 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "thaw — fork() for AI agents",
+  title: "thaw · git for live agent sessions",
   description:
-    "When your agent forks N ways to explore a problem, thaw skips the cold prefill and runs them in parallel from one shared memory. The substrate for RL rollouts, multi-agent reasoning, and parallel coding agents.",
+    "thaw turns a running vLLM or SGLang session (its KV cache, weights, and scheduler state) into a durable file you can checkpoint, branch, diff, and restore. git for live LLM agent sessions: inspect and diff on a laptop, no GPU.",
   metadataBase: new URL("https://thaw.sh"),
   openGraph: {
-    title: "thaw — fork() for AI agents",
+    title: "thaw · git for live agent sessions",
     description:
-      "The fork primitive for AI agents. Snapshot a running session, hydrate N divergent children that share memory at the fork point. For RL rollouts, multi-agent reasoning, and parallel coding agents.",
+      "Turn a running vLLM/SGLang session into a durable file you can checkpoint, branch, diff, and restore. git for live agent sessions: inspect and diff on a laptop, no GPU; restore skips prefill.",
     url: "https://thaw.sh",
     siteName: "thaw",
     type: "website",

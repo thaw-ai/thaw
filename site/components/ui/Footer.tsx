@@ -9,9 +9,9 @@ export function Footer() {
           <div className="md:col-span-5">
             <Logo />
             <p className="mt-5 max-w-sm text-ink-soft text-[13.5px] leading-relaxed">
-              fork() for AI agents. Snapshot a running session, ship the
-              handle, resume into N divergent children. Open source, Rust
-              + CUDA, Apache-2.0.
+              git for live agent sessions. Snapshot a running vLLM or SGLang
+              session to a durable file, then branch, diff, and restore it.
+              Open source, Rust + CUDA, Apache-2.0.
             </p>
           </div>
 
@@ -22,7 +22,7 @@ export function Footer() {
             <ul className="space-y-2.5 text-[13.5px] text-ink/85">
               <li>
                 <a href="#primitive" className="hover:text-uv-bright transition-colors">
-                  What fork() is
+                  The session file
                 </a>
               </li>
               <li>
@@ -119,7 +119,7 @@ export function Footer() {
 
         <div className="mt-12 pt-6 border-t border-rule flex flex-col md:flex-row justify-between items-start md:items-center gap-3 font-mono-meta text-ink-dim text-[10px]">
           <span>© {year} thaw · a Matteson Systems LLC project</span>
-          <span>Not a cache · not a proxy · a primitive</span>
+          <span>checkpoint · branch · diff · restore</span>
         </div>
       </div>
     </footer>

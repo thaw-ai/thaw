@@ -41,10 +41,10 @@
 
   /* — UV. Single accent. Reserved for: install CTA, selection,
        focus rings, live-pulse indicator. NOT background atmosphere. — */
-  --uv:        #a78bfa;
-  --uv-bright: #c4b5fd;
-  --uv-deep:   #6d28d9;
-  --uv-glow:   rgba(167, 139, 250, 0.28);
+  --uv:        #7cc4ff;
+  --uv-bright: #a9d8ff;
+  --uv-deep:   #2b6fb0;
+  --uv-glow:   rgba(124, 196, 255, 0.26);
 
   /* — Signal green. Brand mark only; never UI text or primary accent. — */
   --signal:        #4ade80;
