@@ -62,6 +62,13 @@ def __getattr__(name):
         globals()["sleep_mode"] = mod
         return mod
 
+    if name == "rewind":
+        # Laptop-side rollout inspection (logprob diff / pivot). stdlib-only,
+        # no GPU — same discipline as agentfs.
+        mod = importlib.import_module("thaw_vllm.rewind")
+        globals()["rewind"] = mod
+        return mod
+
     target = _LAZY.get(name)
     if target is None:
         raise AttributeError(f"module 'thaw_vllm' has no attribute {name!r}")
@@ -72,7 +79,7 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted(set(globals()) | set(_LAZY) | {"sleep_mode", "load"})
+    return sorted(set(globals()) | set(_LAZY) | {"sleep_mode", "rewind", "load"})
 
 
 # Eager (but GPU-free) — fork.py imports only stdlib at module load; torch/vLLM
@@ -82,6 +89,7 @@ from thaw_vllm.fork import (  # noqa: E402
     fork,
     checkpoint,
     checkout,
+    capture_rollouts,
     fork_completions,
     ForkHandle,
     ForkCompletionResult,
@@ -189,6 +197,7 @@ __all__ = [
     "fork",
     "checkpoint",
     "checkout",
+    "capture_rollouts",
     "fork_completions",
     "ForkHandle",
     "ForkCompletionResult",
@@ -207,4 +216,6 @@ __all__ = [
     "WorkerProtocolError",
     # sleep-mode backend wrapper (vLLM RFC #34303 integration).
     "sleep_mode",
+    # rewind — laptop-side RL rollout inspection (logprob diff / pivot).
+    "rewind",
 ]

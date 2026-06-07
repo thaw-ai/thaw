@@ -61,6 +61,28 @@ pip install thaw-vllm[vllm]   # add the engine to checkpoint / checkout on a GPU
 
 And it's fast where it counts: a pre-warmed pool forks at **0.88s/round** (≈400× over cold-boot) on an H100 with Llama-3.1-8B — see [Performance](#inside-a-single-fork).
 
+### Rewind — RL rollouts in logprob space
+
+`thaw rewind` is the rollout-level companion to the session verbs. Capture N sampled continuations from a trunk (with per-token logprobs), then find where they diverge and which one the model was most confident in — on a laptop, no GPU.
+
+| verb | what it does | needs a GPU? |
+|---|---|---|
+| `thaw rewind diff A B` | the pivot: first divergent token + what each branch chose, plus the logprob each assigned the *other's* pick | **no** |
+| `thaw rewind pivot DIR` | across N rollouts: earliest divergence, grouped by choice, ranked by sequence logprob | **no** |
+| `thaw rewind inspect R` | one rollout's score, perplexity, sampling, and text | **no** |
+
+```python
+import thaw_vllm
+# capture (GPU): N sampled branches from a trunk, each with per-token logprobs
+thaw_vllm.capture_rollouts(llm, trunk, sampling_params, out_dir="rollouts", n=4)
+```
+```bash
+thaw rewind diff rollouts/branch-a rollouts/branch-b   # where did they split?
+thaw rewind pivot rollouts                             # which branch won?
+```
+
+Validated end-to-end on an A100 — see [docs/REWIND_VALIDATION.md](docs/REWIND_VALIDATION.md).
+
 ### What you can build with it
 
 - **Agent branching** — fork a conversation into N parallel hypotheses mid-reasoning, run them concurrently, pick the winner.
@@ -457,6 +479,11 @@ thaw inspect HANDLE_DIR              # what's in a session: model, prefix, KV, t
 thaw diff    HANDLE_A HANDLE_B       # what diverged: shared KV blocks + the token/text split point
 thaw log     DIR                     # lineage tree of handles (checkpoint → branches)
 thaw info    SNAPSHOT.thaw           # low-level .thaw / .thawkv file info
+
+# offline — RL rollout inspection in logprob space (no GPU)
+thaw rewind diff   ROLLOUT_A ROLLOUT_B   # the pivot + counterfactual logprobs
+thaw rewind pivot  ROLLOUTS_DIR          # rank N branches by sequence logprob
+thaw rewind inspect ROLLOUT              # one rollout's score, perplexity, text
 
 # GPU — freeze weights and serve
 thaw freeze --model meta-llama/Meta-Llama-3-8B --output weights.thaw

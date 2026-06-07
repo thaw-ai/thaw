@@ -653,6 +653,92 @@ def checkout(handle: "ForkHandle", llm) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# capture_rollouts() — record continuations + per-token logprobs for `rewind`
+# ---------------------------------------------------------------------------
+
+
+def capture_rollouts(
+    llm,
+    prompt,
+    sampling_params,
+    *,
+    out_dir: str,
+    n: Optional[int] = None,
+    handle: Optional["ForkHandle"] = None,
+    logprobs: int = 5,
+    labels: Optional[Sequence[str]] = None,
+) -> list:
+    """Generate continuations from a trunk and record each as a ``rollout.json``.
+
+    This is the capture step behind ``thaw rewind``: it runs the engine with
+    top-k logprobs enabled and writes one rollout (tokens + per-token logprobs)
+    per returned sample under ``out_dir/<label>/rollout.json``. The resulting
+    files are read/diffed on a laptop with no GPU via :mod:`thaw_vllm.rewind`.
+
+    GPU path — needs a live ``llm``. The rollout *reading* does not.
+
+    Args:
+        llm: a live vLLM engine whose prefix cache already holds the trunk.
+        prompt: the trunk prompt (string) to branch continuations from.
+        sampling_params: ``vllm.SamplingParams``; ``logprobs`` is forced on and
+            ``n`` is set from the ``n=`` argument when provided.
+        out_dir: directory to write ``<label>/rollout.json`` into.
+        n: number of branches (overrides ``sampling_params.n``).
+        handle: optional trunk :class:`ForkHandle` — its ``handle_id`` is
+            recorded as each rollout's ``parent_id`` for lineage.
+        logprobs: how many top-k alternatives to store per token.
+        labels: optional branch names (defaults to ``rollout-0``, ``rollout-1`` …).
+
+    Returns:
+        List of written ``rollout.json`` paths.
+    """
+    import copy
+
+    from thaw_vllm import rewind
+
+    sp = copy.copy(sampling_params)
+    try:
+        if getattr(sp, "logprobs", None) is None:
+            sp.logprobs = logprobs
+        if n is not None:
+            sp.n = int(n)
+    except Exception:
+        # Some SamplingParams builds are frozen; fall back to whatever was passed.
+        pass
+
+    outputs = llm.generate([prompt], sp)
+    out = outputs[0]
+    prompt_token_ids = list(getattr(out, "prompt_token_ids", []) or [])
+    model_id = _model_id(llm)
+    parent_id = handle.handle_id if handle is not None else None
+    sampling_meta = {
+        "temperature": getattr(sp, "temperature", None),
+        "top_p": getattr(sp, "top_p", None),
+        "top_k": getattr(sp, "top_k", None),
+        "seed": getattr(sp, "seed", None),
+        "n": getattr(sp, "n", None),
+    }
+
+    os.makedirs(out_dir, exist_ok=True)
+    written = []
+    for j, comp in enumerate(out.outputs):
+        label = labels[j] if labels and j < len(labels) else f"rollout-{j}"
+        tokens = rewind.extract_token_logprobs(comp, max_topk=max(int(logprobs or 5), 1))
+        record = rewind.build_rollout(
+            model_id=model_id,
+            prompt_token_ids=prompt_token_ids,
+            tokens=tokens,
+            parent_id=parent_id,
+            label=label,
+            sampling=sampling_meta,
+            text=getattr(comp, "text", None),
+            created_at=time.time(),
+        )
+        written.append(rewind.write_rollout(record, os.path.join(out_dir, label)))
+    return written
+
+
+# ---------------------------------------------------------------------------
 # fork_completions()
 # ---------------------------------------------------------------------------
 
