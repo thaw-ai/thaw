@@ -1,93 +1,225 @@
 "use client";
 
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
+import { CopyChip } from "@/components/ui/CopyChip";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
 export function Hero() {
   return (
-    <section
-      id="hero"
-      className="relative w-full overflow-hidden pt-20 md:pt-24 pb-16 md:pb-24"
-    >
-      <div className="relative w-full max-w-[1180px] mx-auto px-6 md:px-10 grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-16 items-center">
-        {/* — Left: the message — */}
-        <div className="max-w-[560px]">
-          <motion.h1
-            initial={{ opacity: 0, y: 14, filter: "blur(8px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            transition={{ duration: 1.0, ease }}
-            className="display"
-            style={{
-              fontSize: "clamp(2.3rem, 5.6vw, 4.6rem)",
-              lineHeight: 1.0,
-              letterSpacing: "-0.04em",
-              fontWeight: 600,
-            }}
-          >
-            <code className="font-mono" style={{ color: "var(--uv)" }}>
-              git
-            </code>
-            <span className="text-ink"> for live agent sessions.</span>
-          </motion.h1>
-
-          <motion.p
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.9, ease, delay: 0.2 }}
-            className="mt-6 text-ink-soft text-[16px] md:text-[18px] leading-[1.6] max-w-[40ch]"
-          >
-            A running vLLM or SGLang session becomes a durable file you can{" "}
-            <span className="text-ink">
-              checkpoint, branch, diff, and restore
-            </span>
-            . Inspect and diff it on a laptop. No GPU.
-          </motion.p>
-
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.9, ease, delay: 0.32 }}
-            className="mt-8 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5"
-          >
-            <a
-              href="#install"
-              className="group inline-flex items-center justify-center gap-2.5 rounded-full bg-ink text-bg hover:bg-chrome-2 transition-colors duration-300 px-6 py-3 text-[14px] font-medium"
-            >
-              <span className="font-mono text-[13px]">$</span>
-              <span>pip install thaw-vllm</span>
-            </a>
-            <a
-              href="https://github.com/thaw-ai/thaw"
-              target="_blank"
-              rel="noopener"
-              className="group inline-flex items-center justify-center gap-2 rounded-full border border-rule-strong text-ink hover:border-ink hover:bg-bg-2/60 transition-all duration-300 px-6 py-3 text-[14px]"
-            >
-              <span>GitHub</span>
-              <span className="text-ink-dim transition-transform group-hover:translate-x-0.5">
-                →
-              </span>
-            </a>
-          </motion.div>
-        </div>
-
-        {/* — Right: the real product. A recording of `thaw diff` on a laptop. — */}
+    <section className="relative px-6 md:px-8 pt-32 md:pt-40 pb-24 md:pb-28">
+      <div className="max-w-[1200px] mx-auto flex flex-col items-center text-center">
+        {/* version pill — eyebrow #1 of 2 on the page */}
         <motion.div
-          initial={{ opacity: 0, scale: 0.985, y: 12 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          transition={{ duration: 1.1, ease, delay: 0.1 }}
-          className="relative w-full rounded-xl overflow-hidden border border-rule-strong bg-bg-2 shadow-[0_24px_90px_rgba(0,0,0,0.5)]"
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, ease }}
+          className="inline-flex items-center gap-2 rounded-md border border-rule-strong px-3 py-1"
         >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/thaw-demo.gif"
-            alt="thaw log, inspect, and diff two live agent sessions on a laptop, no GPU"
-            width={1018}
-            height={918}
-            className="w-full block"
-          />
+          <span className="size-1.5 rounded-full bg-uv" />
+          <span className="font-mono text-[12px] text-ink-soft">
+            v0.3.3 · git for live agent sessions
+          </span>
+        </motion.div>
+
+        {/* headline */}
+        <motion.h1
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.7, ease, delay: 0.05 }}
+          className="display mt-7 text-ink text-balance max-w-[18ch]"
+          style={{
+            fontSize: "clamp(2.75rem, 5.5vw, 4.5rem)",
+            lineHeight: 1.04,
+            letterSpacing: "-0.03em",
+            fontWeight: 600,
+          }}
+        >
+          Snapshot, branch, and diff a running LLM session.
+        </motion.h1>
+
+        {/* subcopy */}
+        <motion.p
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.7, ease, delay: 0.12 }}
+          className="mt-6 max-w-[560px] text-ink-dim text-[18px] leading-[1.55]"
+        >
+          thaw freezes a live vLLM or SGLang session to a file you can inspect,
+          diff, and restore. Branch a session like a commit. Read the snapshot on
+          your laptop, no GPU required.
+        </motion.p>
+
+        {/* CTA row */}
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.7, ease, delay: 0.18 }}
+          className="mt-9 flex flex-col sm:flex-row items-center gap-3"
+        >
+          <a
+            href="#install"
+            className="focus-frost inline-flex items-center gap-2 rounded-md bg-uv text-bg font-medium text-[14px] px-5 py-2.5 hover:bg-uv-bright transition-colors duration-200"
+          >
+            Get started
+            <span aria-hidden>→</span>
+          </a>
+          <CopyChip command="pip install thaw-vllm" />
+        </motion.div>
+
+        {/* the artifact — the hero visual */}
+        <motion.div
+          initial={{ opacity: 0, y: 24 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.9, ease, delay: 0.28 }}
+          className="mt-16 w-full max-w-[860px]"
+        >
+          <DiffTerminal />
         </motion.div>
       </div>
     </section>
   );
+}
+
+/* ── The real `thaw diff` output, framed in terminal chrome. ───────────────── */
+
+function DiffTerminal() {
+  const reduce = useReducedMotion();
+
+  const rows: { delay: number; node: React.ReactNode }[] = [
+    { delay: 0, node: <Prompt>thaw diff base.thaw reviewer-security.thaw</Prompt> },
+    { delay: 0.05, node: <Spacer /> },
+    { delay: 0.08, node: <KV k="model" v="meta-llama/Llama-3.1-8B-Instruct" tag="same" /> },
+    { delay: 0.11, node: <KV k="base" v="a0f3e1 · trunk" tag="48 blocks" /> },
+    { delay: 0.14, node: <KV k="branch" v="9c7d24 · reviewer-security" tag="51 blocks" /> },
+    {
+      delay: 0.17,
+      node: (
+        <Row>
+          <Key>shared</Key>
+          <span className="text-ink">
+            <span className="relative">
+              47/48 blocks identical
+              <span className="absolute left-0 -bottom-0.5 h-px w-full bg-uv/70" />
+            </span>
+            <span className="text-ink-dim">{"  "}(~752 tokens)</span>
+          </span>
+        </Row>
+      ),
+    },
+    { delay: 0.2, node: <KV k="diverge" v="at token 195" /> },
+    { delay: 0.24, node: <Spacer /> },
+    {
+      delay: 0.27,
+      node: (
+        <Row>
+          <Sign className="text-ink-ghost">{" "}</Sign>
+          <span className="text-ink-dim">
+            prefix{"  "}…review the following diff for{" "}
+            <span className="text-ink-faint">___</span>
+          </span>
+        </Row>
+      ),
+    },
+    {
+      delay: 0.3,
+      node: (
+        <Row className="bg-[rgba(201,138,138,0.07)] -mx-4 px-4">
+          <Sign className="text-diff-remove">-</Sign>
+          <span className="text-ink-soft">
+            base{"   "}…issues and code style.
+          </span>
+        </Row>
+      ),
+    },
+    {
+      delay: 0.33,
+      node: (
+        <Row className="bg-[rgba(127,184,138,0.07)] -mx-4 px-4">
+          <Sign className="text-diff-add">+</Sign>
+          <span className="text-ink">
+            branch …security vulnerabilities and unsafe input handling.
+          </span>
+        </Row>
+      ),
+    },
+  ];
+
+  return (
+    <div className="terminal overflow-hidden text-left">
+      {/* title bar */}
+      <div className="relative flex items-center h-9 px-4 border-b border-rule">
+        <div className="flex items-center gap-2">
+          <span className="size-[11px] rounded-full bg-ink-ghost" />
+          <span className="size-[11px] rounded-full bg-ink-ghost" />
+          <span className="size-[11px] rounded-full bg-ink-ghost" />
+        </div>
+        <div className="absolute inset-x-0 text-center font-mono text-[12px] text-ink-dim pointer-events-none">
+          thaw diff base.thaw reviewer-security.thaw
+        </div>
+      </div>
+
+      {/* body */}
+      <div className="px-4 md:px-6 py-5 font-mono text-[13px] md:text-[14px] leading-[1.7] overflow-x-auto">
+        {rows.map((r, i) => (
+          <motion.div
+            key={i}
+            initial={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{
+              duration: reduce ? 0.3 : 0.3,
+              ease: "easeOut",
+              delay: reduce ? 0.2 : 0.5 + r.delay,
+            }}
+          >
+            {r.node}
+          </motion.div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Row({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return <div className={`flex gap-3 ${className}`}>{children}</div>;
+}
+function Key({ children }: { children: React.ReactNode }) {
+  return <span className="text-ink-faint w-[68px] shrink-0">{children}</span>;
+}
+function KV({ k, v, tag }: { k: string; v: string; tag?: string }) {
+  return (
+    <Row>
+      <Key>{k}</Key>
+      <span className="text-ink-soft">
+        {v}
+        {tag ? <span className="text-ink-dim">{"  "}({tag})</span> : null}
+      </span>
+    </Row>
+  );
+}
+function Prompt({ children }: { children: React.ReactNode }) {
+  return (
+    <Row>
+      <span className="text-uv shrink-0">$</span>
+      <span className="text-ink">{children}</span>
+    </Row>
+  );
+}
+function Sign({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return <span className={`w-2 shrink-0 ${className}`}>{children}</span>;
+}
+function Spacer() {
+  return <div className="h-[1.7em]" aria-hidden />;
 }

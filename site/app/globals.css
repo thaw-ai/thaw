@@ -14,20 +14,21 @@
  * ============================================================================ */
 
 :root {
-  /* — Base canvas. Slightly cooler than pure black; a 240° hue at ~5% L. — */
-  --bg:        #08090d;
-  --bg-2:      #0e1018;
-  --bg-3:      #14171f;
-  --bg-raised: #1c1f29;
+  /* — Near-black ramp. bg = page ground; raised = terminal/chrome body. — */
+  --bg:        #07080a;
+  --bg-2:      #131418;
+  --bg-3:      #1a1c21;
+  --bg-raised: #0c0d10;
 
-  /* — Ink ramp. Cool whites, restrained mids, no purple cast. — */
-  --ink:       #f5f6fa;
-  --ink-soft:  #a1a6b6;
-  --ink-dim:   #5e6378;
-  --ink-faint: #34384a;
+  /* — Ink ramp. One white, expressed at opacities. Hierarchy via opacity. — */
+  --ink:       #f4f6f8;
+  --ink-soft:  rgba(244, 246, 248, 0.70);
+  --ink-dim:   rgba(244, 246, 248, 0.50);
+  --ink-faint: rgba(244, 246, 248, 0.32);
+  --ink-ghost: rgba(244, 246, 248, 0.22);
 
-  --rule:        rgba(225, 230, 245, 0.07);
-  --rule-strong: rgba(225, 230, 245, 0.13);
+  --rule:        rgba(244, 246, 248, 0.08);
+  --rule-strong: rgba(244, 246, 248, 0.14);
 
   /* — Chrome ramp. Echoes the snowflake material. The only metal accent. — */
   --chrome-1: #f5f6fa;
@@ -39,12 +40,16 @@
   --frost:      #b5d8ff;
   --frost-deep: #6488bd;
 
-  /* — UV. Single accent. Reserved for: install CTA, selection,
-       focus rings, live-pulse indicator. NOT background atmosphere. — */
-  --uv:        #7cc4ff;
-  --uv-bright: #a9d8ff;
-  --uv-deep:   #2b6fb0;
-  --uv-glow:   rgba(124, 196, 255, 0.26);
+  /* — Frost. The single accent. One CTA, links, focus ring, one diagram node.
+       A scalpel, never background atmosphere. — */
+  --uv:        #6fb3d9;
+  --uv-bright: #8fcded;
+  --uv-deep:   #3e7e9e;
+  --uv-glow:   rgba(111, 179, 217, 0.14);
+
+  /* — Diff semantics. Terminal syntax only — quiet, not brand colors. — */
+  --diff-add:    #7fb88a;
+  --diff-remove: #c98a8a;
 
   /* — Signal green. Brand mark only; never UI text or primary accent. — */
   --signal:        #4ade80;
@@ -73,20 +78,8 @@ body {
   position: relative;
 }
 
-/* One barely-there atmospheric layer anchored to the top of the page. Fades
-   to nothing by mid-fold so the rest of the page reads as restrained. */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background: radial-gradient(
-    ellipse 90% 50% at 50% -10%,
-    rgba(180, 200, 255, 0.04) 0%,
-    transparent 55%
-  );
-}
+/* Flat ground. No mesh, no glow orb, no radial blob. Depth comes from
+   hairline borders and one-step background lifts, not atmosphere. */
 
 @theme inline {
   --color-bg: var(--bg);
@@ -97,8 +90,11 @@ body::before {
   --color-ink-soft: var(--ink-soft);
   --color-ink-dim: var(--ink-dim);
   --color-ink-faint: var(--ink-faint);
+  --color-ink-ghost: var(--ink-ghost);
   --color-rule: var(--rule);
   --color-rule-strong: var(--rule-strong);
+  --color-diff-add: var(--diff-add);
+  --color-diff-remove: var(--diff-remove);
   --color-chrome-1: var(--chrome-1);
   --color-chrome-2: var(--chrome-2);
   --color-chrome-3: var(--chrome-3);
@@ -125,8 +121,8 @@ body::before {
 .display {
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   font-weight: 600;
-  letter-spacing: -0.04em;
-  line-height: 0.98;
+  letter-spacing: -0.03em;
+  line-height: 1.04;
   font-feature-settings: "ss01", "cv11", "tnum";
 }
 
@@ -166,9 +162,9 @@ body::before {
 .text-uv-gradient {
   background: linear-gradient(
     135deg,
-    #a9d8ff 0%,
-    #7cc4ff 45%,
-    #8b9dfb 100%
+    #8fcded 0%,
+    #6fb3d9 55%,
+    #3e7e9e 100%
   );
   -webkit-background-clip: text;
   background-clip: text;
@@ -223,6 +219,28 @@ body::before {
 
 .rule-t { border-top: 1px solid var(--rule); }
 .rule-b { border-bottom: 1px solid var(--rule); }
+
+/* Frost selection — the accent shows up when you actually grab text. */
+::selection {
+  background: rgba(111, 179, 217, 0.22);
+  color: var(--ink);
+}
+
+/* Terminal chrome — raised body, hairline edge, single inset top-highlight.
+   The recurring artifact frame. No drop shadow. */
+.terminal {
+  background: var(--bg-raised);
+  border: 1px solid var(--rule-strong);
+  border-radius: 14px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
+}
+
+/* Focus ring — required on every interactive element. */
+.focus-frost:focus-visible {
+  outline: 3px solid var(--uv-glow);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
 
 /* ----------------------------------------------------------------------------
  * Pill nav backdrop. Slightly more opaque, less saturation — reads like
