@@ -1,326 +1,150 @@
-"use client";
-
-import { useState } from "react";
-import dynamic from "next/dynamic";
-import { motion, AnimatePresence } from "framer-motion";
-
-const ForkFlow3D = dynamic(
-  () => import("@/components/ui/ForkFlow3D").then((m) => m.ForkFlow3D),
-  { ssr: false }
-);
-
-const ease = [0.22, 1, 0.36, 1] as const;
-
-/* Phase-specific overlay copy. Each phase maps directly to the code path
-   you can see executing in the 3D scene. */
-const phaseOverlay = {
-  Coalesce: {
-    metric: "10K → 1",
-    line: "KV slabs gather into one contiguous tensor",
-    detail:
-      "Per-slab DMA tops out at ~50 MB/s. One coalesced tensor hits 3.4 GB/s. kv_snapshot.py:_coalesce_kv_to_gpu_buffer.",
-  },
-  Pipeline: {
-    metric: "55 GB/s",
-    line: "Two pinned buffers ping-pong · 86% of PCIe Gen5 ceiling",
-    detail:
-      "While GPU stream reads buffer A, CPU fills buffer B from disk. Disk I/O and DMA overlap. crates/thaw-runtime/src/pipeline.rs.",
-  },
-  Restore: {
-    metric: "CRC32C ✓",
-    line: "Chunks land on child GPUs · parallel verification",
-    detail:
-      "Each chunk's CRC is folded in parallel with DMA. Mismatch aborts before any corrupted byte reaches the model. 14 GB/s on H100.",
-  },
-  Diverge: {
-    metric: "0.88s",
-    line: "Prefix hashes re-inserted · children skip prefill",
-    detail:
-      "Each block tagged with its prefix hash and inserted into vLLM's cached_block_hash_to_block map. Next request with matching prefix is an instant cache hit.",
-  },
-} as const;
-
-const phases = [
-  { key: "Coalesce", n: "01", title: "Coalesce" },
-  { key: "Pipeline", n: "02", title: "Pipeline" },
-  { key: "Restore", n: "03", title: "Restore" },
-  { key: "Diverge", n: "04", title: "Diverge" },
-];
+import { Reveal } from "@/components/ui/Reveal";
 
 export function HowItWorks() {
-  const [activePhase, setActivePhase] =
-    useState<keyof typeof phaseOverlay>("Coalesce");
-  const overlay = phaseOverlay[activePhase];
-
   return (
-    <section
-      id="how"
-      className="relative px-6 md:px-10 pt-32 md:pt-44 pb-24 md:pb-36 border-t border-rule overflow-hidden"
-    >
-      <div className="max-w-[1400px] mx-auto">
-
-        <motion.h2
-          initial={{ opacity: 0, y: 18, filter: "blur(8px)" }}
-          whileInView={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-          viewport={{ once: true, amount: 0.3 }}
-          transition={{ duration: 1.3, ease }}
-          className="display text-balance mx-auto max-w-[18ch] text-center"
-          style={{
-            fontSize: "clamp(2rem, 5.5vw, 4.5rem)",
-            lineHeight: 1.02,
-            letterSpacing: "-0.04em",
-            fontWeight: 600,
-          }}
-        >
-          <span className="text-ink">Under the hood:</span>{" "}
-          <span className="text-chrome-deep">snapshot, fan-out, diverge.</span>
-        </motion.h2>
-
-        <motion.p
-          initial={{ opacity: 0, y: 12 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true, amount: 0.3 }}
-          transition={{ duration: 1.1, ease, delay: 0.15 }}
-          className="mt-7 mx-auto max-w-[680px] text-center text-ink-soft leading-relaxed text-[15px]"
-        >
-          One parent engine, N children, zero re-prefill. But the magic
-          is in four specific tricks. Watch the loop: scattered KV slabs
-          coalesce, ping-pong through two pinned buffers, land on children
-          via PCIe Gen5, then get tagged with prefix hashes so the next
-          request is a cache hit. Real mechanics, real numbers.
-        </motion.p>
-
-        {/* 3D animation viewport with overlay layers */}
-        <motion.div
-          initial={{ opacity: 0, y: 24 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true, amount: 0.15 }}
-          transition={{ duration: 1.3, ease, delay: 0.2 }}
-          className="mt-14 md:mt-20 relative rounded-3xl overflow-hidden border border-rule-strong"
-          style={{
-            background:
-              "radial-gradient(ellipse 80% 60% at 50% 0%, rgba(124, 196, 255, 0.06), transparent 60%), linear-gradient(180deg, #0b0d16 0%, #07080d 100%)",
-          }}
-        >
-          {/* === Corner meta === */}
-          <div className="absolute top-5 left-5 z-10 pointer-events-none">
-            <div className="font-mono-meta text-[10px] text-ink-dim">
-              fork_flow.v0.4 · live
-            </div>
-          </div>
-          <div className="absolute top-5 right-5 z-10 pointer-events-none flex items-center gap-2">
-            <span className="relative inline-flex">
-              <span className="size-1.5 rounded-full bg-uv" />
-              <span
-                aria-hidden
-                className="absolute inset-0 size-1.5 rounded-full bg-uv"
-                style={{ animation: "pulse-ring 2.4s ease-out infinite" }}
-              />
-            </span>
-            <span className="font-mono-meta text-[10px] text-ink-soft">
-              {activePhase.toUpperCase()}
-            </span>
-          </div>
-
-          {/* axis-style corner ticks */}
-          <CornerTick className="top-3 left-3" rotate={0} />
-          <CornerTick className="top-3 right-3" rotate={90} />
-          <CornerTick className="bottom-3 right-3" rotate={180} />
-          <CornerTick className="bottom-3 left-3" rotate={270} />
-
-          {/* === Anchored labels next to the 3D elements ===
-              Positioned to roughly align with where the engines render. */}
-          <div className="absolute left-[10%] top-[42%] z-10 pointer-events-none hidden md:block">
-            <AnchorTag
-              label="PARENT"
-              sub="prefilled · KV cache live"
-              align="left"
-            />
-          </div>
-          <div className="absolute left-1/2 -translate-x-1/2 top-[18%] z-10 pointer-events-none hidden md:block">
-            <AnchorTag
-              label="BUFFER A · B"
-              sub="double-buffered DMA"
-              align="center"
-            />
-          </div>
-          <div className="absolute right-[10%] top-[42%] z-10 pointer-events-none hidden md:block">
-            <AnchorTag
-              label="× 4 CHILDREN"
-              sub="hash-tagged · cache warm"
-              align="right"
-            />
-          </div>
-
-          {/* === The actual 3D scene === */}
-          <div
-            className="relative w-full"
-            style={{ height: "clamp(440px, 62vh, 640px)" }}
+    <section id="how" className="px-6 md:px-8 py-20 md:py-28 border-t border-rule">
+      <div className="max-w-[1200px] mx-auto">
+        <Reveal>
+          <h2
+            className="display text-ink max-w-[16ch]"
+            style={{ fontSize: "clamp(2rem, 3.2vw, 2.75rem)", lineHeight: 1.08, letterSpacing: "-0.025em", fontWeight: 600 }}
           >
-            <ForkFlow3D
-              onPhaseChange={(p) =>
-                setActivePhase(p as keyof typeof phaseOverlay)
-              }
-            />
-          </div>
+            What actually gets frozen.
+          </h2>
+        </Reveal>
 
-          {/* Bottom-center caption */}
-          <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
-            <div className="font-mono-meta text-[10px] text-ink-dim">
-              coalesce · pipeline · restore · diverge · loops every 14s
-            </div>
-          </div>
-        </motion.div>
-
-        {/* === Phase callout — sits BELOW the canvas, never covers the scene === */}
-        <div className="mt-6 md:mt-8 mx-auto w-full max-w-[760px] px-2">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activePhase}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.45, ease }}
-              className="relative rounded-2xl border border-uv/30 bg-bg-2/60 backdrop-blur-md px-6 py-5 shadow-[0_20px_60px_-20px_rgba(124,196,255,0.30)]"
-            >
-              <div className="flex flex-col md:flex-row md:items-baseline gap-3 md:gap-6">
-                <div
-                  className="display text-uv-bright tabular-nums shrink-0"
-                  style={{
-                    fontSize: "clamp(1.4rem, 2vw, 1.8rem)",
-                    lineHeight: 1,
-                    fontWeight: 700,
-                    letterSpacing: "-0.03em",
-                  }}
-                >
-                  {overlay.metric}
-                </div>
-                <div className="min-w-0">
-                  <div className="font-mono-meta text-[10px] text-ink tracking-[0.14em]">
-                    {overlay.line}
-                  </div>
-                  <div className="mt-1.5 text-[13px] text-ink-soft leading-snug">
-                    {overlay.detail}
-                  </div>
-                </div>
-              </div>
-            </motion.div>
-          </AnimatePresence>
-        </div>
-
-        {/* Phase legend cards — sharper copy, highlights active */}
-        <div className="mt-10 md:mt-14 grid grid-cols-1 md:grid-cols-4 gap-3 md:gap-4">
-          {phases.map((p, i) => {
-            const isActive = p.key === activePhase;
-            const data = phaseOverlay[p.key as keyof typeof phaseOverlay];
-            return (
-              <motion.div
-                key={p.key}
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true, amount: 0.3 }}
-                transition={{ duration: 0.9, ease, delay: 0.1 + i * 0.07 }}
-                className={`relative rounded-xl border p-5 md:p-6 transition-all duration-500 ${
-                  isActive
-                    ? "border-uv/40 bg-uv/[0.06] shadow-[0_0_40px_-12px_rgba(124,196,255,0.35)]"
-                    : "border-rule bg-bg-2/40"
-                }`}
-              >
-                <div className="flex items-center justify-between mb-3">
-                  <span
-                    className={`font-mono-meta text-[10px] ${
-                      isActive ? "text-uv-bright" : "text-ink-dim"
-                    }`}
-                  >
-                    {p.n}
-                  </span>
-                  <span
-                    className={`size-1.5 rounded-full ${
-                      isActive ? "bg-uv" : "bg-ink-faint"
-                    } transition-colors`}
-                  />
-                </div>
-                <h3
-                  className={`display ${
-                    isActive ? "text-ink" : "text-ink-soft"
-                  } transition-colors`}
-                  style={{
-                    fontSize: "1.4rem",
-                    lineHeight: 1.05,
-                    fontWeight: 600,
-                  }}
-                >
-                  {p.title}
-                </h3>
-                <div
-                  className={`mt-3 font-mono-meta text-[9.5px] tracking-[0.14em] transition-colors ${
-                    isActive ? "text-uv-bright" : "text-ink-dim"
-                  }`}
-                >
-                  {data.metric}
-                </div>
-                <p
-                  className={`mt-2 text-[12.5px] leading-relaxed ${
-                    isActive ? "text-ink-soft" : "text-ink-dim"
-                  } transition-colors`}
-                >
-                  {data.line}
-                </p>
-              </motion.div>
-            );
-          })}
+        <div className="mt-14 md:mt-20 flex flex-col gap-16 md:gap-24">
+          <Row
+            n="01"
+            title="Weights + KV cache"
+            body="The model weights and the live attention cache are captured together, byte-for-byte, with a CRC over every region. Restore reproduces the session's next token exactly."
+            term={<RegionTable />}
+          />
+          <Row
+            n="02"
+            title="Scheduler + prefix-hash state"
+            body="thaw also captures vLLM's block table and prefix-hash map, the part everyone else drops. That is what lets a restored session keep its cached prefix instead of re-prefilling it."
+            term={<SchedulerTable />}
+            flip
+          />
+          <Row
+            n="03"
+            title="The file"
+            body="All of it lands in one .thaw directory. inspect, diff, and log read the metadata sidecar on any machine. No CUDA, no engine, no GPU."
+            term={<FileTable />}
+          />
         </div>
       </div>
     </section>
   );
 }
 
-function CornerTick({ className, rotate }: { className: string; rotate: number }) {
+function Row({
+  n,
+  title,
+  body,
+  term,
+  flip = false,
+}: {
+  n: string;
+  title: string;
+  body: string;
+  term: React.ReactNode;
+  flip?: boolean;
+}) {
   return (
-    <span
-      aria-hidden
-      className={`absolute z-10 ${className}`}
-      style={{ transform: `rotate(${rotate}deg)` }}
-    >
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <path
-          d="M1 1 L6 1 M1 1 L1 6"
-          stroke="currentColor"
-          strokeWidth="1"
-          className="text-ink-dim"
-        />
-      </svg>
-    </span>
+    <Reveal>
+      <div className="grid lg:grid-cols-2 gap-8 lg:gap-16 items-center">
+        <div className={flip ? "lg:order-2" : ""}>
+          <div className="font-mono text-[clamp(2rem,3vw,2.75rem)] leading-none text-ink-faint tabular-nums">
+            {n}
+          </div>
+          <h3
+            className="mt-5 text-ink"
+            style={{ fontSize: "1.25rem", lineHeight: 1.2, letterSpacing: "-0.015em", fontWeight: 500 }}
+          >
+            {title}
+          </h3>
+          <p className="mt-3 max-w-[44ch] text-ink-dim text-[15px] leading-[1.6]">{body}</p>
+        </div>
+        <div className={flip ? "lg:order-1" : ""}>{term}</div>
+      </div>
+    </Reveal>
   );
 }
 
-/** A small badge label that "points at" something in the 3D scene */
-function AnchorTag({
-  label,
-  sub,
-  align,
-}: {
-  label: string;
-  sub: string;
-  align: "left" | "right" | "center";
-}) {
-  const alignClass =
-    align === "left"
-      ? "items-start"
-      : align === "right"
-        ? "items-end"
-        : "items-center";
+/* ── mono visuals ──────────────────────────────────────────────────────────── */
+
+function Frame({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className={`relative flex flex-col gap-1 ${alignClass}`}>
-      <div className="flex items-center gap-2 rounded-md border border-uv/30 bg-bg-2/70 backdrop-blur-md px-2.5 py-1.5">
-        <span className="size-1 rounded-full bg-uv" />
-        <span className="font-mono-meta text-[9.5px] text-ink tracking-[0.16em]">
-          {label}
-        </span>
+    <div className="terminal overflow-hidden">
+      <div className="flex items-center h-8 px-4 border-b border-rule">
+        <span className="font-mono text-[11px] text-ink-dim">{title}</span>
       </div>
-      <span className="font-mono-meta text-[8.5px] text-ink-dim tracking-[0.12em] px-1">
-        {sub}
-      </span>
+      <div className="px-5 py-4 font-mono text-[13px] leading-[1.8] text-ink-soft overflow-x-auto">
+        {children}
+      </div>
     </div>
+  );
+}
+function L({ a, b, c, head }: { a: string; b?: string; c?: string; head?: boolean }) {
+  const tone = head ? "text-ink-faint" : "";
+  return (
+    <div className={`grid grid-cols-[1fr_auto_auto] gap-6 ${tone}`}>
+      <span className={head ? "" : "text-ink"}>{a}</span>
+      <span className="text-right tabular-nums">{b}</span>
+      <span className="text-right tabular-nums w-[70px] text-ink-dim">{c}</span>
+    </div>
+  );
+}
+
+function RegionTable() {
+  return (
+    <Frame title="thaw inspect base.thaw">
+      <L a="region" b="bytes" c="crc32c" head />
+      <L a="model.layers.0" b="402.7 MB" c="3f9a1c" />
+      <L a="model.layers.1" b="402.7 MB" c="a17e02" />
+      <L a="…" b="…" c="…" />
+      <L a="kv_cache" b="1.84 GB" c="c0ffee" />
+    </Frame>
+  );
+}
+function SchedulerTable() {
+  return (
+    <Frame title="prefix-hash · block table">
+      <div className="grid grid-cols-[1fr_auto] gap-6">
+        <span className="text-ink-faint">prefix_blocks</span>
+        <span className="text-ink tabular-nums">48</span>
+        <span className="text-ink-faint">block_size</span>
+        <span className="text-ink tabular-nums">16 tokens</span>
+        <span className="text-ink-faint">cached_hash[0]</span>
+        <span className="text-ink-soft">8b…e1 → block 0</span>
+        <span className="text-ink-faint">cached_hash[1]</span>
+        <span className="text-ink-soft">2f…04 → block 1</span>
+        <span className="text-ink-faint">scheduler</span>
+        <span className="text-ink-soft">3 running · 0 waiting</span>
+      </div>
+    </Frame>
+  );
+}
+function FileTable() {
+  return (
+    <Frame title="base.thaw · no GPU required">
+      <div className="text-ink-dim">$ <span className="text-ink">ls -la base.thaw</span></div>
+      <div className="grid grid-cols-[auto_auto_1fr] gap-4">
+        <span className="text-ink-dim">-rw-r--r--</span>
+        <span className="text-ink tabular-nums">1.9 GB</span>
+        <span className="text-ink-soft">base.thaw</span>
+      </div>
+      <div className="mt-2 text-ink-dim">$ <span className="text-ink">thaw inspect base.thaw</span></div>
+      <div className="grid grid-cols-[auto_1fr] gap-6">
+        <span className="text-ink-faint">model</span>
+        <span className="text-ink-soft">Llama-3.1-8B-Instruct</span>
+        <span className="text-ink-faint">blocks</span>
+        <span className="text-ink-soft">48 (~768 tokens)</span>
+        <span className="text-ink-faint">lineage</span>
+        <span className="text-ink-soft">trunk → reviewer-security</span>
+      </div>
+    </Frame>
   );
 }
