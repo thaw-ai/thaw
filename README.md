@@ -16,6 +16,10 @@ An agent's KV cache — its working memory — normally dies with the process. t
 
 The part most tools miss: **inspecting, diffing, and tracing sessions needs no GPU** — only `checkout` (rehydrating onto a GPU) does. So the everyday loop runs on your laptop.
 
+<p align="center">
+  <img src="thaw-demo.gif" alt="thaw — log, inspect, and diff live agent sessions on a laptop, no GPU" width="820">
+</p>
+
 ### See it in 10 seconds — no GPU
 
 ```bash
