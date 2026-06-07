@@ -33,20 +33,11 @@ _LAZY = {
     "freeze_kv_cache_tp": "thaw_vllm.kv_snapshot",
     "restore_kv_cache": "thaw_vllm.kv_snapshot",
     "restore_kv_cache_tp": "thaw_vllm.kv_snapshot",
-    # thaw_vllm.fork (fork primitive — module top is stdlib-only)
-    "fork": "thaw_vllm.fork",
-    "checkpoint": "thaw_vllm.fork",
-    "checkout": "thaw_vllm.fork",
-    "fork_completions": "thaw_vllm.fork",
-    "ForkHandle": "thaw_vllm.fork",
-    "ForkCompletionResult": "thaw_vllm.fork",
-    "ForkError": "thaw_vllm.fork",
-    "ModelMismatchError": "thaw_vllm.fork",
-    "BlockShapeMismatchError": "thaw_vllm.fork",
-    "BlockPoolTooSmallError": "thaw_vllm.fork",
-    "PrefixCachingDisabledError": "thaw_vllm.fork",
-    "UnfinishedRequestsError": "thaw_vllm.fork",
-    "HandleClosedError": "thaw_vllm.fork",
+    # NOTE: thaw_vllm.fork names are NOT lazy — see the eager import below.
+    # `fork` is both a submodule (fork.py) and a function; only an eager
+    # binding makes `from thaw_vllm import fork` resolve to the callable
+    # rather than the module. fork.py is stdlib-only at load (torch is
+    # imported lazily inside its functions), so this stays GPU-free.
     # thaw_vllm.pool (pre-warmed engine pool + OpenAI server)
     "EnginePool": "thaw_vllm.pool",
     "create_pool_app": "thaw_vllm.pool",
@@ -82,6 +73,26 @@ def __getattr__(name):
 
 def __dir__():
     return sorted(set(globals()) | set(_LAZY) | {"sleep_mode", "load"})
+
+
+# Eager (but GPU-free) — fork.py imports only stdlib at module load; torch/vLLM
+# are imported lazily inside its functions. Eager binding is REQUIRED so the
+# `fork` *function* shadows the `fork` *submodule* for `from thaw_vllm import fork`.
+from thaw_vllm.fork import (  # noqa: E402
+    fork,
+    checkpoint,
+    checkout,
+    fork_completions,
+    ForkHandle,
+    ForkCompletionResult,
+    ForkError,
+    ModelMismatchError,
+    BlockShapeMismatchError,
+    BlockPoolTooSmallError,
+    PrefixCachingDisabledError,
+    UnfinishedRequestsError,
+    HandleClosedError,
+)
 
 
 # Register load_format="thaw" with vLLM when available. vLLM also
