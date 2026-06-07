@@ -10,29 +10,52 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Downloads](https://static.pepy.tech/badge/thaw-vllm)](https://pepy.tech/project/thaw-vllm)
 
-**The fork primitive for AI agents.**
+**git for live LLM agent sessions.**
 
-When your agent forks N ways to explore a problem, thaw skips the cold prefill and runs them in parallel from one shared memory. Snapshot a running session — weights, KV cache, scheduler state, prefix-hash table — and hydrate N divergent children at the fork point. `git branch` for live AI agents.
+An agent's KV cache — its working memory — normally dies with the process. thaw turns a running **vLLM** or **SGLang** session into a *durable file* you can `checkpoint`, `branch`, `diff`, `checkout`, and `log` — like git, but for a living agent.
+
+The part most tools miss: **inspecting, diffing, and tracing sessions needs no GPU** — only `checkout` (rehydrating onto a GPU) does. So the everyday loop runs on your laptop.
+
+### See it in 10 seconds — no GPU
 
 ```bash
-pip install thaw-vllm
+git clone https://github.com/thaw-ai/thaw && cd thaw
+pip install thaw-vllm          # installs the `thaw` CLI; inspect/diff/log use no GPU
+thaw diff examples/pr-review-fanout/reviewer-security \
+          examples/pr-review-fanout/reviewer-style
 ```
 
-### The receipt — ForkPool, 2026-04-20
+```
+thaw diff
+  A  reviewer-security
+  B  reviewer-style
+  model        same  (facebook/opt-125m)
+  shared kv    13/13 blocks identical  (~208 tokens)
+  text split   first 195 tokens identical, diverge at token 195
+  A diverges   …security vulnerabilities.
+  B diverges   …code style and naming.
+```
 
-Pre-warmed subprocess pool holds the engine once; each `fork_completions()` call snapshots KV only.
+Two reviewers forked from the **same** pull-request context — and you can see *exactly* where they diverged. `thaw log examples/pr-review-fanout` prints the lineage tree; `thaw inspect <handle>` shows what's inside one. All three run on a laptop, no GPU, in milliseconds.
 
-**Llama-3.1-8B on H100 80 GB PCIe, 5 rounds × 4 branches × 64 tokens:**
+### The verbs
 
-| Stage | Time |
-|---|---|
-| `init_pool` (one-time — workers boot with real weights) | 22.3s |
-| First fork round | 1.16s |
-| **Median fork round** | **0.88s** |
+| verb | what it does | needs a GPU? |
+|---|---|---|
+| `thaw checkpoint` | freeze a live session to a portable handle (≈ `git commit`) | yes |
+| `thaw branch` | fork a handle into a divergent child (≈ `git branch`) | no \* |
+| `thaw checkout` | hydrate a handle into an engine, skipping prefill (≈ `git checkout`) | yes |
+| `thaw inspect` | what's in a session — model, prefix, KV, text preview | **no** |
+| `thaw diff` | what diverged between two sessions — shared KV + the split point | **no** |
+| `thaw log` | the lineage tree of your handles | **no** |
 
-Per-round cost: ~340s cold-boot → sub-second (≈400× amortized). All rounds 4/4 non-empty and divergent. Bit-identical at the fork boundary. The first sub-second fork amortization proof on real hardware.
+<sub>\* Branching an existing handle is pure file I/O. Forking a *live* engine is the GPU `checkpoint` path.</sub>
 
-Reproducer: [`demos/fork_pool_rl.py`](demos/fork_pool_rl.py) · Receipt JSON: [`site/receipts/2026-04-20_h100_fork_pool_rl.json`](site/receipts/2026-04-20_h100_fork_pool_rl.json)
+```bash
+pip install thaw-vllm[vllm]   # add the engine to checkpoint / checkout on a GPU
+```
+
+And it's fast where it counts: a pre-warmed pool forks at **0.88s/round** (≈400× over cold-boot) on an H100 with Llama-3.1-8B — see [Performance](#inside-a-single-fork).
 
 ### What you can build with it
 
@@ -62,6 +85,16 @@ Works with vLLM and SGLang. Open source (Apache-2.0).
 </p>
 
 ## Inside a single fork
+
+**ForkPool — Llama-3.1-8B on H100 80 GB, 5 rounds × 4 branches × 64 tokens** (a pre-warmed subprocess pool holds the engine once; each fork snapshots KV only):
+
+| Stage | Time |
+|---|---|
+| `init_pool` (one-time — workers boot with real weights) | 22.3s |
+| First fork round | 1.16s |
+| **Median fork round** | **0.88s** |
+
+Per-round cost: ~340s cold-boot → sub-second (≈400× amortized). All rounds 4/4 non-empty and divergent, bit-identical at the fork boundary. Reproducer: [`demos/fork_pool_rl.py`](demos/fork_pool_rl.py) · receipt: [`site/receipts/2026-04-20_h100_fork_pool_rl.json`](site/receipts/2026-04-20_h100_fork_pool_rl.json)
 
 ForkPool amortizes setup cost across repeated forks. Each primitive behind it is receipted individually.
 
@@ -415,10 +448,18 @@ python demos/agent_fork.py --snapshot weights.thaw --full-cycle  # destroy + res
 ### CLI reference
 
 ```bash
+# offline — no GPU, runs anywhere Python does
+thaw inspect HANDLE_DIR              # what's in a session: model, prefix, KV, text preview
+thaw diff    HANDLE_A HANDLE_B       # what diverged: shared KV blocks + the token/text split point
+thaw log     DIR                     # lineage tree of handles (checkpoint → branches)
+thaw info    SNAPSHOT.thaw           # low-level .thaw / .thawkv file info
+
+# GPU — freeze weights and serve
 thaw freeze --model meta-llama/Meta-Llama-3-8B --output weights.thaw
 thaw serve  --model meta-llama/Meta-Llama-3-8B --snapshot weights.thaw [--pool-size N] [--register NAME=PATH]
-thaw info   weights.thaw
 ```
+
+The git-style Python API mirrors this: `thaw_vllm.checkpoint(llm, prompt=…, label=…)` to snapshot a live session, `handle.branch(dir, label=…)` to fork it, `thaw_vllm.checkout(handle, llm)` to hydrate it back.
 
 <details>
 <summary>Troubleshooting</summary>
