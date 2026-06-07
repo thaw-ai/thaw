@@ -12,13 +12,13 @@ import { Install } from "@/components/sections/Install";
 
 const marqueeItems = [
   "thaw",
-  "fork() for AI agents",
-  "Rust + CUDA",
-  "vLLM · SGLang · LangGraph · MLX",
-  "0.88s median fork · H100",
-  "55 GB/s DMA · PCIe Gen5",
+  "git for live agent sessions",
+  "checkpoint · branch · diff · checkout · log",
+  "the session is a file",
+  "inspect & diff on a laptop, no GPU",
+  "vLLM · SGLang",
+  "Rust + CUDA core",
   "Apache 2.0",
-  "Not a cache · not a proxy",
 ];
 
 export default function Home() {

@@ -1,28 +1,27 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
 const pillars = [
   {
-    label: "TODAY",
-    title: "Open-source primitive.",
-    body: "The fork() runtime is Apache-2.0, written in Rust + CUDA, integrated with the engines real production traffic runs on. Anyone can pip install thaw-vllm and snapshot a live agent session.",
-    tag: "v0.4 · pre-tagged · production preview",
+    label: "THE FILE",
+    title: "A session you can hold.",
+    body: "A live session is weights, KV cache, scheduler state, and the prefix-hash table. Today that dies with the process. thaw writes it to one durable file you can version, ship, and restore.",
+    tag: "weights · kv cache · scheduler · prefix-hash",
   },
   {
-    label: "PARTNERS",
-    title: "Wired with the teams building agents.",
-    body: "Working with Courier (SLC) on MLX-side inference for the Apple-silicon agentic stack — paid integration sprint validates the snapshot/restore semantics against a non-vLLM engine in production. RFC #34303 upstream with vLLM.",
-    tag: "courier · vllm · sglang · langgraph",
+    label: "ON A LAPTOP",
+    title: "Reviewable agent runs.",
+    body: "inspect, diff, and log read the file with no GPU. See exactly where two agents diverged from the same context, down to the token. The part no engine vendor builds, because it sells neither GPUs nor a platform.",
+    tag: "inspect · diff · log · no GPU",
   },
   {
-    label: "TOMORROW",
-    title: "The fork primitive every agent framework calls.",
-    body: "The OSS primitive is the wedge. The company is the framework-layer integrations — TRL, slime, verl, LangGraph, Temporal — that make fork() a first-class verb in every agent loop. Agent branching, RL rollouts, parallel coding agents, multi-agent reasoning. Not a platform. A primitive.",
-    tag: "primitive → framework integrations → ecosystem",
+    label: "ANYWHERE",
+    title: "Branch it, restore it.",
+    body: "Fork one trunk into N divergent children that skip prefill, or restore a session in a fresh process on a different machine, bit-identical. Built on vLLM and SGLang, Apache-2.0, Rust + CUDA core.",
+    tag: "checkpoint · branch · checkout",
   },
 ];
 
@@ -32,20 +31,18 @@ export function Vision() {
       id="vision"
       className="relative px-6 md:px-10 pt-32 md:pt-44 pb-24 md:pb-36 border-t border-rule overflow-hidden"
     >
-      {/* UV bloom anchored to the section */}
+      {/* Accent bloom anchored to the section (frost) */}
       <div
         aria-hidden
         className="absolute inset-0 pointer-events-none"
         style={{
           background:
-            "radial-gradient(ellipse 60% 50% at 50% 30%, rgba(167, 139, 250, 0.10), transparent 70%)",
+            "radial-gradient(ellipse 60% 50% at 50% 30%, rgba(124, 196, 255, 0.08), transparent 70%)",
           filter: "blur(60px)",
         }}
       />
 
       <div className="relative max-w-[1400px] mx-auto">
-        <SectionEyebrow label="Vision" index="05" total={7} />
-
         <motion.h2
           initial={{ opacity: 0, y: 18, filter: "blur(8px)" }}
           whileInView={{ opacity: 1, y: 0, filter: "blur(0px)" }}
@@ -59,8 +56,8 @@ export function Vision() {
             fontWeight: 600,
           }}
         >
-          <span className="text-ink">The primitive is open.</span>{" "}
-          <span className="text-uv-gradient">The integrations are the company.</span>
+          <span className="text-ink">A live session should be</span>{" "}
+          <span className="text-uv-gradient">a file.</span>
         </motion.h2>
 
         <motion.p
@@ -70,16 +67,13 @@ export function Vision() {
           transition={{ duration: 1.1, ease, delay: 0.15 }}
           className="mt-7 max-w-[640px] text-ink-soft leading-relaxed text-[15.5px]"
         >
-          Pinecone became a company by being the easiest vector DB the moment
-          RAG mattered. LangChain became a company by being the orchestration
-          layer everyone calls. thaw becomes a company by being the fork
-          primitive every agent framework — TRL, slime, verl, LangGraph,
-          Temporal — calls when an agent loop needs to branch.
+          Code has git. Containers have images. A running agent has nothing: its
+          working memory is locked in GPU VRAM, evicted on a whim, gone on
+          restart. thaw makes that state a durable artifact, so you can branch,
+          diff, and restore a living agent the way you branch code.
         </motion.p>
 
-        {/* Three horizontal positioning bands — Today / Partners / Tomorrow */}
         <div className="mt-16 md:mt-24 relative">
-          {/* Vertical connecting timeline rail */}
           <div
             aria-hidden
             className="absolute left-[2.5rem] md:left-[3.5rem] top-4 bottom-4 w-px bg-gradient-to-b from-transparent via-uv/30 to-transparent hidden md:block"
@@ -95,7 +89,6 @@ export function Vision() {
                 transition={{ duration: 0.9, ease, delay: 0.15 + i * 0.12 }}
                 className="relative grid grid-cols-[auto_1fr] gap-5 md:gap-12 items-start"
               >
-                {/* Timeline node */}
                 <div className="relative pt-3">
                   <div className="w-14 md:w-20 flex flex-col items-center">
                     <div className="relative size-4 md:size-5 rounded-full border-2 border-uv bg-bg z-10">
@@ -107,7 +100,6 @@ export function Vision() {
                   </div>
                 </div>
 
-                {/* Content card */}
                 <div className="surface-quicksilver rounded-2xl p-6 md:p-8">
                   <div className="md:hidden font-mono-meta text-[9.5px] text-uv-bright tracking-[0.18em] mb-3">
                     {p.label}

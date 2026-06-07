@@ -1,7 +1,6 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -13,33 +12,34 @@ const integrations = [
     link: { href: "https://github.com/vllm-project/vllm/issues/34303", label: "RFC #34303 ↗" },
     code: [
       "from vllm import LLM",
-      "from thaw_vllm import fork",
+      "import thaw_vllm as thaw",
       "",
-      'parent = LLM(model="meta-llama/Llama-3.1-8B",',
-      '             load_format="thaw")',
+      'llm = LLM("meta-llama/Llama-3.1-8B")',
+      "llm.generate(prompt)",
       "",
-      "children = fork(parent, n=4)  # PCIe Gen5 line-rate",
+      "h = thaw.checkpoint(llm, prompt=prompt)",
+      '# $ thaw diff a b   (on a laptop, no GPU)',
     ],
   },
   {
     name: "SGLang",
-    badge: "CLASS-PASSTHROUGH",
-    body: "Class-passthrough loader keeps SGLang's scheduler intact and snapshots the runtime state directly. Same fork() ergonomics as vLLM. Validated on H100 SXM with Llama, Qwen, and DeepSeek architectures.",
+    badge: "WEIGHTS · VALIDATED",
+    body: "Class-passthrough loader snapshots and restores SGLang model state, validated bit-identical on H100 SXM (Llama, Qwen, DeepSeek). The checkpoint and fork verbs are vLLM-first today; SGLang is the next engine on the path.",
     link: null,
     code: [
-      "from sglang import Engine",
-      "from thaw_native import ThawEngine",
+      "import thaw_sglang",
       "",
-      'parent = ThawEngine(Engine, "…/Qwen2.5-7B")',
-      "parent.generate(prefix)",
+      "# freeze SGLang weights to a portable snapshot",
+      'thaw_sglang.freeze(model, "weights.thaw")',
       "",
-      "children = parent.fork(n=4)",
+      "# restore into a fresh SGLang engine",
+      'engine = thaw_sglang.load(model, "weights.thaw")',
     ],
   },
   {
     name: "LangGraph",
     badge: "DROP-IN CHATMODEL",
-    body: "Drop-in LangChain BaseChatModel — every existing LangGraph node works unchanged. fork_fanout(llm, prefix, [suffixes]) exposes explicit fan-out for tool-use branching and parallel reviewers. PR-review demo: 4 reviewers, 1.43s median round.",
+    body: "Drop-in LangChain BaseChatModel; every existing LangGraph node works unchanged. fork_fanout(llm, prefix, [suffixes]) exposes explicit fan-out for tool-use branching and parallel reviewers. PR-review demo: 4 reviewers, 1.43s median round.",
     link: null,
     code: [
       "from thaw_vllm.langgraph import ChatThaw, fork_fanout",
@@ -61,7 +61,6 @@ export function Integrations() {
       className="relative px-6 md:px-10 pt-32 md:pt-44 pb-24 md:pb-36 border-t border-rule"
     >
       <div className="max-w-[1400px] mx-auto">
-        <SectionEyebrow label="Integrations" index="06" total={7} />
 
         <motion.h2
           initial={{ opacity: 0, y: 18, filter: "blur(8px)" }}

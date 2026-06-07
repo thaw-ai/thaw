@@ -435,8 +435,8 @@ function ForkScene({
           <boxGeometry args={[1.3, 0.4, 0.10]} />
           <meshStandardMaterial
             ref={coalescedBarMatRef}
-            color="#c4b5fd"
-            emissive="#a78bfa"
+            color="#a9d8ff"
+            emissive="#7cc4ff"
             emissiveIntensity={0}
             metalness={0.5}
             roughness={0.2}
@@ -487,8 +487,8 @@ function ForkScene({
               ref={(el) => {
                 chunkCoreMatRef.current[i] = el;
               }}
-              color="#c4b5fd"
-              emissive="#a78bfa"
+              color="#a9d8ff"
+              emissive="#7cc4ff"
               emissiveIntensity={0}
               metalness={0.6}
               roughness={0.22}
@@ -503,7 +503,7 @@ function ForkScene({
               ref={(el) => {
                 chunkHaloMatRef.current[i] = el;
               }}
-              color="#a78bfa"
+              color="#7cc4ff"
               transparent
               opacity={0}
             />
@@ -540,8 +540,8 @@ function ForkScene({
               ref={(el) => {
                 deliveryCoreMatRef.current[ci] = el;
               }}
-              color="#c4b5fd"
-              emissive="#a78bfa"
+              color="#a9d8ff"
+              emissive="#7cc4ff"
               emissiveIntensity={0}
               metalness={0.6}
               roughness={0.22}
@@ -555,7 +555,7 @@ function ForkScene({
               ref={(el) => {
                 deliveryHaloMatRef.current[ci] = el;
               }}
-              color="#a78bfa"
+              color="#7cc4ff"
               transparent
               opacity={0}
             />
@@ -581,8 +581,8 @@ function ForkScene({
               ref={(el) => {
                 outputBarMatRef.current[oi] = el;
               }}
-              color="#c4b5fd"
-              emissive="#a78bfa"
+              color="#a9d8ff"
+              emissive="#7cc4ff"
               emissiveIntensity={0}
               metalness={0.5}
               roughness={0.3}
@@ -634,7 +634,7 @@ function ForkScene({
                   ref={(el) => {
                     if (el) childHashBadgeMatRef.current[ci][i] = el;
                   }}
-                  color="#c4b5fd"
+                  color="#a9d8ff"
                   transparent
                   opacity={0}
                   side={THREE.DoubleSide}
@@ -649,8 +649,8 @@ function ForkScene({
               ref={(el) => {
                 childLedMatRef.current[ci] = el;
               }}
-              color="#c4b5fd"
-              emissive="#a78bfa"
+              color="#a9d8ff"
+              emissive="#7cc4ff"
               emissiveIntensity={0.4}
               metalness={0.2}
               roughness={0.3}
@@ -733,7 +733,7 @@ function StudioEnv() {
         rotation={[0, Math.PI, 0]}
         scale={[10, 5, 1]}
         intensity={1.6}
-        color="#a78bfa"
+        color="#7cc4ff"
         form="rect"
       />
     </Environment>
@@ -758,7 +758,7 @@ export function ForkFlow3D({
         className="absolute inset-0 pointer-events-none"
         style={{
           background:
-            "radial-gradient(ellipse 70% 50% at 50% 60%, rgba(167, 139, 250, 0.16), rgba(181, 216, 255, 0.06) 40%, transparent 75%)",
+            "radial-gradient(ellipse 70% 50% at 50% 60%, rgba(124, 196, 255, 0.16), rgba(181, 216, 255, 0.06) 40%, transparent 75%)",
           filter: "blur(45px)",
         }}
       />
@@ -798,7 +798,7 @@ export function ForkFlow3D({
           shadow-mapSize-height={1024}
         />
         <directionalLight position={[-5, 3, 4]} intensity={0.6} color="#b5d8ff" />
-        <pointLight position={[0, 2, -3]} intensity={1.6} color="#a78bfa" />
+        <pointLight position={[0, 2, -3]} intensity={1.6} color="#7cc4ff" />
 
         <StudioEnv />
 

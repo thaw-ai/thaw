@@ -133,6 +133,9 @@ class ForkHandle:
         max_block_id: Largest block_id in the snapshot — child's block
                       pool must be strictly larger.
         num_kv_blocks: Number of prefix-cached blocks captured.
+        handle_id: Stable unique id for this handle (used by ``thaw log``).
+        parent_id: handle_id this was branched from, or None for a root.
+        label: Human-friendly name, like a git branch name.
         tensor_parallel_size: TP degree of the parent engine.
         vllm_version: vLLM version string (informational).
         created_at: Unix timestamp when the handle was written.
@@ -148,6 +151,11 @@ class ForkHandle:
     num_layers: int
     max_block_id: int
     num_kv_blocks: int
+    handle_id: str = ""
+    parent_id: Optional[str] = None
+    label: Optional[str] = None
+    prefix_token_ids: Optional[list] = None
+    prefix_preview: Optional[str] = None
     tensor_parallel_size: int = 1
     vllm_version: Optional[str] = None
     created_at: float = 0.0
@@ -240,12 +248,32 @@ class ForkHandle:
             num_layers=self.num_layers,
             max_block_id=self.max_block_id,
             num_kv_blocks=self.num_kv_blocks,
+            handle_id=self.handle_id,
+            parent_id=self.parent_id,
+            label=self.label,
+            prefix_token_ids=self.prefix_token_ids,
+            prefix_preview=self.prefix_preview,
             tensor_parallel_size=self.tensor_parallel_size,
             vllm_version=self.vllm_version,
             created_at=self.created_at,
         )
         copied._write_manifest()
         return copied
+
+    def branch(self, target_dir: str, label: Optional[str] = None) -> "ForkHandle":
+        """Create a child handle in ``target_dir`` — like ``git branch``.
+
+        Copies this handle's payload, then stamps a fresh ``handle_id`` and
+        ``parent_id = self.handle_id`` so ``thaw log`` can render the
+        lineage. Pure file I/O — no GPU. The child only diverges once it's
+        hydrated into an engine and generated independently.
+        """
+        child = self.save(target_dir)
+        child.handle_id = uuid.uuid4().hex
+        child.parent_id = self.handle_id
+        child.label = label
+        child._write_manifest()
+        return child
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -456,11 +484,41 @@ def _validate_child(llm, handle: ForkHandle) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _capture_prefix(llm, prompt, prompt_token_ids, max_ids=2048, max_chars=1500):
+    """Best-effort capture of the session's prompt as token IDs + a decoded
+    preview, for ``thaw inspect`` / ``diff``. vLLM's cached blocks carry only
+    opaque hashes, so readable text must come from the caller's prompt at fork
+    time. Returns ``(token_ids | None, preview | None)``; never raises."""
+    ids = None
+    if prompt_token_ids is not None:
+        ids = list(prompt_token_ids)
+    elif prompt is not None:
+        try:
+            ids = list(llm.get_tokenizer().encode(prompt))
+        except Exception:
+            ids = None
+    if not ids:
+        return None, None
+    ids = ids[:max_ids]
+    preview = None
+    try:
+        preview = llm.get_tokenizer().decode(ids)
+        if len(preview) > max_chars:
+            preview = preview[:max_chars] + "…"
+    except Exception:
+        preview = None
+    return ids, preview
+
+
 def fork(
     llm,
     *,
     include_weights: bool = False,
     state_dir: Optional[str] = None,
+    label: Optional[str] = None,
+    parent_id: Optional[str] = None,
+    prompt: Optional[str] = None,
+    prompt_token_ids: Optional[Sequence[int]] = None,
 ) -> ForkHandle:
     """Freeze a running vLLM session into a portable handle.
 
@@ -540,10 +598,16 @@ def fork(
             num_layers=num_layers,
             max_block_id=max_block_id,
             num_kv_blocks=num_blocks,
+            handle_id=uuid.uuid4().hex,
+            parent_id=parent_id,
+            label=label,
             tensor_parallel_size=tp_size,
             vllm_version=_vllm_version(),
             created_at=time.time(),
         )
+        pids, ppreview = _capture_prefix(llm, prompt, prompt_token_ids)
+        handle.prefix_token_ids = pids
+        handle.prefix_preview = ppreview
         handle._owns_state_dir = owns_dir
         handle._write_manifest()
         return handle
@@ -552,6 +616,40 @@ def fork(
         if owns_dir and os.path.isdir(state_dir):
             shutil.rmtree(state_dir, ignore_errors=True)
         raise
+
+
+def checkpoint(
+    llm,
+    *,
+    label: Optional[str] = None,
+    include_weights: bool = False,
+    state_dir: Optional[str] = None,
+    parent_id: Optional[str] = None,
+    prompt: Optional[str] = None,
+    prompt_token_ids: Optional[Sequence[int]] = None,
+) -> ForkHandle:
+    """git-style alias for :func:`fork` — snapshot the live session ("commit").
+
+    Thin wrapper so the API reads like git: ``checkpoint`` a session,
+    ``branch`` a handle, ``checkout`` (hydrate) it back. Pass ``prompt`` (or
+    ``prompt_token_ids``) to record a readable prefix for ``thaw inspect`` /
+    ``diff``, and ``parent_id`` to record lineage. Identical behavior and
+    constraints as :func:`fork`.
+    """
+    return fork(
+        llm,
+        include_weights=include_weights,
+        state_dir=state_dir,
+        label=label,
+        parent_id=parent_id,
+        prompt=prompt,
+        prompt_token_ids=prompt_token_ids,
+    )
+
+
+def checkout(handle: "ForkHandle", llm) -> dict:
+    """git-style alias for :meth:`ForkHandle.hydrate` — restore a handle into ``llm``."""
+    return handle.hydrate(llm)
 
 
 # ---------------------------------------------------------------------------
