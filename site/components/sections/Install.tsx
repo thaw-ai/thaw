@@ -1,7 +1,6 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -29,7 +28,6 @@ export function Install() {
       </div>
 
       <div className="relative max-w-[1600px] mx-auto">
-        <SectionEyebrow label="Install" index="07" total={7} />
 
         <motion.h2
           initial={{ opacity: 0, y: 18, filter: "blur(8px)" }}
@@ -55,7 +53,7 @@ export function Install() {
           transition={{ duration: 1.2, ease, delay: 0.2 }}
           className="mt-12 max-w-2xl text-ink-soft body-lg"
         >
-          Two PyPI packages: <code className="font-mono text-ink">thaw-vllm</code> for first-class vLLM integration, <code className="font-mono text-ink">thaw-native</code> for the underlying Rust runtime. CUDA wheels published for Python 3.10–3.12. Apache-2.0.
+          Two PyPI packages: <code className="font-mono text-ink">thaw-vllm</code> for first-class vLLM integration, <code className="font-mono text-ink">thaw-native</code> for the underlying Rust runtime. CUDA wheels published for Python 3.10-3.12. Apache-2.0.
         </motion.p>
 
         <motion.div

@@ -2,7 +2,6 @@
 
 import { motion } from "framer-motion";
 import { CountUp } from "@/components/ui/CountUp";
-import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -49,8 +48,6 @@ export function Receipts() {
       className="relative px-6 md:px-10 pt-32 md:pt-44 pb-24 md:pb-36 border-t border-rule"
     >
       <div className="max-w-[1400px] mx-auto">
-        <SectionEyebrow label="Receipts" index="04" total={7} />
-
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-8 lg:gap-12 items-end">
           <motion.h2
             initial={{ opacity: 0, y: 18, filter: "blur(8px)" }}

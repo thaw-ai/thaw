@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
@@ -25,7 +24,7 @@ const loops = [
     n: "02",
     tag: "PPO · DPO · TREE-GRPO ROLLOUTS",
     title: "RL rollout collapse",
-    body: "Collapse num_rollouts × prefill_time into num_rollouts × memcpy_time. Fork once after the system prompt, run all rollouts in parallel from the shared trunk. The HuggingFace 2026 async-RL survey notes no current library supports KV pivot resampling — thaw is that primitive.",
+    body: "Collapse num_rollouts × prefill_time into num_rollouts × memcpy_time. Fork once after the system prompt, run all rollouts in parallel from the shared trunk. The HuggingFace 2026 async-RL survey notes no current library supports KV pivot resampling. thaw is that primitive.",
     metric: { v: "N×", k: "rollouts at memcpy cost" },
     code: [
       ["trunk = LLM(", '"…/Llama-3.1-8B"', ")"],
@@ -39,7 +38,7 @@ const loops = [
     n: "03",
     tag: "SWE-BENCH · CURSOR-STYLE · TDD",
     title: "Parallel coding agents",
-    body: "Eight agents exploring eight solutions used to mean eight re-prefills of the same 8K-token codebase context. Now: one snapshot, eight forks, eight pytest runs, rank by pass rate. The branching cost drops to memcpy bandwidth — bounded by PCIe, not by the model.",
+    body: "Eight agents exploring eight solutions used to mean eight re-prefills of the same 8K-token codebase context. Now: one snapshot, eight forks, eight pytest runs, rank by pass rate. The branching cost drops to memcpy bandwidth, bounded by PCIe, not by the model.",
     metric: { v: "8/8", k: "agents share one trunk" },
     code: [
       ["repo_ctx = LLM(", '"…/CodeLlama"', ")"],
@@ -53,7 +52,7 @@ const loops = [
     n: "04",
     tag: "CHATTHAW · FORK_FANOUT · LANGGRAPH",
     title: "Agent graph fan-out",
-    body: "Drop-in LangChain BaseChatModel that exposes fork_fanout(llm, prefix_messages, [suffix_a, suffix_b, …]). The PR-review fan-out demo runs 4 reviewers from a shared diff context at 1.43s median per round on H100 — vs 64s for cold rollout one.",
+    body: "Drop-in LangChain BaseChatModel that exposes fork_fanout(llm, prefix_messages, [suffix_a, suffix_b, …]). The PR-review fan-out demo runs 4 reviewers from a shared diff context at 1.43s median per round on H100, vs 64s for cold rollout one.",
     metric: { v: "1.43s", k: "PR-review fan-out · H100" },
     code: [
       ["from", " thaw_vllm.langgraph ", "import", " ChatThaw, fork_fanout"],
@@ -75,7 +74,6 @@ export function Agents() {
       className="relative px-6 md:px-10 pt-32 md:pt-44 pb-24 md:pb-36 border-t border-rule"
     >
       <div className="max-w-[1400px] mx-auto">
-        <SectionEyebrow label="Agent loops" index="02" total={7} />
 
         <motion.h2
           initial={{ opacity: 0, y: 18, filter: "blur(8px)" }}

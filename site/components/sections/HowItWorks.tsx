@@ -3,7 +3,6 @@
 import { useState } from "react";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
-import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 
 const ForkFlow3D = dynamic(
   () => import("@/components/ui/ForkFlow3D").then((m) => m.ForkFlow3D),
@@ -59,7 +58,6 @@ export function HowItWorks() {
       className="relative px-6 md:px-10 pt-32 md:pt-44 pb-24 md:pb-36 border-t border-rule overflow-hidden"
     >
       <div className="max-w-[1400px] mx-auto">
-        <SectionEyebrow label="How it works" index="03" total={7} />
 
         <motion.h2
           initial={{ opacity: 0, y: 18, filter: "blur(8px)" }}
@@ -85,7 +83,7 @@ export function HowItWorks() {
           transition={{ duration: 1.1, ease, delay: 0.15 }}
           className="mt-7 mx-auto max-w-[680px] text-center text-ink-soft leading-relaxed text-[15px]"
         >
-          One parent engine, N children, zero re-prefill — but the magic
+          One parent engine, N children, zero re-prefill. But the magic
           is in four specific tricks. Watch the loop: scattered KV slabs
           coalesce, ping-pong through two pinned buffers, land on children
           via PCIe Gen5, then get tagged with prefix hashes so the next
@@ -101,7 +99,7 @@ export function HowItWorks() {
           className="mt-14 md:mt-20 relative rounded-3xl overflow-hidden border border-rule-strong"
           style={{
             background:
-              "radial-gradient(ellipse 80% 60% at 50% 0%, rgba(167, 139, 250, 0.06), transparent 60%), linear-gradient(180deg, #0b0d16 0%, #07080d 100%)",
+              "radial-gradient(ellipse 80% 60% at 50% 0%, rgba(124, 196, 255, 0.06), transparent 60%), linear-gradient(180deg, #0b0d16 0%, #07080d 100%)",
           }}
         >
           {/* === Corner meta === */}
@@ -169,7 +167,7 @@ export function HowItWorks() {
           {/* Bottom-center caption */}
           <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
             <div className="font-mono-meta text-[10px] text-ink-dim">
-              coalesce · pipeline · restore · diverge — loops every 14s
+              coalesce · pipeline · restore · diverge · loops every 14s
             </div>
           </div>
         </motion.div>
@@ -183,7 +181,7 @@ export function HowItWorks() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -6 }}
               transition={{ duration: 0.45, ease }}
-              className="relative rounded-2xl border border-uv/30 bg-bg-2/60 backdrop-blur-md px-6 py-5 shadow-[0_20px_60px_-20px_rgba(167,139,250,0.30)]"
+              className="relative rounded-2xl border border-uv/30 bg-bg-2/60 backdrop-blur-md px-6 py-5 shadow-[0_20px_60px_-20px_rgba(124,196,255,0.30)]"
             >
               <div className="flex flex-col md:flex-row md:items-baseline gap-3 md:gap-6">
                 <div
@@ -224,7 +222,7 @@ export function HowItWorks() {
                 transition={{ duration: 0.9, ease, delay: 0.1 + i * 0.07 }}
                 className={`relative rounded-xl border p-5 md:p-6 transition-all duration-500 ${
                   isActive
-                    ? "border-uv/40 bg-uv/[0.06] shadow-[0_0_40px_-12px_rgba(167,139,250,0.35)]"
+                    ? "border-uv/40 bg-uv/[0.06] shadow-[0_0_40px_-12px_rgba(124,196,255,0.35)]"
                     : "border-rule bg-bg-2/40"
                 }`}
               >

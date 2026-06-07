@@ -1,21 +1,20 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { SectionEyebrow } from "@/components/ui/SectionEyebrow";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
 const outcomes = [
   {
     pre: "Without thaw",
-    line: "N rollouts × prefill_time",
-    sub: "Re-prefill the same 8K-token prompt eight times before any divergence happens.",
+    line: "ephemeral · gone on restart",
+    sub: "The session lives in GPU VRAM. You can't inspect it, diff it, or move it. When the process dies, it's gone.",
     tone: "bad",
   },
   {
     pre: "With thaw",
-    line: "N rollouts × memcpy_time",
-    sub: "One snapshot, eight forks. Bounded by PCIe bandwidth, not by the model.",
+    line: "a durable file",
+    sub: "Checkpoint to disk. Diff and inspect on a laptop, no GPU. Restore in a fresh process, bit-identical.",
     tone: "good",
   },
 ] as const;
@@ -27,7 +26,6 @@ export function Primitive() {
       className="relative px-6 md:px-10 pt-28 md:pt-40 pb-24 md:pb-36 border-t border-rule"
     >
       <div className="max-w-[1200px] mx-auto">
-        <SectionEyebrow label="Primitive" index="01" total={7} />
 
         <motion.h2
           initial={{ opacity: 0, y: 18, filter: "blur(8px)" }}
@@ -42,8 +40,8 @@ export function Primitive() {
             fontWeight: 600,
           }}
         >
-          <span className="text-ink">One function.</span>{" "}
-          <span className="text-chrome-deep">N divergent futures.</span>
+          <span className="text-ink">Snapshot a session.</span>{" "}
+          <span className="text-chrome-deep">Branch its future.</span>
         </motion.h2>
 
         <motion.p
@@ -53,8 +51,9 @@ export function Primitive() {
           transition={{ duration: 1.1, ease, delay: 0.15 }}
           className="mt-7 text-center mx-auto max-w-[640px] text-ink-soft leading-relaxed text-[15px]"
         >
-          Snapshot the engine, restore N children that share the parent&apos;s
-          KV cache at the fork point, diverge. Same process or across workers.
+          Checkpoint a live engine to a durable file, branch it into divergent
+          children that skip prefill, and restore it in a fresh process. Same
+          machine or across the cluster.
         </motion.p>
 
         {/* — Code block — */}
@@ -85,7 +84,7 @@ export function Primitive() {
                 <span className="size-2.5 rounded-full bg-bg-raised" />
               </div>
               <div className="font-mono text-[11px] text-ink-dim tracking-[0.04em]">
-                fork_example.py
+                checkpoint.py
               </div>
               <div className="font-mono text-[10px] text-uv-bright/80 tracking-[0.1em]">
                 THAW · v0.4
@@ -96,42 +95,46 @@ export function Primitive() {
             <pre className="p-6 md:p-8 font-mono text-[12.5px] md:text-[14px] leading-[1.75] text-ink/90 overflow-x-auto">
               <code>
                 <Line>
-                  <Kw>from</Kw> thaw_vllm <Kw>import</Kw> LLM, fork
+                  <Kw>from</Kw> vllm <Kw>import</Kw> LLM
+                </Line>
+                <Line>
+                  <Kw>import</Kw> thaw_vllm <Kw>as</Kw> thaw
                 </Line>
                 <Line />
                 <Line>
-                  <Cm># A live vLLM engine, already serving traffic.</Cm>
+                  llm = LLM(<Str>&quot;meta-llama/Llama-3.1-8B&quot;</Str>)
                 </Line>
                 <Line>
-                  parent = LLM(<Str>&quot;meta-llama/Llama-3.1-8B&quot;</Str>)
-                </Line>
-                <Line>
-                  parent.generate(prefix_messages){"  "}
-                  <Cm># warms the KV cache + prefix-hash table</Cm>
+                  llm.generate(prompt){"   "}
+                  <Cm># warm the trunk</Cm>
                 </Line>
                 <Line />
                 <Line>
-                  <Cm># Snapshot mid-stream → fork into N divergent children.</Cm>
+                  <Cm># snapshot the live session to a durable file</Cm>
                 </Line>
                 <Line>
-                  children = fork(parent, n=<Num>4</Num>){"   "}
-                  <Cm># 0.88s median on H100 · steady state</Cm>
+                  h = thaw.checkpoint(llm, prompt=prompt, label=
+                  <Str>&quot;trunk&quot;</Str>)
                 </Line>
                 <Line />
                 <Line>
-                  <Cm>
-                    # Each child resumes from the parent&apos;s exact context.
-                  </Cm>
+                  <Cm># branch it, then diff / inspect / log on a laptop (no GPU)</Cm>
                 </Line>
                 <Line>
-                  <Cm># No re-prefill. Same trunk, different futures.</Cm>
+                  h.branch(<Str>&quot;reviewer-a&quot;</Str>);
+                  h.branch(<Str>&quot;reviewer-b&quot;</Str>)
                 </Line>
                 <Line>
-                  <Kw>for</Kw> child, suffix <Kw>in</Kw> zip(children,
-                  suffixes):
+                  {"  "}
+                  <Cm>$ thaw diff reviewer-a reviewer-b</Cm>
+                </Line>
+                <Line />
+                <Line>
+                  <Cm># restore into a fresh engine, skipping prefill</Cm>
                 </Line>
                 <Line>
-                  {"    "}print(child.generate(suffix))
+                  thaw.checkout(h, llm2){"   "}
+                  <Cm># bit-identical</Cm>
                 </Line>
               </code>
             </pre>
