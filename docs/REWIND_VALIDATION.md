@@ -5,7 +5,43 @@ End-to-end validation of the `rewind` capture path on real hardware: does
 `rollout.json` files with genuine per-token logprobs, and do `thaw rewind
 inspect / diff / pivot` produce correct output on that real data?
 
-## Environment
+## Real-model run — Qwen2.5-7B-Instruct, best-of-8
+
+The headline validation: a realistic best-of-N RL step. One reasoning
+problem, 8 sampled chains (temperature 0.6) from the shared trunk, each
+captured with per-token logprobs, then diffed on a laptop.
+
+- **GPU:** 1× A100-SXM4-80GB (RunPod) · vLLM 0.22.1 · ~$0.30
+- **Model:** `Qwen/Qwen2.5-7B-Instruct`, bf16
+- **Workload:** best-of-8, temperature 0.6, 400 max tokens
+
+```
+thaw rewind pivot  examples/rewind-bestof8
+  8 rollouts · trunk 93 tokens · Qwen/Qwen2.5-7B-Instruct
+  first divergence at generated token 0:
+    "Let"  →  rollout-2, rollout-3, rollout-4, rollout-5   (seq logprob -38.62, -59.62, -36.75, -28.31)
+    "To"   →  rollout-0, rollout-1, rollout-6, rollout-7   (seq logprob -38.32, -31.47, -38.63, -32.40)
+  best branch: rollout-5  (seq logprob -28.31, perplexity 1.08)
+
+thaw rewind diff  rollout-2 rollout-3
+  seq logprob   A -38.62 · B -59.62   (A higher by 21.00)
+  pivot         generated token 37  (after 37 identical tokens)
+    shared   … Step 1: Determine the
+  - A  " head"      logprob -0.38   (B ranked this #1 @ -0.38)
+  + B  " distance"  logprob -1.51   (A ranked this #2 @ -1.51)
+  decisiveness  A preferred its token by 1.13 logprob — a confident split
+```
+
+Two chains shared **37 tokens** of identical reasoning, forked on how to set
+up Step 1 (compute the *head start* vs the *distance*), and the counterfactual
+shows the model still rated A's token most-likely (#1) on the very branch that
+sampled B's. The 8 rollouts are checked in at `examples/rewind-bestof8` and
+re-readable on any laptop with no GPU; reproduce the capture with
+`demos/rewind_bestof8.py`.
+
+The smaller opt-125m run below was the first end-to-end smoke check.
+
+## Environment (initial smoke — opt-125m)
 
 - **GPU:** 1× NVIDIA A100-SXM4-80GB (RunPod, community cloud)
 - **Stack:** vLLM 0.22.1, torch 2.11.0+cu130, transformers 5.10.2, Python 3.12

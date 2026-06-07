@@ -65,6 +65,10 @@ And it's fast where it counts: a pre-warmed pool forks at **0.88s/round** (≈40
 
 `thaw rewind` is the rollout-level companion to the session verbs. Capture N sampled continuations from a trunk (with per-token logprobs), then find where they diverge and which one the model was most confident in — on a laptop, no GPU.
 
+<p align="center">
+  <img src="thaw-rewind.gif" alt="thaw rewind: diff 8 best-of-N reasoning rollouts from Qwen2.5-7B on a laptop, no GPU" width="760">
+</p>
+
 | verb | what it does | needs a GPU? |
 |---|---|---|
 | `thaw rewind diff A B` | the pivot: first divergent token + what each branch chose, plus the logprob each assigned the *other's* pick | **no** |
@@ -76,12 +80,14 @@ import thaw_vllm
 # capture (GPU): N sampled branches from a trunk, each with per-token logprobs
 thaw_vllm.capture_rollouts(llm, trunk, sampling_params, out_dir="rollouts", n=4)
 ```
+Try it with **no GPU** — 8 best-of-N reasoning rollouts from Qwen2.5-7B are checked in:
+
 ```bash
-thaw rewind diff rollouts/branch-a rollouts/branch-b   # where did they split?
-thaw rewind pivot rollouts                             # which branch won?
+thaw rewind pivot examples/rewind-bestof8
+thaw rewind diff  examples/rewind-bestof8/rollout-2 examples/rewind-bestof8/rollout-3
 ```
 
-Validated end-to-end on an A100 — see [docs/REWIND_VALIDATION.md](docs/REWIND_VALIDATION.md).
+Validated end-to-end on an A100 (capture + diff/pivot on Qwen2.5-7B best-of-8) — see [docs/REWIND_VALIDATION.md](docs/REWIND_VALIDATION.md). Reproduce the capture with [`demos/rewind_bestof8.py`](demos/rewind_bestof8.py).
 
 ### What you can build with it
 
