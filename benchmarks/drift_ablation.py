@@ -45,6 +45,7 @@ BLOCK_SIZE = 16
 # Grading
 # ---------------------------------------------------------------------------
 
+_BOXED_RE = re.compile(r"\\boxed\{\s*\$?\s*(-?[\d][\d,]*(?:\.\d+)?)\s*\}")
 _ANSWER_RE = re.compile(r"answer\s*[:=]?\s*\$?\s*(-?[\d][\d,]*(?:\.\d+)?)", re.I)
 _NUMBER_RE = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?")
 
@@ -57,7 +58,10 @@ def _to_num(s: str):
 
 
 def extract_answer(text: str):
-    """Last 'Answer: <num>' match wins; fall back to the last number in text."""
+    """\\boxed{} wins (RL math models), then 'Answer: <num>', then last number."""
+    boxed = list(_BOXED_RE.finditer(text))
+    if boxed:
+        return _to_num(boxed[-1].group(1))
     matches = list(_ANSWER_RE.finditer(text))
     if matches:
         return _to_num(matches[-1].group(1))
@@ -212,6 +216,7 @@ def run(args):
         max_model_len=4096,
         seed=0,
     )
+    cont_temp = args.cont_temp if args.cont_temp is not None else args.temp
     tok = llm.get_tokenizer()
     skip_ids = {tid for tid in (tok.eos_token_id,) if tid is not None}
     skip_ids |= set(getattr(tok, "all_special_ids", []) or [])
@@ -314,7 +319,7 @@ def run(args):
                     ))
                 else:
                     sps.append(SamplingParams(
-                        temperature=args.temp, top_p=args.top_p,
+                        temperature=cont_temp, top_p=args.top_p,
                         max_tokens=args.max_cont_tokens, seed=seed,
                     ))
                 prompts.append({"prompt_token_ids": list(ids)})
@@ -422,6 +427,7 @@ def _dump(args, pivot_records, per_problem, t_start, *, final):
             "max_pivots_per_rollout": args.max_pivots,
             "max_trunk_tokens": args.max_trunk_tokens,
             "max_cont_tokens": args.max_cont_tokens,
+            "cont_temp": args.cont_temp,
             "screen_mixed": args.screen_mixed,
             "scan_limit": args.scan_limit,
         },
@@ -444,6 +450,9 @@ def main():
     p.add_argument("--rollouts", type=int, default=8)
     p.add_argument("--temp", type=float, default=0.7)
     p.add_argument("--top-p", type=float, default=0.95)
+    p.add_argument("--cont-temp", type=float, default=None,
+                   help="continuation temperature (default: --temp); lets the "
+                        "temp-0 secondary keep trunk diversity at 0.7")
     p.add_argument("--k", type=int, default=4)
     p.add_argument("--margin", type=float, default=1.0)
     p.add_argument("--boundary-slack", type=int, default=2)
