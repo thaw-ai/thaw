@@ -90,7 +90,7 @@ def grade(text: str, gold) -> int:
 
 
 def select_pivots(tokens, prompt_len, *, margin_lt, boundary_slack, max_pivots,
-                  skip_token_ids):
+                  skip_token_ids, block_size=BLOCK_SIZE):
     """tokens: rewind-style list of {token_id, logprob, topk}. Returns a list of
     {gen_index, abs_pos, actual_id, alt_id, margin} dicts.
 
@@ -110,7 +110,7 @@ def select_pivots(tokens, prompt_len, *, margin_lt, boundary_slack, max_pivots,
         if margin >= margin_lt:
             continue
         abs_pos = prompt_len + i
-        if abs_pos % BLOCK_SIZE > boundary_slack:
+        if abs_pos % block_size > boundary_slack:
             continue
         actual_id = t["token_id"]
         alt = next((c for c in topk if c["token_id"] != actual_id), None)
@@ -187,6 +187,185 @@ def aggregate(pivot_records, margin_split=0.3):
     return out
 
 
+
+
+def dedupe(records):
+    """Drop duplicate (problem_id, rollout, abs_pos) keys, keeping the first.
+    Needed when pooling legacy cohorts that scanned overlapping problem ranges."""
+    seen, out = set(), []
+    for r in records:
+        k = (r["problem_id"], r["rollout"], r["abs_pos"])
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+    return out
+
+
+def full_report(records, margin_split=0.3):
+    """Every metric the paper reports, from per-pivot records, in one place.
+
+    Conditioning sets:
+      - common: any of the three passes gives A_t != 0 (the prereg metric's
+        denominator, shared by both comparisons)
+      - exact1: A_exact1 != 0 (treatment-independent conditioning)
+    Decomposition: zero-crossing (one side zero) vs polarity (signs strictly
+    opposite). Clustered inference: per-problem flip-rate difference t-test +
+    sign test. Downstream demo: Jaccard overlap of critical-token sets.
+    """
+    import math
+    import statistics
+
+    def rates(sub, b_key):
+        n = len(sub)
+        if n == 0:
+            return {"n": 0}
+        flips = [r for r in sub if sign(r["A_exact1"]) != sign(r[b_key])]
+        polarity = [r for r in flips
+                    if sign(r["A_exact1"]) != 0 and sign(r[b_key]) != 0]
+        return {
+            "n": n,
+            "flips": len(flips),
+            "flip_rate": len(flips) / n,
+            "zero_crossings": len(flips) - len(polarity),
+            "polarity_reversals": len(polarity),
+            "polarity_rate": len(polarity) / n,
+        }
+
+    common = [r for r in records
+              if sign(r["A_exact1"]) or sign(r["A_exact2"]) or sign(r["A_refeed"])]
+    exact1_set = [r for r in records if sign(r["A_exact1"]) != 0]
+
+    out = {
+        "n_records": len(records),
+        "n_problems": len({r["problem_id"] for r in records}),
+        "common_set": {
+            "refeed": rates(common, "A_refeed"),
+            "floor": rates(common, "A_exact2"),
+        },
+        "exact1_conditioned": {
+            "refeed": rates(exact1_set, "A_refeed"),
+            "floor": rates(exact1_set, "A_exact2"),
+        },
+    }
+
+    # Eligibility-source decomposition: which pass made each common pivot
+    # eligible (re-feed creating its own eligibility inflates its flip count).
+    out["eligibility_sources"] = {
+        "exact1_nonzero": sum(1 for r in common if sign(r["A_exact1"])),
+        "only_refeed_nonzero": sum(
+            1 for r in common
+            if not sign(r["A_exact1"]) and not sign(r["A_exact2"])
+            and sign(r["A_refeed"])),
+        "only_exact2_nonzero": sum(
+            1 for r in common
+            if not sign(r["A_exact1"]) and not sign(r["A_refeed"])
+            and sign(r["A_exact2"])),
+    }
+
+    # Bias: is the re-feed perturbation zero-mean?
+    if common:
+        diffs = [r["A_refeed"] - r["A_exact1"] for r in common]
+        m = statistics.mean(diffs)
+        sd = statistics.stdev(diffs) if len(diffs) > 1 else 0.0
+        out["bias"] = {
+            "mean_diff": m,
+            "t": (m / (sd / math.sqrt(len(diffs)))) if sd > 0 else 0.0,
+            "n": len(diffs),
+        }
+
+    # McNemar on the common set (unclustered; reported alongside clustered).
+    b = sum(1 for r in common
+            if sign(r["A_exact1"]) != sign(r["A_refeed"])
+            and sign(r["A_exact1"]) == sign(r["A_exact2"]))
+    c = sum(1 for r in common
+            if sign(r["A_exact1"]) == sign(r["A_refeed"])
+            and sign(r["A_exact1"]) != sign(r["A_exact2"]))
+    out["mcnemar"] = {
+        "b_refeed_only": b, "c_floor_only": c,
+        "z": ((b - c) / math.sqrt(b + c)) if (b + c) else 0.0,
+    }
+
+    # Problem-clustered inference: per-problem (refeed flip rate - floor flip
+    # rate) on that problem's common pivots; t over problems + sign test.
+    by_prob = {}
+    for r in common:
+        by_prob.setdefault(r["problem_id"], []).append(r)
+    per_prob = []
+    for pid, sub in by_prob.items():
+        rf = sum(1 for r in sub if sign(r["A_exact1"]) != sign(r["A_refeed"]))
+        fl = sum(1 for r in sub if sign(r["A_exact1"]) != sign(r["A_exact2"]))
+        per_prob.append((pid, (rf - fl) / len(sub)))
+    diffs = [d for _, d in per_prob]
+    if len(diffs) > 1:
+        m = statistics.mean(diffs)
+        sd = statistics.stdev(diffs)
+        out["clustered"] = {
+            "n_problems": len(diffs),
+            "mean_excess": m,
+            "t": (m / (sd / math.sqrt(len(diffs)))) if sd > 0 else 0.0,
+            "problems_refeed_worse": sum(1 for d in diffs if d > 0),
+            "problems_floor_worse": sum(1 for d in diffs if d < 0),
+            "problems_equal": sum(1 for d in diffs if d == 0),
+        }
+
+    # Downstream demo: critical-token selection overlap. A pivot is "critical"
+    # under a method if |A_t| >= threshold; Jaccard against the exact-resume
+    # selection, with the replica as the attainable ceiling.
+    out["critical_token_jaccard"] = {}
+    for thr in (0.5, 0.75):
+        sel = {}
+        for key in ("A_exact1", "A_exact2", "A_refeed"):
+            sel[key] = {(r["problem_id"], r["rollout"], r["abs_pos"])
+                        for r in records if abs(r[key]) >= thr}
+        def jac(a, b):
+            u = sel[a] | sel[b]
+            return (len(sel[a] & sel[b]) / len(u)) if u else None
+        out["critical_token_jaccard"][f"thr_{thr}"] = {
+            "n_exact1": len(sel["A_exact1"]),
+            "refeed_vs_exact1": jac("A_refeed", "A_exact1"),
+            "replica_vs_exact1": jac("A_exact2", "A_exact1"),
+        }
+
+    # Margin buckets on the common set.
+    for name, pred in ((f"margin_lt_{margin_split}",
+                        lambda r: r["margin"] < margin_split),
+                       (f"margin_ge_{margin_split}",
+                        lambda r: r["margin"] >= margin_split)):
+        sub = [r for r in common if pred(r)]
+        out[name] = {"refeed": rates(sub, "A_refeed"),
+                     "floor": rates(sub, "A_exact2")}
+
+    # Greedy probes: divergence rates + bit-exactness of the per-pivot
+    # max-over-arms first-token logprob delta.
+    g = [r for r in records if r.get("greedy_divergence_refeed") is not None]
+    if g:
+        probe = {"n_pivots": len(g)}
+        for tag in ("refeed", "exact2"):
+            div = sum(1 for r in g if r.get(f"greedy_divergence_{tag}"))
+            ds_ = [r[f"greedy_first_logprob_delta_{tag}"] for r in g
+                   if r.get(f"greedy_first_logprob_delta_{tag}") is not None]
+            nz = sorted(d for d in ds_ if d > 0)
+            probe[tag] = {
+                "divergence_rate": div / len(g),
+                "bit_exact_rate": (sum(1 for d in ds_ if d == 0.0) / len(ds_))
+                                  if ds_ else None,
+                "median_nonzero_delta": nz[len(nz) // 2] if nz else None,
+                "p90_delta": sorted(ds_)[int(0.9 * len(ds_))] if ds_ else None,
+            }
+        out["greedy_probe"] = probe
+
+    # Cache instrumentation summary (present only on instrumented runs).
+    instr = [r for r in records if r.get("cache_ok_exact1") is not None]
+    if instr:
+        out["cache_instrumentation"] = {
+            "n_instrumented": len(instr),
+            "exact1_ok_rate": sum(1 for r in instr if r["cache_ok_exact1"]) / len(instr),
+            "exact2_ok_rate": sum(1 for r in instr if r["cache_ok_exact2"]) / len(instr),
+        }
+    return out
+
+
 # ---------------------------------------------------------------------------
 # GPU run
 # ---------------------------------------------------------------------------
@@ -203,9 +382,10 @@ def run(args):
 
     ds = load_dataset("openai/gsm8k", "main", split="test")
     scan_limit = args.scan_limit if args.screen_mixed else args.problems
+    scan_start = args.scan_start
     candidates = [
         {"id": i, "question": ds[i]["question"], "gold": gold_answer(ds[i]["answer"])}
-        for i in range(min(scan_limit, len(ds)))
+        for i in range(scan_start, min(scan_start + scan_limit, len(ds)))
     ]
 
     llm = LLM(
@@ -217,15 +397,24 @@ def run(args):
         seed=0,
     )
     cont_temp = args.cont_temp if args.cont_temp is not None else args.temp
+    try:
+        block_size = llm.llm_engine.cache_config.block_size
+    except AttributeError:
+        block_size = llm.llm_engine.vllm_config.cache_config.block_size
+    print(f"[drift] engine block_size={block_size}", flush=True)
     tok = llm.get_tokenizer()
     skip_ids = {tid for tid in (tok.eos_token_id,) if tid is not None}
     skip_ids |= set(getattr(tok, "all_special_ids", []) or [])
 
     def reset_cache():
         if hasattr(llm, "reset_prefix_cache"):
-            llm.reset_prefix_cache()
+            ok = llm.reset_prefix_cache()
         else:
-            llm.llm_engine.reset_prefix_cache()
+            ok = llm.llm_engine.reset_prefix_cache()
+        if ok is False:
+            raise RuntimeError("reset_prefix_cache() returned False; blocks "
+                               "still in use -- a re-feed pass would silently "
+                               "run as an exact pass")
 
     instruction = (
         "\n\nReason step by step. End your response with one final line in"
@@ -276,13 +465,14 @@ def run(args):
         pivot_meta = {}
         for r_idx, comp in enumerate(out.outputs):
             gen_ids = list(comp.token_ids)
-            if len(gen_ids) < BLOCK_SIZE:
+            if len(gen_ids) < block_size:
                 continue
             tokens = extract_token_logprobs(comp, max_topk=5)
             pivots = select_pivots(
                 tokens, prompt_len,
                 margin_lt=args.margin, boundary_slack=args.boundary_slack,
                 max_pivots=args.max_pivots, skip_token_ids=skip_ids,
+                block_size=block_size,
             )
             full_ids = prompt_ids + gen_ids
             roll_correct = grade(comp.text, prob["gold"])
@@ -325,11 +515,36 @@ def run(args):
                 prompts.append({"prompt_token_ids": list(ids)})
             t0 = time.time()
             outs = llm.generate(prompts, sps)
-            return outs, time.time() - t0
+            cached = [getattr(o, "num_cached_tokens", None) for o in outs]
+            return outs, time.time() - t0, cached
 
-        exact1, t1 = run_pass("exact1", fresh=False)
-        exact2, t2 = run_pass("exact2", fresh=False)
-        refeed, t3 = run_pass("refeed", fresh=True)
+        exact1, t1, cached1 = run_pass("exact1", fresh=False)
+        exact2, t2, cached2 = run_pass("exact2", fresh=False)
+        refeed, t3, cached3 = run_pass("refeed", fresh=True)
+
+        # Cache-hit instrumentation: for the exact passes, every request's
+        # prompt must have hit at least the block-aligned trunk prefix, else
+        # the "exact" arm silently degraded to a partial re-feed (eviction /
+        # preemption). Recorded per pivot, summarized per problem.
+        def cache_ok_by_key(cached):
+            ok, mins = {}, {}
+            for (key, _arm, _k, _ids, _seed), c in zip(requests, cached):
+                if c is None:
+                    continue
+                expected = (pivot_meta[key]["abs_pos"] // block_size) * block_size
+                mins[key] = min(mins.get(key, 1 << 30), c)
+                this_ok = c >= expected
+                ok[key] = ok.get(key, True) and this_ok
+            return ok, mins
+
+        ok1, _min1 = cache_ok_by_key(cached1)
+        ok2, _min2 = cache_ok_by_key(cached2)
+        viol1 = sum(1 for v in ok1.values() if not v)
+        viol2 = sum(1 for v in ok2.values() if not v)
+        if viol1 or viol2:
+            print(f"[drift] WARNING problem {prob['id']}: cache-hit violations "
+                  f"exact1={viol1} exact2={viol2} of {len(pivot_meta)} pivots",
+                  flush=True)
 
         # Phase 3: grade and assemble per-pivot records.
         def collect(outs):
@@ -371,7 +586,16 @@ def run(args):
             if a1 is None or a2 is None or a3 is None:
                 continue
             rec = dict(meta)
-            rec.update({"A_exact1": a1, "A_exact2": a2, "A_refeed": a3})
+            rec.update({"A_exact1": a1, "A_exact2": a2, "A_refeed": a3,
+                        "cache_ok_exact1": ok1.get(key),
+                        "cache_ok_exact2": ok2.get(key)})
+            for tag, g in (("exact1", g1), ("exact2", g2), ("refeed", g3)):
+                arms = g.get(key, {})
+                rec[f"greedy_first_{tag}"] = {
+                    arm: [d["token_ids"][0] if d["token_ids"] else None,
+                          d["first_logprob"]]
+                    for arm, d in arms.items()
+                }
             for tag, g in (("exact2", g2), ("refeed", g3)):
                 div = None
                 lp_delta = None
@@ -397,6 +621,7 @@ def run(args):
 
         per_problem.append({
             "problem_id": prob["id"], "pivots": n_recorded,
+            "cache_violations": {"exact1": viol1, "exact2": viol2},
             "rollout_accuracy": sum(
                 grade(c.text, prob["gold"]) for c in out.outputs
             ) / max(len(out.outputs), 1),
@@ -430,6 +655,7 @@ def _dump(args, pivot_records, per_problem, t_start, *, final):
             "cont_temp": args.cont_temp,
             "screen_mixed": args.screen_mixed,
             "scan_limit": args.scan_limit,
+            "scan_start": args.scan_start,
         },
         "final": final,
         "elapsed_seconds": round(time.time() - t_start, 1),
@@ -466,6 +692,9 @@ def main():
                         "are collected)")
     p.add_argument("--scan-limit", type=int, default=200,
                    help="max GSM8K problems to scan when --screen-mixed")
+    p.add_argument("--scan-start", type=int, default=0,
+                   help="first GSM8K test index to scan; use 20+ for screened "
+                        "cohorts so they never overlap the primary cohort")
     p.add_argument("--out", default="results/drift_ablation.json")
     p.add_argument("--smoke", action="store_true",
                    help="2 problems, 4 rollouts, K=2, 2 pivots/rollout")
@@ -474,9 +703,12 @@ def main():
     args = p.parse_args()
 
     if args.analyze:
-        with open(args.analyze) as f:
-            data = json.load(f)
-        print(json.dumps(aggregate(data["pivots"]), indent=2))
+        recs = []
+        for path in args.analyze.split(","):
+            with open(path.strip()) as f:
+                recs.extend(json.load(f)["pivots"])
+        recs = dedupe(recs)
+        print(json.dumps(full_report(recs), indent=2))
         return
 
     if args.smoke:
