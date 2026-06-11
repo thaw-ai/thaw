@@ -1,0 +1,365 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage[numbers]{natbib}
+\usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue]{hyperref}
+\usepackage{xspace}
+
+\newcommand{\At}{\ensuremath{\hat{A}_t}\xspace}
+
+\title{Re-feeding Is Not Replaying:\\
+Transcript Re-feeds Flip the Sign of\\
+Counterfactual Token-Credit Estimates}
+
+\author{
+  Nils Matteson\\
+  thaw\\
+  \texttt{nils@thaw.sh}
+}
+
+\date{June 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Per-token counterfactual credit estimation is the standard tool for asking
+which token in a language-model rollout caused the final answer to be right
+or wrong: cut the transcript at a pivot token, substitute an alternative,
+replay continuations, and compare outcomes. Every published method we could
+verify implements the replay by \emph{re-feeding} the transcript prefix
+through the model as a fresh prompt, implicitly assuming that a re-fed prefix
+reproduces the state the model actually passed through during generation. We
+test that assumption directly on a stock inference engine, using a three-pass
+design: continuations resumed from the exact decode-time KV state, an
+identical second exact pass that serves as a replica noise floor, and a
+re-feed pass in which the only changed variable is the prefill path. Across
+four configurations and two models, including a GRPO-trained checkpoint,
+re-feeding flips the sign of the credit estimate at decision tokens at rates
+20--27 percentage points above the replica floor (paired
+$z = 2.6$--$9.3$). At the probe level, resuming the decode-time state
+reproduces the next-token logprob bit-exactly at 78\% of pivots; re-feeding
+does so at 3.9\%. Even the floor is informative: batch-composition numerics
+alone flip greedy outcomes at roughly 14\% of low-margin pivots. The
+experiment was pre-registered with a locked decision rule and cost under
+\$2 of compute. We recommend that counterfactual credit studies resume exact
+decoder state (or use batch-invariant kernels) and report a replica floor;
+without one, a substantial fraction of reported token-level credit signs are
+attributable to the measurement procedure rather than the model.
+\end{abstract}
+
+\section{Introduction}
+
+Reinforcement learning with verifiable rewards has made per-token credit
+assignment a central measurement problem for language-model reasoning. Group
+relative policy optimization \citep{shao2024deepseekmath} and its
+descendants train on sequence-level rewards, so a growing line of work asks
+the finer-grained question: which individual tokens in a rollout actually
+caused success or failure? The standard answer is counterfactual replay.
+Choose a pivot token, force an alternative continuation token, sample $K$
+completions under each arm, grade them, and read the per-token causal effect
+off the difference \citep{ruan2025cft, khandoga2026beyond, chen2026exact}.
+
+Every implementation of this recipe that we could verify shares one
+mechanical step: the transcript prefix up to the pivot is \emph{re-fed}
+through the model as a fresh prompt, and the continuations branch from the
+resulting state. The implicit assumption is that re-feeding tokens
+$x_{1..t}$ reconstructs the internal state the model was in when it
+originally generated token $t$. It does not, exactly. Floating-point
+reduction order inside attention and matrix-multiply kernels depends on
+batch composition and on how the sequence is split between prefill and
+decode, so the re-fed state differs from the original decode-time state in
+the low-order bits \citep{he2025nondeterminism}. The working assumption in
+the credit-assignment literature is that these differences wash out of the
+final estimate.
+
+This paper measures whether they do. The answer is no: at the low-margin
+decision tokens that credit methods specifically target, the re-feed
+shortcut flips the \emph{sign} of the estimated credit at rates far above
+what measurement noise explains.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item \textbf{A three-pass audit design.} We compare credit estimates from
+  (i) continuations resumed from the exact decode-time KV state, (ii) an
+  identical second exact pass, and (iii) a re-feed pass. Pass (ii) is the
+  load-bearing control: it converts ``how often do estimates disagree?''
+  into ``how much disagreement is attributable to the prefill path
+  \emph{beyond} replica noise?'' The design runs on a stock engine (vLLM
+  \citep{kwon2023vllm}) with no kernel modifications.
+  \item \textbf{Quantification.} Pooled over two pre-registered cohorts (40
+  GSM8K problems, 1{,}564 pivots), re-feeding flips the credit sign at
+  33.0\% of eligible pivots against a 12.2\% replica floor (excess
+  $+20.7$pp, paired McNemar $z = 9.33$). The effect persists with greedy
+  continuations that eliminate sampling noise entirely ($+26.5$pp) and on a
+  GRPO-trained checkpoint ($+26.3$pp).
+  \item \textbf{A bit-level account.} Resuming the decode-time state
+  reproduces the post-pivot next-token logprob \emph{exactly} (delta
+  $= 0.0$) at 78.0\% of 3{,}127 probes; re-feeding does so at 3.9\%, with a
+  90th-percentile logprob shift of $4.6\times10^{-2}$.
+  \item \textbf{The floor as a finding.} Even between two bit-identical
+  request batches, continuous-batching numerics flip greedy outcomes at
+  $\sim$14\% of low-margin pivots, quantifying a hazard for any
+  single-sample evaluation at decision tokens.
+\end{enumerate}
+
+The experiment was pre-registered before any GPU run: temperature, $K$,
+grading, the pivot filter, and the paper-versus-null decision rule were
+locked in advance, and the one amendment (a difficulty screen, after a smoke
+run showed the model saturates easy problems) is dated and was blind to
+drift direction. Total compute cost was approximately \$2 on rented A100s.
+Code, the pre-registration, and every per-pivot record are public.
+
+\section{Related Work}
+
+\paragraph{Counterfactual token credit.} Critical-token fine-tuning
+\citep{ruan2025cft} forces alternative tokens and regenerates continuations
+to identify tokens that change outcomes. \citet{khandoga2026beyond}
+construct causal per-token credit for policy optimization and observe
+qualitatively that group-relative advantages can carry the wrong sign.
+\citet{chen2026exact} show that exact counterfactuals beat approximate ones
+for credit assignment in cooperative LLM-agent systems, at the level of
+whole agent actions. All of these estimate counterfactual state by re-feeding
+or regenerating from text; none resume the original decoder state, and none
+report a replica control that would bound the contribution of the replay
+procedure itself. Our result does not diminish these methods; it quantifies
+a systematic error term that all of them currently absorb silently.
+
+\paragraph{Inference nondeterminism and training mismatch.}
+\citet{he2025nondeterminism} identify batch invariance as the root cause of
+LLM inference nondeterminism and fix it with batch-invariant kernels,
+demonstrating bitwise-deterministic sampling and true on-policy RL. Their
+victim is the serving endpoint and the trainer-versus-sampler gap in the RL
+loop. \citet{zhong2026tim} diagnose training-inference mismatch, where the
+rollout engine and the trainer assign different logprobs to the same tokens
+under the same weights, as an independent cause of RL training collapse.
+Both lines concern the \emph{training pipeline}. Our victim is different:
+the \emph{measurement methodology} of the credit-assignment literature,
+where the comparison pair is not trainer-versus-sampler but re-fed prefill
+state versus original decode-time state, on the stock engines that
+methodology actually runs on. The three lines compose: batch-invariant
+kernels are the fix, mismatch diagnosis covers training, and this paper
+covers measurement. In a fully batch-invariant engine where a token's
+reduction order is independent of its prefill/decode split, the gap we
+measure should collapse to the replica floor by construction; that is a
+testable prediction of \citet{he2025nondeterminism}'s kernels which our
+harness can evaluate directly.
+
+\section{Method}
+
+\subsection{Setup and estimator}
+
+For each problem we sample $N = 8$ trunk rollouts at temperature $0.7$ with
+top-$k$ logprobs recorded. Because the engine caches KV blocks as it
+decodes, the exact state every rollout passed through remains resident in
+the prefix cache at block granularity. A \emph{pivot} is a generated token
+where the top-1/top-2 logprob gap is below $1.0$ (a low-margin decision
+token, the population credit methods target), restricted to positions within
+2 tokens past a 16-token block boundary so that the exact arm resumes from
+cached state with at most 2 recomputed tokens. Per rollout we take at most
+5 pivots, earliest first.
+
+At pivot position $t$ with sampled token $a$ and best alternative $a'$, the
+credit estimate under a given replay method is
+\[
+\At \;=\; \frac{1}{K}\sum_{k=1}^{K} R\big(x_{1..t-1},\,a,\,c_k\big)
+\;-\;
+\frac{1}{K}\sum_{k=1}^{K} R\big(x_{1..t-1},\,a',\,c'_k\big),
+\]
+where $c_k, c'_k$ are sampled continuations and $R$ grades the completed
+solution by exact match on the GSM8K \citep{cobbe2021gsm8k} final answer.
+Continuation seeds are a deterministic hash of (problem, rollout, pivot,
+arm, $k$), so all replay methods receive identical sampling randomness; the
+only uncontrolled difference between methods is the prefill path.
+
+\subsection{Three passes}
+
+\begin{description}
+  \item[Exact pass 1.] All continuation requests for a problem are submitted
+  while the trunk's decode-time KV blocks are resident. The prefix
+  cache-hits the state the rollout actually traversed; continuations resume
+  from it.
+  \item[Exact pass 2 (replica floor).] The identical request batch is
+  submitted again, cache still warm. Any disagreement between passes 1 and 2
+  is attributable to continuous-batching numerics and sampling-on-perturbed-
+  logits alone: it is the noise floor of the measurement itself.
+  \item[Re-feed pass.] The prefix cache is reset and the identical batch is
+  submitted a third time. The trunk is now freshly prefilled, exactly as in
+  published credit pipelines. Differences beyond the replica floor are
+  attributable to the re-feed prefill path.
+\end{description}
+
+The primary metric is the fraction of eligible pivots (those where at least
+one pass yields $\At \neq 0$) at which $\mathrm{sign}(\At)$ under re-feed
+disagrees with exact pass 1, reported against the same quantity for exact
+pass 2. Each pass also issues one greedy 32-token probe per arm with top-2
+logprobs recorded, giving a grading-free channel: probe-sequence divergence
+rates and the absolute delta of the first post-pivot token's logprob.
+
+\subsection{Why decode-time resume is the right reference}
+
+The decode-time KV state is not an alternative approximation; it is the
+state the model was actually in when it chose token $t$. A counterfactual
+\emph{do}-operation at $t$ is defined relative to that state. Resuming it
+requires no kernel modifications: paged-attention engines already retain it
+in the prefix cache, and durable snapshot tools can persist it across
+processes. The replica pass empirically validates the reference: 78\% of
+resumed probes reproduce the next-token logprob bit-exactly
+(Section~\ref{sec:results}), whereas a re-fed prefix essentially never does.
+One honest caveat: blocks are 16 tokens, so ``exact'' means exact to the
+block boundary, with at most 2 trailing tokens recomputed under our pivot
+filter.
+
+\subsection{Pre-registration}
+
+Temperature, $K$, the grading function, the pivot filter, and the decision
+rule (sign-flip excess above 5\%: the method is materially unsound; below
+2\%: re-feed is adequate) were locked before any GPU run. A smoke run
+revealed that Qwen2.5-7B-Instruct solves easy GSM8K problems in every
+continuation, making $\At = 0$ everywhere and the metric undecidable for
+lack of eligible pivots. Amendment 1, dated before any full-run results,
+added a second cohort screened only on \emph{trunk} rollout accuracy being
+mixed (neither $0/8$ nor $8/8$), a criterion computed before any arm
+continuations exist and blind to drift direction. Both cohorts are reported
+separately and pooled.
+
+\section{Experimental Setup}
+
+\textbf{Models.} Qwen2.5-7B-Instruct \citep{qwen2025} and
+Qwen-2.5-7B-SimpleRL-Zoo \citep{zeng2025simplerlzoo}, a GRPO-trained
+checkpoint built from the Qwen2.5-7B base on mathematical reasoning.
+\textbf{Engine.} Stock vLLM 0.22.1 \citep{kwon2023vllm}, bfloat16, prefix
+caching enabled, no kernel modifications. \textbf{Hardware.} One A100 SXM
+80GB per run (rented; two pods, roughly 80 minutes total, $\sim$\$2).
+\textbf{Data.} GSM8K test split \citep{cobbe2021gsm8k}: the first 20
+problems (primary cohort) and the first 20 mixed-accuracy problems under the
+Amendment 1 screen (screened cohort). \textbf{Configurations.} Main:
+temperature 0.7, $K=4$. Secondary: greedy continuations (temperature 0,
+$K=1$), $K=8$, and the GRPO checkpoint, all on screened cohorts.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Primary metric: sign flips above the replica floor}
+
+Table~\ref{tab:main} reports, on the common eligible set of each run (pivots
+where any pass gives $\At \neq 0$, identical denominator for both
+comparisons), the rate at which re-feed disagrees in sign with exact pass 1,
+against the exact-versus-exact replica floor, with a paired McNemar test on
+the discordant pivots.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{llrrrrr}
+\toprule
+Configuration & Model & $n$ & Re-feed flip & Floor & Excess & $z$ \\
+\midrule
+Main, pooled (t=0.7, $K{=}4$) & Qwen2.5-7B-Instruct & 622 & 33.0\% & 12.2\% & $+20.7$pp & 9.33 \\
+Greedy (t=0, $K{=}1$)         & Qwen2.5-7B-Instruct & 189 & 40.2\% & 13.8\% & $+26.5$pp & 5.66 \\
+$K{=}8$ (t=0.7)$^{\dagger}$   & Qwen2.5-7B-Instruct & 104 & 35.6\% & 22.1\% & $+13.5$pp & 2.56 \\
+GRPO ckpt (t=0.7, $K{=}4$)    & SimpleRL-Zoo-7B     & 373 & 35.4\% & 9.1\%  & $+26.3$pp & 8.66 \\
+\bottomrule
+\end{tabular}
+\caption{Sign-flip rate of the credit estimate under re-feed versus the
+exact-replica noise floor, on each run's common eligible set. $z$ is the
+paired McNemar statistic over discordant pivots. $^{\dagger}$Truncated at
+4/20 problems by a transient pod disk failure unrelated to the harness;
+reported for completeness.}
+\label{tab:main}
+\end{table}
+
+Every configuration is positive and significant. The two strongest are the
+two that answer the obvious objections. With greedy continuations there is
+no sampling randomness at all, and re-feed still flips 40.2\% of estimates
+against a 13.8\% pure-numerics floor; per problem, 11 of 19 problems show
+re-feed worse than floor and zero show the reverse. On the GRPO-trained
+checkpoint, the population for which credit assignment is actually studied,
+the excess is $+26.3$pp and the per-problem split is 16 worse, 2 better.
+In the pooled main configuration the discordant counts are 160 pivots
+flipped only by re-feed against 31 flipped only by the replica
+($z = 9.33$). The effect is flat in pivot margin: 32.6\% below a 0.3
+logprob gap versus 33.2\% above it (floor 12.2\% in both buckets), so this
+is not confined to near-ties.
+
+\subsection{Bit-level account}
+
+The greedy probes give a grading-free view of the same phenomenon. Across
+3{,}127 probes pooled over the full runs, the replica pass reproduces the
+first post-pivot token's logprob \emph{exactly} (absolute delta $= 0.0$) at
+78.0\% of pivots; the re-feed pass does so at 3.9\%. When nonzero, the
+median replica delta and median re-feed delta are both
+$\sim 1.7\times10^{-3}$, but the tails differ by an order of magnitude: the
+90th-percentile delta is $2.5\times10^{-3}$ for the replica versus
+$4.6\times10^{-2}$ for re-feed (maximum $0.18$). Probe sequences diverge
+within 32 greedy tokens at 23.1\% of pivots under re-feed versus 6.7\% for
+the replica on the main runs, and at 16.0\% versus 1.7\% (a $9.4\times$
+ratio) on the GRPO checkpoint.
+
+\subsection{The floor is also a finding}
+
+Two bit-identical request batches, submitted seconds apart against the same
+warm cache with the same seeds, disagree on the sign of $\At$ at 9--14\% of
+eligible pivots (22\% under $K{=}8$'s partial run) and on greedy
+continuations at 6--9\% of pivots. This is \citet{he2025nondeterminism}'s
+batch-composition nondeterminism expressed in the unit that matters for
+evaluation: at the decision tokens where models are uncertain, batching
+numerics alone flip single-sample outcomes at a rate that would be
+catastrophic to interpret as signal. Any study that evaluates at
+low-margin tokens without a replica control is reading a coin flip at
+roughly one pivot in ten.
+
+\section{Discussion}
+
+\paragraph{What this does and does not show.} It shows that the re-feed
+shortcut is materially unsound as a measurement procedure for per-token
+counterfactual credit at decision tokens on stock engines: roughly one in
+five sign judgments beyond noise is an artifact of the replay path. It does
+not show that GRPO training is broken (we measured the estimator, not
+training outcomes), and it does not claim novelty for the existence of
+batch-composition drift, which \citet{he2025nondeterminism} established and
+fixed at the kernel level. The contribution is the quantification, on the
+measurement methodology the credit literature actually uses, with a control
+that no prior credit study reports.
+
+\paragraph{Recommendations.} (1) Resume the decode-time state for
+counterfactual replay. On paged-attention engines this is engine-native via
+the prefix cache within a process, and durable session-snapshot tooling
+extends it across processes. (2) Alternatively, run on batch-invariant
+kernels \citep{he2025nondeterminism}, under which prefill/decode-split
+invariance should collapse the re-feed gap to the floor; confirming that
+prediction with this harness is immediate future work. (3) In all cases,
+report an exact-replica floor. A credit-assignment result at low-margin
+tokens without a floor is uninterpretable, since the floor alone is
+$\sim$10\%. (4) Pre-register estimator settings: the flip rate is sensitive
+to temperature, $K$, grading, and the pivot filter, and is easy to tune
+post hoc.
+
+\paragraph{Limitations.} One task family (GSM8K), one engine version (vLLM
+0.22.1), one GPU type (A100); pivots are deliberately conditioned on low
+margin and on block-boundary proximity, so the rates are statements about
+decision tokens, not about all tokens; $K$ is small (the binary-graded
+estimator is noisy, which the floor makes explicit); the $K{=}8$ run is a
+4-problem partial; and ``exact'' is exact to the 16-token block boundary.
+None of these caveats favor the effect: the strongest results occur exactly
+where the caveats are weakest (greedy continuations, the GRPO checkpoint).
+
+\section{Reproducibility}
+
+The pre-registration (with its dated amendment), the harness (a single
+$\sim$500-line Python file against stock vLLM), every per-pivot record of
+all five runs, and the run logs are public in the thaw repository
+(\url{https://github.com/thaw-ai/thaw}, \texttt{benchmarks/}). Total
+compute: two rented A100 pods, roughly 80 minutes and \$2. Each headline
+number in this paper can be recomputed from the published JSONs with the
+included analysis function.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}
