@@ -41,19 +41,21 @@ second exact pass serving as a replica noise floor, and a re-feed pass.
 Across six configurations and three models (including a GRPO-trained
 checkpoint), at low-margin decision tokens, re-feeding changes the credit
 estimate at rates 14--28 percentage points above the replica floor
-(problem-clustered $t = 2.9$--$6.4$). Most changes are zero-boundary
+(7--21pp under a treatment-independent conditioning; problem-clustered
+$t = 2.9$--$6.4$). Most changes are zero-boundary
 crossings of the quantized estimator rather than polarity reversals, and the
 perturbation is mean-zero, so averaged quantities are largely safe; but
 selection is not: a critical-token set chosen by thresholding $|\At|$ under
 re-feed overlaps the exact-resume selection at Jaccard 0.34--0.90, versus a
 0.63--0.96 replica ceiling. A causal confirmation closes the loop: rerunning
 the harness under vLLM's batch-invariant kernels makes all three passes
-bitwise identical, with both disagreement rates exactly zero. Even the floor
+identical on every measured channel, with both disagreement rates exactly
+zero. Even the floor
 is informative: replica passes disagree on 9--23\% of eligible estimates,
 so single-sample credit measurements at decision tokens are unreliable under
 \emph{any} replay. Settings were fixed in advance with a locked decision
 rule; cache hits underlying every ``exact'' claim are instrumented (100\% hit
-rate, 3{,}502 pivots); total compute was under \$10. We recommend that
+rate, 3{,}434 pivots; 3{,}829 including the batch-invariant run); total compute was under \$10. We recommend that
 counterfactual credit studies resume decoder state or use batch-invariant
 kernels, and report a replica floor.
 \end{abstract}
@@ -91,8 +93,9 @@ eliminates it.
 \begin{enumerate}
   \item \textbf{A three-pass audit design with a replica floor.} We compare
   credit estimates from (i) continuations resumed from the decode-time KV
-  state (cache hits instrumented per request: 100\% verified across 3{,}502
-  pivots), (ii) an identical second exact pass, and (iii) a re-feed pass.
+  state (cache hits instrumented per request: 100\% verified across 3{,}434
+  pivots in the five stock-engine runs, 3{,}829 including the
+  batch-invariant run), (ii) an identical second exact pass, and (iii) a re-feed pass.
   Pass (ii) converts ``how often do estimates disagree?'' into ``how much
   disagreement is attributable to the re-feed procedure \emph{beyond}
   replica noise?'' The design runs on stock vLLM \citep{kwon2023vllm} with
@@ -104,7 +107,7 @@ eliminates it.
   crossings of the $1/K$-quantized estimator; strict polarity reversals are
   0.5--6.2\% under re-feed versus 0--5.9\% at the floor. The perturbation is
   mean-zero ($t = -1.2$), so aggregated estimates are largely unaffected.
-  \item \textbf{A downstream consequence that survives the decomposition.}
+  \item \textbf{A downstream consequence: selection.}
   Threshold-based critical-token selection, the construction of
   \citet{lin2024critical} and \citet{ruan2025cft}, selects a materially
   different token set under re-feed: Jaccard overlap with the exact-resume
@@ -113,9 +116,11 @@ eliminates it.
   \item \textbf{A causal confirmation.} Rerunning the identical harness
   under vLLM's batch-invariant kernels (\texttt{VLLM\_BATCH\_INVARIANT=1},
   implementing \citealp{he2025nondeterminism}) makes all three passes
-  bitwise identical: both disagreement rates collapse to exactly zero and
-  100\% of probes are bit-exact. The effect is batch-variant kernel
-  numerics, in its entirety, and the published fix eliminates it.
+  identical on every stored channel (credit estimates, greedy probe
+  sequences, probe logprobs): both disagreement rates collapse to exactly
+  zero and 100\% of probes are bit-exact. In the tested configuration the
+  effect is batch-variant kernel numerics, and the published fix
+  eliminates it.
   \item \textbf{The floor as a refinement.} Prior work established that
   batching numerics shift benchmark accuracy and flip greedy decoding
   \citep{yuan2025numerical, song2024greedy}. We measure the same hazard at
@@ -138,8 +143,8 @@ and the analysis function that emits every number in this paper are public.
 \paragraph{Counterfactual token credit.} VinePPO
 \citep{kazemnejad2024vineppo} builds Monte Carlo value estimates on the
 premise that re-feeding partial context resets the environment state.
-\citet{lin2024critical} identify critical tokens by contrastive rollouts
-from token positions; critical-token fine-tuning \citep{ruan2025cft} forces
+\citet{lin2024critical} identify critical tokens by rollouts from token
+positions; critical-token fine-tuning \citep{ruan2025cft} forces
 alternative tokens and regenerates continuations. \citet{khandoga2026beyond}
 construct causal per-token credit by masking reasoning spans and measuring
 answer-probability changes. C3 \citep{chen2026exact} shows exact
@@ -148,7 +153,10 @@ cooperative LLM agents, at the granularity of whole agent actions, and
 premises its method on text-restoration being exact. All reconstruct
 intermediate state from text; none resume the original decoder state as a
 reference, and none report a replica control bounding the replay procedure's
-own contribution. Separately, tree-structured rollout methods
+own contribution. A contemporaneous survey of the area
+\citep{zhang2026survey} repeats the premise: generating rollouts from any
+intermediate prefix is treated as trivially available, with no discussion
+of replay fidelity. Separately, tree-structured rollout methods
 \citep{li2025treepo} do resume live KV state at branch points, but as an
 efficiency mechanism during training, without comparing resume to re-feed
 or auditing exactness; our scope claim is therefore about credit
@@ -185,7 +193,7 @@ state every rollout passed through remains resident in the prefix cache at
 block granularity. A \emph{pivot} is a generated token whose top-1/top-2
 logprob gap is below $1.0$ (a low-margin decision token, the population
 credit methods target), restricted to positions within 2 tokens past a
-16-token block boundary (block size read from the engine and asserted), at
+16-token block boundary (block size read from the engine configuration and recorded), at
 most 5 per rollout, earliest first.
 
 At pivot position $t$ with sampled token $a$ and best alternative $a'$, the
@@ -210,7 +218,7 @@ arm, $k$), so all passes receive identical sampling randomness.
   \emph{instrumented}, not assumed: the engine's per-request
   \texttt{num\_cached\_tokens} is recorded and checked against the
   block-aligned pivot position. Across all second-campaign runs, 100\% of
-  3{,}502 pivots verified on both exact passes.
+  3{,}829 pivots verified on both exact passes.
   \item[Exact pass 2 (replica floor).] The identical request batch is
   submitted again, cache warm. Disagreement between passes 1 and 2 is the
   noise floor of the measurement itself. One impurity is disclosed: pass 1's
@@ -252,7 +260,7 @@ is exact while the first post-pivot logits still traverse a fresh kernel
 path. Second, the replica floor measures the reference's self-consistency,
 not its fidelity to the original decode-step logits; 61--94\% of resumed
 probes reproduce the post-pivot logprob bit-exactly across configurations
-(versus 3--6\% for re-feed), which validates self-consistency, and the
+(versus 2.6--5.7\% for re-feed), which validates self-consistency, and the
 batch-invariant confirmation (Section~\ref{sec:batchinv}) closes the
 remaining gap by eliminating path dependence entirely.
 
@@ -261,9 +269,14 @@ remaining gap by eliminating path dependence entirely.
 Temperature, $K$, grading, the pivot filter, and the decision rule were
 fixed in a registration document before any GPU run, with one dated
 amendment (a trunk-accuracy difficulty screen, blind to drift direction)
-added after a smoke run. The registration is published in the repository
-with an honest provenance note: it is self-attested, without an external
-timestamp. Two experimental campaigns are reported. The first campaign's
+added after a smoke run. One mechanism deviation is flagged: the
+registration described the exact arm as a snapshot-tool fork of the live
+KV state; the implementation uses the engine-native prefix-cache resume
+instead (functionally the same decode-time blocks, with no third-party
+component). The decomposition, conditioning, clustered, selection, and
+batch-invariant analyses are post-registration additions, labeled as
+such. The registration is published in the repository with an honest
+provenance note: it is self-attested, without an external timestamp. Two experimental campaigns are reported. The first campaign's
 two pooled cohorts were later found to overlap on four problems (the
 screened cohort rescanned from index 0); all first-campaign pooled numbers
 in this paper are therefore deduplicated, and the second campaign separates
@@ -300,7 +313,7 @@ Configuration & Model & $n$ & Re-feed (pol.) & Floor (pol.) & Excess & $t_{\text
 Main pooled (t=.7, K4) & Qwen2.5-7B-Inst & 636 & 33.8\% (3.9) & 15.1\% (1.1) & $+18.7$ & 5.51 & 8.61 \\
 $K{=}8$                & Qwen2.5-7B-Inst & 490 & 35.7\% (4.9) & 10.4\% (1.0) & $+25.3$ & 6.36 & 9.68 \\
 $K{=}16$ (10 prob.)    & Qwen2.5-7B-Inst & 239 & 36.8\% (5.9) & 23.0\% (5.9) & $+13.8$ & 2.87 & 3.71 \\
-Greedy (t=0, K1)$^{\diamond}$ & Qwen2.5-7B-Inst & 189 & 40.2\% (0.5) & 13.8\% (0.0) & $+26.5$ & 3.64 & 5.66 \\
+Greedy cont.\ (t=0, K1)$^{\diamond}$ & Qwen2.5-7B-Inst & 189 & 40.2\% (0.5) & 13.8\% (0.0) & $+26.5$ & 3.64 & 5.66 \\
 GRPO ckpt (t=.7, K4)$^{\diamond}$ & SimpleRL-Zoo-7B & 373 & 35.4\% (3.8) & 9.1\% (1.1) & $+26.3$ & 5.50 & 8.66 \\
 Phi-4-mini (t=.7, K4)  & Phi-4-mini      & 370 & 48.6\% (6.2) & 20.8\% (3.0) & $+27.8$ & 3.47 & 7.79 \\
 \midrule
@@ -314,6 +327,8 @@ problem-clustered paired $t$ over per-problem rate differences; $z$ is the
 (unclustered) McNemar statistic, reported for comparability.
 $^{\diamond}$First campaign, prior to cache instrumentation; design
 identical (second-campaign instrumentation verified 100\% cache-hit rates).
+In the greedy row, trunks are sampled at t=0.7 and only continuations are
+greedy.
 Under batch-invariant kernels all three passes are bitwise identical.}
 \label{tab:main}
 \end{table}
@@ -334,8 +349,8 @@ $K$ trend: $K{=}8$ is the strongest configuration.
 The decomposition matters and is disclosed in the same table: strict
 polarity reversals (positive credit becoming negative or vice versa) are
 0.5--6.2\% under re-feed against 0--5.9\% floors; most disagreements are
-the quantized estimator crossing zero. The perturbation is mean-zero
-(pooled bias $-0.011$, $t=-1.23$), so quantities that average many pivots
+the quantized estimator crossing zero. The perturbation is consistent with mean-zero
+(pooled bias $-0.011$, $t=-1.23$, 95\% CI $[-0.029, +0.007]$), so quantities that average many pivots
 are largely insulated. The effect is also flat in pivot margin (pooled:
 34.2\% below a 0.3 logprob gap versus 33.6\% above; floors 12.0\% and
 16.9\%). Figure~\ref{fig:quadrants} shows the full joint distribution;
@@ -375,12 +390,23 @@ Under batch-invariant kernels both overlaps are exactly 1.0. A third to
 two-thirds of the gap between a method's selected token set and its own
 noise ceiling is attributable to the re-feed procedure.
 
+To be precise about the mechanism: every selection disagreement we observe
+sits within one grading quantum ($1/K$) of the threshold, and the re-feed
+gap narrows as the estimator gets finer (Jaccard 0.68 at $K{=}4$ to 0.90 at
+$K{=}16$). This is not a separate phenomenon from the zero-crossing noise;
+it is that noise expressed at the cut. The point is that threshold
+selection at the $K$ budgets the literature actually operates at lives
+exactly at that cut, and the replica ceilings show such selection is
+substantially irreproducible under \emph{any} replay at these budgets,
+with re-feeding consuming a further third to two-thirds of the remaining
+headroom.
+
 \subsection{Bit-level account}
 
 On the grading-free channel (greedy 32-token probes, per-pivot max over the
 two arms), resuming the decode-time state reproduces the first post-pivot
 token's logprob exactly (delta $=0.0$) at 61--94\% of pivots across
-configurations, while re-feeding does so at 3--6\%; pooled 90th-percentile
+configurations, while re-feeding does so at 2.6--5.7\%; pooled 90th-percentile
 deltas are $3.7\times10^{-3}$ (replica) versus $4.8\times10^{-2}$
 (re-feed). Probe sequences diverge within 32 greedy tokens at 22.8\% of
 pooled pivots under re-feed versus 7.9\% for the replica
@@ -404,11 +430,13 @@ effect}
 If the measured excess is batch-variant kernel numerics and nothing else,
 then under kernels whose reduction order is independent of batch
 composition and prefill/decode split \citep{he2025nondeterminism}, all
-three passes should be bitwise identical. We reran the harness with
+three passes should be identical. We reran the harness with
 \texttt{VLLM\_BATCH\_INVARIANT=1} on the same engine, model, and data (10
 problems, 395 pivots, 106 eligible). The prediction held exactly: zero
 disagreements in both comparisons, 100\% bit-exact probes in both
-comparisons, and critical-token Jaccard 1.0. This simultaneously closes the
+comparisons, identical estimates on all 395 pivots, and critical-token
+Jaccard 1.0 (identity verified on every stored channel: estimates, greedy
+probe token sequences, and probe logprobs). This simultaneously closes the
 causal attribution and validates the instrument end-to-end: a harness
 artifact that manufactured drift would not measure exactly zero when the
 numerics are pinned.
@@ -465,7 +493,13 @@ block-boundary proximity, so all rates are statements about decision
 tokens, not all tokens; $K \leq 16$ with binary grading keeps the estimator
 coarse (the floor quantifies the consequence); the registration is
 self-attested; and two first-campaign runs predate the cache
-instrumentation (marked in Table~\ref{tab:main}). The batch-invariant
+instrumentation (marked in Table~\ref{tab:main}). Passes always run in a fixed
+order (exact, replica, re-feed) and there is no re-feed-versus-re-feed
+replica, so the re-feed arm's internal variance is unmeasured; we also do
+not isolate the recomputed-prefix mechanism from the changed batch
+dynamics with a serialized one-request-at-a-time control, which is why the
+treatment is defined as the re-feed procedure as actually run. The GRPO
+checkpoint was run only in the first campaign. The batch-invariant
 confirmation covers one configuration; replicating it across the full grid
 is mechanical.
 

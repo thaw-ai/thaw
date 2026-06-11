@@ -17,8 +17,9 @@ Design (per problem):
   4. EXACT pass 2: identical request batch, cache still warm. This is the
      noise-floor replica (continuous-batching numerics only).
   5. reset_prefix_cache(), then RE-FEED pass: identical request batch, but the
-     trunk is now freshly prefilled. The only changed variable vs pass 1/2 is
-     the prefill path -- the thing every published credit method relies on.
+     trunk is now freshly prefilled. Relative to passes 1/2 this changes the
+     re-feed procedure as actually run: the recomputed prefix state plus the
+     step-level batch dynamics that heavy chunked prefill induces.
   6. Grade all continuations by GSM8K exact-match; A_t = mean(R|actual) -
      mean(R|alt) per (pivot, pass). Primary metric: sign disagreement rate of
      exact-pass-1 vs re-feed, reported against the exact1-vs-exact2 floor.
