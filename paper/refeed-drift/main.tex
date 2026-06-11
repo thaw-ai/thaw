@@ -5,6 +5,7 @@
 \usepackage[T1]{fontenc}
 \usepackage{amsmath, amssymb}
 \usepackage{booktabs}
+\usepackage{graphicx}
 \usepackage{microtype}
 \usepackage[numbers]{natbib}
 \usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue]{hyperref}
@@ -18,8 +19,8 @@ Counterfactual Token-Credit Estimates}
 
 \author{
   Nils Matteson\\
-  thaw\\
-  \texttt{nils@thaw.sh}
+  thaw \,$\cdot$\, Northeastern University\\
+  \texttt{matteson.ni@northeastern.edu}
 }
 
 \date{June 2026}
@@ -287,6 +288,32 @@ flipped only by re-feed against 31 flipped only by the replica
 logprob gap versus 33.2\% above it (floor 12.2\% in both buckets), so this
 is not confined to near-ties.
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig_quadrants.pdf}
+\caption{Joint distribution of \At under exact resume (x-axis) and the
+comparison pass (y-axis), pooled main configuration, common eligible set
+($n = 622$). Cells outlined in red disagree in sign with exact pass 1.
+Left: the re-feed pass scatters 33.0\% of estimates into sign-disagreeing
+cells. Right: an identical exact replica pass, the noise floor, scatters
+12.2\%.}
+\label{fig:quadrants}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.78\linewidth]{fig_configs.pdf}
+\caption{Sign-flip rate of re-feed (red) versus the replica floor (gray)
+across all four configurations, with the excess annotated. The effect
+survives the removal of sampling noise entirely (greedy) and is strongest
+on the GRPO-trained checkpoint.}
+\label{fig:configs}
+\end{figure}
+
+Figure~\ref{fig:quadrants} shows the full joint distribution behind the
+pooled headline numbers, and Figure~\ref{fig:configs} the four
+configurations side by side.
+
 \subsection{Bit-level account}
 
 The greedy probes give a grading-free view of the same phenomenon. Across
@@ -300,6 +327,22 @@ $4.6\times10^{-2}$ for re-feed (maximum $0.18$). Probe sequences diverge
 within 32 greedy tokens at 23.1\% of pivots under re-feed versus 6.7\% for
 the replica on the main runs, and at 16.0\% versus 1.7\% (a $9.4\times$
 ratio) on the GRPO checkpoint.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.7\linewidth]{fig_logprob_ecdf.pdf}
+\caption{Cumulative distribution of the absolute first-token logprob delta
+against exact pass 1, over 3{,}127 greedy probes pooled across the full
+runs. Resuming the decode-time state is bit-exact at 78.0\% of probes;
+re-feeding is bit-exact at 3.9\% and exhibits a tail an order of magnitude
+heavier.}
+\label{fig:ecdf}
+\end{figure}
+
+Figure~\ref{fig:ecdf} shows the full distribution: the two methods have
+similar medians when nonzero, but the replica's mass sits at exactly zero
+while re-feed's never does, and re-feed's tail is an order of magnitude
+heavier.
 
 \subsection{The floor is also a finding}
 
