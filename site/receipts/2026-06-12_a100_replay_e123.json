@@ -1,0 +1,171 @@
+{
+ "experiment": "flight-recorder-replay-e1-e3",
+ "prereg": "private/plans/2026-06-12_flight-recorder-experiment-plan.md",
+ "config": {
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "dtype": "bfloat16",
+  "enforce_eager": true,
+  "n_neighbors": 7,
+  "target_tokens": 200,
+  "target_seed": 1234,
+  "junk_prompt_range": [
+   64,
+   768
+  ],
+  "junk_decode_range": [
+   16,
+   160
+  ],
+  "max_model_len": 4096
+ },
+ "elapsed_seconds": 34.4,
+ "stages": [
+  {
+   "stage": "E1",
+   "control": {
+    "traces_shape_identical": true,
+    "n_steps_a": 200,
+    "n_steps_b": 200
+   },
+   "comparison": {
+    "n_tokens_a": 200,
+    "n_tokens_b": 200,
+    "token_ids_identical": true,
+    "logprobs_bit_identical": true,
+    "n_logprob_mismatches": 0,
+    "max_abs_logprob_delta": 0.0,
+    "first_mismatches": []
+   },
+   "pass": true,
+   "kill_criterion_K1_fired": false,
+   "seconds": 7.0
+  },
+  {
+   "control": {
+    "traces_shape_identical": true,
+    "n_steps_a": 200,
+    "n_steps_b": 200
+   },
+   "comparison": {
+    "n_tokens_a": 200,
+    "n_tokens_b": 200,
+    "token_ids_identical": true,
+    "logprobs_bit_identical": true,
+    "n_logprob_mismatches": 0,
+    "max_abs_logprob_delta": 0.0,
+    "first_mismatches": []
+   },
+   "certificate_bytes": 18939,
+   "n_trace_steps": 200,
+   "derived_dummy_spec": [
+    {
+     "req_id": "17-a27432a0",
+     "prompt_len": 132,
+     "num_sampled": 104
+    },
+    {
+     "req_id": "18-8e173bde",
+     "prompt_len": 487,
+     "num_sampled": 44
+    },
+    {
+     "req_id": "19-81e9fe1b",
+     "prompt_len": 395,
+     "num_sampled": 157
+    },
+    {
+     "req_id": "20-9daed86e",
+     "prompt_len": 587,
+     "num_sampled": 28
+    },
+    {
+     "req_id": "21-baee24e0",
+     "prompt_len": 760,
+     "num_sampled": 27
+    },
+    {
+     "req_id": "22-909b26e2",
+     "prompt_len": 346,
+     "num_sampled": 55
+    },
+    {
+     "req_id": "23-99a95556",
+     "prompt_len": 529,
+     "num_sampled": 27
+    }
+   ],
+   "pass": true,
+   "stage": "E2",
+   "seconds": 6.2
+  },
+  {
+   "control": {
+    "traces_shape_identical": true,
+    "n_steps_a": 200,
+    "n_steps_b": 200
+   },
+   "comparison": {
+    "n_tokens_a": 200,
+    "n_tokens_b": 200,
+    "token_ids_identical": true,
+    "logprobs_bit_identical": true,
+    "n_logprob_mismatches": 0,
+    "max_abs_logprob_delta": 0.0,
+    "first_mismatches": []
+   },
+   "certificate_bytes": 18939,
+   "n_trace_steps": 200,
+   "derived_dummy_spec": [
+    {
+     "req_id": "33-9aa61c9c",
+     "prompt_len": 132,
+     "num_sampled": 104
+    },
+    {
+     "req_id": "34-889e45f3",
+     "prompt_len": 487,
+     "num_sampled": 44
+    },
+    {
+     "req_id": "35-bfb62767",
+     "prompt_len": 395,
+     "num_sampled": 157
+    },
+    {
+     "req_id": "36-8ec55cc9",
+     "prompt_len": 587,
+     "num_sampled": 28
+    },
+    {
+     "req_id": "37-a64027fe",
+     "prompt_len": 760,
+     "num_sampled": 27
+    },
+    {
+     "req_id": "38-aa21701b",
+     "prompt_len": 346,
+     "num_sampled": 55
+    },
+    {
+     "req_id": "39-a5edd0db",
+     "prompt_len": 529,
+     "num_sampled": 27
+    }
+   ],
+   "pass": true,
+   "stage": "E3",
+   "sampled_sequence_reemitted": true,
+   "seconds": 8.8
+  }
+ ],
+ "environment": {
+  "gpu": "NVIDIA A100-SXM4-80GB",
+  "cloud": "RunPod secure, US-MD-1",
+  "vllm": "0.22.1",
+  "torch": "2.11.0+cu130",
+  "cuda": "13.0",
+  "driver": "580.126.16",
+  "date": "2026-06-12",
+  "notes": "run 2 on the same pod; run 1 failed E2/E3 on the suffixed-request-id exclusion bug (fixed in the same branch, regression-tested). E1 passed in both runs."
+ }
+}
