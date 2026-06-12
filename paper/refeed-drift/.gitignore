@@ -5,3 +5,5 @@ main.fdb_latexmk
 main.fls
 main.log
 main.out
+arxiv-upload.tar.gz
+arxiv-metadata.txt

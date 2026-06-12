@@ -269,9 +269,11 @@ def full_report(records, margin_split=0.3):
         diffs = [r["A_refeed"] - r["A_exact1"] for r in common]
         m = statistics.mean(diffs)
         sd = statistics.stdev(diffs) if len(diffs) > 1 else 0.0
+        se = (sd / math.sqrt(len(diffs))) if sd > 0 else 0.0
         out["bias"] = {
             "mean_diff": m,
-            "t": (m / (sd / math.sqrt(len(diffs)))) if sd > 0 else 0.0,
+            "t": (m / se) if se > 0 else 0.0,
+            "ci95": [m - 1.96 * se, m + 1.96 * se],
             "n": len(diffs),
         }
 
