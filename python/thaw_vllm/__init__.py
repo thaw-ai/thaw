@@ -69,6 +69,13 @@ def __getattr__(name):
         globals()["rewind"] = mod
         return mod
 
+    if name == "recorder":
+        # Shape-trace recorder for retroactive replay. stdlib-only at
+        # import; touches the engine only when attached to one.
+        mod = importlib.import_module("thaw_vllm.recorder")
+        globals()["recorder"] = mod
+        return mod
+
     target = _LAZY.get(name)
     if target is None:
         raise AttributeError(f"module 'thaw_vllm' has no attribute {name!r}")
@@ -79,7 +86,9 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted(set(globals()) | set(_LAZY) | {"sleep_mode", "rewind", "load"})
+    return sorted(
+        set(globals()) | set(_LAZY) | {"sleep_mode", "rewind", "recorder", "load"}
+    )
 
 
 # Eager (but GPU-free) — fork.py imports only stdlib at module load; torch/vLLM
