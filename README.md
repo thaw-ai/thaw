@@ -20,6 +20,12 @@ The part most tools miss: **inspecting, diffing, and tracing sessions needs no G
   <img src="thaw-demo.gif" alt="thaw — log, inspect, and diff live agent sessions on a laptop, no GPU" width="820">
 </p>
 
+### Research
+
+**Re-feeding Is Not Replaying: Measuring Replay Noise in Counterfactual Token-Credit Estimation** (sole author, June 2026) - [PDF](https://nilsmatteson.com/refeed-drift.pdf) | [source + data](paper/refeed-drift/)
+
+Counterfactual token-credit methods rebuild model state by re-feeding the transcript as a fresh prompt; this paper measures what that costs on stock vLLM with a three-pass design (exact KV resume, replica noise floor, re-feed). Re-feeding moves credit estimates at low-margin decision tokens 14-28pp above the replica floor, threshold-based critical-token selection is materially affected, and vLLM's batch-invariant kernels eliminate the effect bit-exactly. Total compute: under $10. Every per-pivot record, run log, and the analysis script that emits each number are in [`benchmarks/`](benchmarks/) and [`paper/refeed-drift/`](paper/refeed-drift/).
+
 ### See it in 10 seconds — no GPU
 
 ```bash
