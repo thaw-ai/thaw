@@ -191,6 +191,7 @@ def _op_hydrate(state: _WorkerState, req: dict) -> dict:
         "kv_s": kv_s,
         "weights": _scrub(w_stats),
         "kv": _scrub(kv_stats),
+        "reset_degraded_count": _RESET_DEGRADED_COUNT,
     }
 
 
@@ -230,7 +231,13 @@ def _op_reset(state: _WorkerState, req: dict) -> dict:
     if state.llm is None:
         raise RuntimeError("reset called before engine boot")
     _reset_prefix_cache(state.llm)
-    return {"status": "ok"}
+    return {"status": "ok", "reset_degraded_count": _RESET_DEGRADED_COUNT}
+
+
+# Count of degraded-but-survivable reset attempts (one path failed, the
+# other succeeded). Surfaced in op responses so the parent can see a
+# worker whose reset machinery is rotting before it fails outright.
+_RESET_DEGRADED_COUNT = 0
 
 
 def _reset_prefix_cache(llm) -> None:
@@ -240,27 +247,59 @@ def _reset_prefix_cache(llm) -> None:
     the snapshot's block_ids. If a prior hydrate left entries around,
     the new snapshot's block_ids may overlap and the scheduler will
     serve stale tokens. Clearing before every hydrate is the cheap fix.
+
+    Failures here are NOT safely ignorable (issue #77): a skipped reset
+    means the scheduler can serve cached tokens from the *previous*
+    fork's conversation — in an RL rollout loop that is silently wrong
+    rollout data with no error anywhere. The two clearing mechanisms
+    run independently; if at least one succeeds we warn and continue,
+    and if both fail we raise so the hydrate fails loudly instead of
+    generating from stale cache.
     """
+    global _RESET_DEGRADED_COUNT
+    cleared = False
+    failures: list[str] = []
+
+    # Mechanism 1: clear the block pool's hash map directly. This is
+    # the version-sensitive path (reaches through vLLM internals), but
+    # it is also the precise thing the KV restore needs cleared.
     try:
         from thaw_vllm.kv_snapshot import _get_engine_core
 
         ec = _get_engine_core(llm)
         block_pool = ec.scheduler.kv_cache_manager.block_pool
-        if hasattr(block_pool, "cached_block_hash_to_block"):
-            block_pool.cached_block_hash_to_block.clear()
-        if hasattr(block_pool, "free_block_queue"):
-            # Best-effort: drop any blocks currently pinned as "cached"
-            # back into the free queue. vLLM exposes reset_prefix_cache
-            # on some versions; fall through if absent.
-            pass
-        reset_fn = getattr(llm, "reset_prefix_cache", None)
-        if callable(reset_fn):
+        block_pool.cached_block_hash_to_block.clear()
+        cleared = True
+    except Exception as e:  # noqa: BLE001 — recorded and re-raised below if fatal
+        failures.append(f"hash-map clear: {type(e).__name__}: {e}")
+
+    # Mechanism 2: vLLM's public reset_prefix_cache(), where available.
+    # Stable across versions that expose it, and a full reset is a
+    # superset of what we need.
+    reset_fn = getattr(llm, "reset_prefix_cache", None)
+    if callable(reset_fn):
+        try:
             reset_fn()
-    except Exception:
-        # Non-fatal: worst case the next hydrate starts with stale
-        # entries. restore_kv_cache overwrites by block_id so the
-        # tensors themselves are correct; only the hash map can stale.
-        pass
+            cleared = True
+        except Exception as e:  # noqa: BLE001 — recorded and re-raised below if fatal
+            failures.append(f"reset_prefix_cache(): {type(e).__name__}: {e}")
+    else:
+        failures.append("reset_prefix_cache(): not exposed by this vLLM version")
+
+    if not cleared:
+        raise RuntimeError(
+            "prefix-cache reset failed on every mechanism; refusing to "
+            "continue over stale cache state (the scheduler could serve "
+            "tokens from the previous fork's conversation): "
+            + "; ".join(failures)
+        )
+    if failures:
+        _RESET_DEGRADED_COUNT += 1
+        sys.stderr.write(
+            "thaw fork worker: prefix-cache reset degraded "
+            f"(count={_RESET_DEGRADED_COUNT}; continuing — one mechanism "
+            "succeeded): " + "; ".join(failures) + "\n"
+        )
 
 
 def _scrub(stats: Any) -> Any:
