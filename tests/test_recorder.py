@@ -194,6 +194,37 @@ def test_num_sampled_fallback_without_computed_counts():
     assert t.num_sampled("r") == 5
 
 
+def test_dummy_spec_excludes_suffixed_internal_ids():
+    """The bug E2 run #1 hit on the pod: vLLM V1's SchedulerOutput
+    carries '16-a0d22f60' while RequestOutput.request_id says '16'.
+    Exclusion must match across the suffix or the replay clones its
+    own target request."""
+    t = ShapeTrace()
+    t.note_request("16-a0d22f60", 44)
+    t.note_request("17-837d4dac", 132)
+    t.add_step({"16-a0d22f60": [44, 0], "17-837d4dac": [132, 0]}, 176)
+    t.add_step({"16-a0d22f60": [1, 44], "17-837d4dac": [1, 132]}, 2)
+
+    spec = t.dummy_spec(exclude={"16"})
+    assert [s["req_id"] for s in spec] == ["17-837d4dac"]
+    # And the exact-id form keeps working.
+    assert t.dummy_spec(exclude={"16-a0d22f60"}) == spec
+    # "1" must NOT match "16-..." — prefix requires the dash boundary.
+    assert len(t.dummy_spec(exclude={"1"})) == 2
+
+
+def test_signature_tags_target_across_suffixed_ids():
+    a = ShapeTrace()
+    a.add_step({"16-aaaa": [50, 0], "17-bbbb": [200, 0]}, 250)
+    b = ShapeTrace()
+    b.add_step({"30-cccc": [200, 0], "31-dddd": [50, 0]}, 250)
+    # Target "16" is the 50-token request in A; target "30" is the
+    # 200-token request in B — tagged signatures must differ.
+    assert shape_signature(a, target="16") != shape_signature(b, target="30")
+    # Matching slots: "16" (50 tokens) vs "31" (50 tokens) — equal.
+    assert shape_signature(a, target="16") == shape_signature(b, target="31")
+
+
 def test_dummy_spec_excludes_target_and_derives_lengths():
     t = ShapeTrace()
     t.note_request("target", 50)

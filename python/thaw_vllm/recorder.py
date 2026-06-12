@@ -44,7 +44,21 @@ import json
 import os
 from typing import Any, Optional
 
-__all__ = ["Recorder", "ShapeTrace", "shape_signature"]
+__all__ = ["Recorder", "ShapeTrace", "shape_signature", "req_id_matches"]
+
+
+def req_id_matches(trace_req_id: str, external_id: str) -> bool:
+    """Match an engine-internal request id against an external one.
+
+    vLLM V1 suffixes the user-visible request id internally
+    (``RequestOutput.request_id == "16"`` appears in SchedulerOutput as
+    ``"16-a0d22f60"``), so exact equality silently matches nothing —
+    which is how the E2 replay briefly cloned its own target request.
+    Prefix-with-dash matching covers both forms.
+    """
+    return trace_req_id == external_id or trace_req_id.startswith(
+        external_id + "-"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +150,7 @@ class ShapeTrace:
         exclude = exclude or set()
         spec = []
         for req_id in self.req_ids():
-            if req_id in exclude:
+            if any(req_id_matches(req_id, ext) for ext in exclude):
                 continue
             spec.append({
                 "req_id": req_id,
@@ -194,8 +208,8 @@ def shape_signature(trace: ShapeTrace, target: Optional[str] = None) -> list:
     for step in trace.steps:
         anon = []
         for req_id, (scheduled, computed) in step["reqs"].items():
-            tag = "T" if (target is not None and req_id == target) else ""
-            anon.append((scheduled, computed, tag))
+            tagged = target is not None and req_id_matches(req_id, target)
+            anon.append((scheduled, computed, "T" if tagged else ""))
         sig.append((sorted(anon), step["total"]))
     return sig
 
