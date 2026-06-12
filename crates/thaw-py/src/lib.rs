@@ -307,7 +307,17 @@ fn freeze_to_file_pipelined(
         // that goes through Python (vLLM ModelLoader, `thaw freeze` CLI,
         // `thaw serve`) lands here, so the file-native entry point is
         // the only correct default.
-        let stats = freeze_pipelined_to_file(&backend, &typed_requests, &config, Path::new(path))
+        //
+        // GIL: released for the duration of the pipeline. A 70B freeze
+        // runs for ~15s; holding the GIL that long blocks every other
+        // Python thread in the process — in a live vLLM engine that
+        // means the API server and scheduler threads stall (issue #73).
+        // Nothing inside the closure touches Python objects: the
+        // requests were already extracted into plain Rust types above.
+        let stats = py
+            .allow_threads(|| {
+                freeze_pipelined_to_file(&backend, &typed_requests, &config, Path::new(path))
+            })
             .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
 
         let dict = pyo3::types::PyDict::new_bound(py);
@@ -358,13 +368,20 @@ fn restore_from_file_pipelined(
             try_direct_io: direct_io,
         };
 
-        let stats = restore_pipelined(
-            &backend,
-            std::path::Path::new(path),
-            |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
-            &config,
-        )
-        .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
+        // GIL: released for the duration of the pipeline (issue #73) —
+        // a large restore is seconds of disk I/O + DMA during which
+        // other Python threads must keep running. The resolver closure
+        // only reads the plain-Rust `lookup` map.
+        let stats = py
+            .allow_threads(|| {
+                restore_pipelined(
+                    &backend,
+                    std::path::Path::new(path),
+                    |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
+                    &config,
+                )
+            })
+            .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
 
         let dict = pyo3::types::PyDict::new_bound(py);
         dict.set_item("regions_restored", stats.regions_restored)?;
@@ -410,9 +427,13 @@ fn restore_from_bytes_pipelined(
     chunk_size_mb: usize,
 ) -> PyResult<PyObject> {
     // SAFETY: PyBuffer<u8> guarantees the buffer is valid, contiguous,
-    // and lives as long as the PyBuffer handle. We hold the GIL (py)
-    // and don't release it during restore, so the buffer won't be
-    // invalidated. For mmap this points directly at the mapped pages.
+    // and lives as long as the PyBuffer handle, which we hold for the
+    // whole call. The buffer-protocol export also pins the underlying
+    // allocation on the Python side: while the view exists, an mmap
+    // cannot be closed and a bytearray cannot be resized (both raise
+    // BufferError). That guarantee does NOT depend on holding the GIL,
+    // which matters because the restore below releases it. For mmap
+    // this points directly at the mapped pages.
     let data_slice = unsafe {
         std::slice::from_raw_parts(data.buf_ptr() as *const u8, data.len_bytes())
     };
@@ -438,13 +459,22 @@ fn restore_from_bytes_pipelined(
         // call `restore_pipelined_from_bytes` unconditionally — the
         // new behavior is a strict superset (same fallback, plus the
         // fast path when the host supports it).
-        let stats = restore_pipelined_from_bytes_auto(
-            &backend,
-            data_slice,
-            |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
-            &config,
-        )
-        .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
+        //
+        // GIL: released for the duration (issue #73). Zero-copy
+        // registration alone is O(pages) — ~7s for 16 GB — and the
+        // DMA after it is seconds more; other Python threads must
+        // keep running. Buffer validity across the release is argued
+        // in the SAFETY comment above.
+        let stats = py
+            .allow_threads(|| {
+                restore_pipelined_from_bytes_auto(
+                    &backend,
+                    data_slice,
+                    |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
+                    &config,
+                )
+            })
+            .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
 
         let dict = pyo3::types::PyDict::new_bound(py);
         dict.set_item("regions_restored", stats.regions_restored)?;
@@ -518,8 +548,9 @@ fn restore_from_bytes_pipelined_zerocopy(
     mapping: Vec<(String, u32, u64, u64)>,
 ) -> PyResult<PyObject> {
     // SAFETY: see `restore_from_bytes_pipelined`. Same invariants: the
-    // PyBuffer keeps the underlying allocation alive, we hold the GIL
-    // for the whole call, and for mmap this points straight at the
+    // PyBuffer keeps the underlying allocation alive and export-pinned
+    // for the whole call (independent of the GIL, which the restore
+    // below releases), and for mmap this points straight at the
     // mapped pages (page-aligned, contiguous — exactly what
     // `cudaHostRegister` wants).
     let data_slice = unsafe {
@@ -543,13 +574,19 @@ fn restore_from_bytes_pipelined_zerocopy(
         // restore entry points.
         let config = PipelineConfig::default();
 
-        let stats = restore_pipelined_from_registered_bytes(
-            &backend,
-            data_slice,
-            |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
-            &config,
-        )
-        .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
+        // GIL: released for the duration (issue #73). This path runs
+        // `cudaHostRegister` (O(pages), seconds for large snapshots)
+        // plus the full DMA inside one call.
+        let stats = py
+            .allow_threads(|| {
+                restore_pipelined_from_registered_bytes(
+                    &backend,
+                    data_slice,
+                    |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
+                    &config,
+                )
+            })
+            .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
 
         let dict = pyo3::types::PyDict::new_bound(py);
         dict.set_item("regions_restored", stats.regions_restored)?;
@@ -621,26 +658,34 @@ pub struct PinnedMmap {
 impl PinnedMmap {
     /// Pin a Python buffer in place for DMA.
     #[new]
-    fn new(data: pyo3::buffer::PyBuffer<u8>) -> PyResult<Self> {
+    fn new(py: Python<'_>, data: pyo3::buffer::PyBuffer<u8>) -> PyResult<Self> {
         let ptr = data.buf_ptr() as *mut u8;
         let size = data.len_bytes();
 
         #[cfg(not(feature = "cuda"))]
         {
-            let _ = (ptr, size, data);
+            let _ = (py, ptr, size, data);
             Err(PyErr::from(ThawPyError::CudaUnavailable))
         }
 
         #[cfg(feature = "cuda")]
         {
             let backend = RealCuda::new();
+            // GIL: released across `cudaHostRegister` (issue #73) —
+            // pinning is O(pages), ~7s for 16 GB, and this constructor
+            // runs inside live `thaw serve` processes at slot warm-up.
+            // The pointer crosses the closure as a `u64` because raw
+            // pointers are not `Send`; the address itself is just data.
+            let ptr_addr = ptr as u64;
             // SAFETY: the PyBuffer keeps the Python mmap (or other
-            // buffer-protocol object) alive for the lifetime of the
-            // returned PinnedMmap. The pages are contiguous by the
-            // buffer protocol's contract. If `ptr` is not page-aligned
-            // or the range cannot be pinned, `cudaHostRegister`
-            // returns an error which we propagate.
-            let registration = unsafe { backend.host_register(ptr, size) }
+            // buffer-protocol object) alive and export-pinned for the
+            // lifetime of the returned PinnedMmap — the buffer-protocol
+            // view guarantee holds with or without the GIL. The pages
+            // are contiguous by the buffer protocol's contract. If
+            // `ptr` is not page-aligned or the range cannot be pinned,
+            // `cudaHostRegister` returns an error which we propagate.
+            let registration = py
+                .allow_threads(|| unsafe { backend.host_register(ptr_addr as *mut u8, size) })
                 .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
             Ok(PinnedMmap {
                 _registration: Some(registration),
@@ -697,20 +742,29 @@ fn restore_from_pinned_mmap(
         let lookup = build_restore_map(mapping)?;
         let config = PipelineConfig::default();
 
-        // SAFETY: `pinned` holds the PyBuffer (keeps the mmap alive)
-        // and the HostRegistration (keeps the pages pinned), both for
-        // the duration of this call because we borrow `&PinnedMmap`.
+        // SAFETY: `pinned` holds the PyBuffer (keeps the mmap alive
+        // and export-pinned, GIL or not) and the HostRegistration
+        // (keeps the pages pinned), both for the duration of this
+        // call because we borrow `&PinnedMmap`.
         let data_slice = unsafe {
             std::slice::from_raw_parts(pinned.ptr as *const u8, pinned.size)
         };
 
-        let stats = restore_pipelined_from_pre_registered_bytes(
-            &backend,
-            data_slice,
-            |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
-            &config,
-        )
-        .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
+        // GIL: released for the DMA (issue #73). This is the hot-swap
+        // path inside a live `thaw serve` process — exactly the place
+        // where blocking every Python thread for the transfer would
+        // stall the API server. Only `data_slice` (a plain `&[u8]`)
+        // crosses the boundary, not the unsendable `PinnedMmap`.
+        let stats = py
+            .allow_threads(|| {
+                restore_pipelined_from_pre_registered_bytes(
+                    &backend,
+                    data_slice,
+                    |kind, logical_id| lookup.get(&(kind, logical_id)).copied(),
+                    &config,
+                )
+            })
+            .map_err(|e| ThawPyError::Runtime(format!("{e}")))?;
 
         let dict = pyo3::types::PyDict::new_bound(py);
         dict.set_item("regions_restored", stats.regions_restored)?;
