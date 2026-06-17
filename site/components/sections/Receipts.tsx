@@ -16,16 +16,28 @@ const rows = [
     href: `${GH}/2026-04-20_h100_fork_pool_rl.json`,
   },
   {
+    workload: "Weights restore",
+    hardware: "2× H100 · 72B · TP=2",
+    result: "145 GB in 5.0s · 28.8 GB/s",
+    href: `${GH}/2026-06-17_h100x2_restore_audit.json`,
+  },
+  {
+    workload: "Weights restore",
+    hardware: "H100 · 32B · TP=1",
+    result: "65 GB in 4.5s · 14.6 GB/s",
+    href: `${GH}/2026-06-17_h100x2_restore_audit.json`,
+  },
+  {
+    workload: "Weights freeze",
+    hardware: "2× H100 · 72B · TP=2",
+    result: "145 GB in 19.2s · 7.6 GB/s",
+    href: `${GH}/2026-06-17_h100x2_restore_audit.json`,
+  },
+  {
     workload: "Sleep / wake snapshot",
     hardware: "H100 SXM · 8B · TP=1",
     result: "sleep 3.4s · wake 11.1s · bit-identical",
     href: `${GH}/2026-04-22_rfc/sleep_mode_8b_tp1.json`,
-  },
-  {
-    workload: "Sleep / wake snapshot",
-    hardware: "2× H100 SXM · 70B · TP=2",
-    result: "141 GB · sleep 16.1s · wake 53.6s",
-    href: `${GH}/2026-04-22_rfc/sleep_mode_70b_tp2.json`,
   },
 ];
 
