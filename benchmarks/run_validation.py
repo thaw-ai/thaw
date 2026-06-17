@@ -221,6 +221,21 @@ def summarize_model(runs: list[dict], cov_threshold: float) -> dict:
     speedups = [float(s) for s in speedups if isinstance(s, (int, float))]
     summary["metrics"]["speedup_cold_nvme"] = stats_of(speedups)
 
+    # Which restore path actually ran (rust_pipelined = O_DIRECT pread vs
+    # rust_pipelined_mmap = mmap fallback). The two differ ~3x, so a receipt
+    # is ambiguous without this. Flag if a run silently took the slow path.
+    backends = []
+    for r in runs:
+        node = r.get("phases", {}).get("thaw_cold_nvme")
+        if isinstance(node, dict) and node.get("backend"):
+            backends.append(node["backend"])
+    summary["cold_restore_backends"] = sorted(set(backends))
+    if any("mmap" in b for b in backends):
+        summary["flags"].append(
+            "cold restore used the mmap path on >=1 run (slower than O_DIRECT "
+            "pread) — confirm cascade ordering: " + ", ".join(sorted(set(backends)))
+        )
+
     for phase, field, label in METRIC_KEYS:
         vals = [extract_metric(r, phase, field) for r in runs]
         vals = [v for v in vals if v is not None]
