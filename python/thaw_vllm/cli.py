@@ -339,9 +339,11 @@ def cmd_rewind(args):
             print(rewind.diff_rollouts(args.a, args.b))
         elif args.rewind_cmd == "pivot":
             print(rewind.pivot_rollouts(args.root))
+        elif args.rewind_cmd == "drift":
+            print(rewind.drift_report(args.results))
         else:
             print(
-                "[thaw] usage: thaw rewind {inspect|diff|pivot} ...",
+                "[thaw] usage: thaw rewind {inspect|diff|pivot|drift} ...",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -431,6 +433,13 @@ def main():
         "pivot", help="Across N rollouts: find the fork point + rank by logprob"
     )
     r_pivot.add_argument("root", help="Folder containing rollout subdirs")
+    r_drift = rsub.add_parser(
+        "drift",
+        help="Re-feed vs exact-KV credit-sign drift from a drift-ablation receipt",
+    )
+    r_drift.add_argument(
+        "results", help="A drift-ablation results.json, or a folder of them"
+    )
 
     args = parser.parse_args()
     if args.command is None:
