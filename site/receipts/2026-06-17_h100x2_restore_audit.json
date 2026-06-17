@@ -1,5 +1,5 @@
 {
-  "experiment": "freeze-restore throughput audit + CRC/cascade bottleneck isolation",
+  "experiment": "freeze/restore throughput audit — fast-path scaling + cascade ordering",
   "date": "2026-06-17",
   "hardware": {
     "gpu": "NVIDIA H100 80GB HBM3",
@@ -9,43 +9,46 @@
     "vllm": "0.23.0",
     "thaw_native": "0.3.2 (PyPI wheel)",
     "thaw_python": "repo HEAD + perf/restore-madv-sequential",
-    "driver": "580.126.09"
+    "local_nvme_throughput_mb_s": 13701
   },
   "models": "Qwen2.5-7B / 32B / 72B Instruct (fp16, ungated)",
-  "notes": "All outputs verified coherent / bit-consistent. Snapshots written to the 500GB container overlay (the /workspace network volume has a 20GB quota). gpu_memory_utilization 0.90-0.92, max_model_len 2048-4096, enforce_eager.",
 
-  "freeze_gb_s": {
-    "qwen7b_tp1_verifyON":  0.55,
-    "qwen7b_tp1_verifyOFF": 4.34,
-    "qwen32b_tp1_verifyOFF": 3.86,
-    "qwen72b_tp2_verifyOFF_aggregate": 7.59
+  "_correction_note": "An earlier version of this receipt claimed a ~14x 'CRC verify' restore win and ~8x freeze win. That was WRONG: the slow runs wrote/read the snapshot on /workspace (a RunPod network FS with a 20GB quota), the fast runs used /root (local NVMe). Two variables changed at once. The freeze half is provably NOT CRC — freeze never reads THAW_VERIFY (only restore-verify does, pipeline.rs:400/484; freeze CRC at accumulate_freeze_crcs is unconditional). The restore half is confounded with storage. CRC's real cost is UNMEASURED and needs a clean retest (verify on vs off, same local disk). Findings below are the clean ones (single variable changed).",
+
+  "clean_findings": {
+    "fast_path_scaling": {
+      "note": "pread path (rust_pipelined), THAW_VERIFY unset, snapshot on local NVMe (/root). Per-GPU restore is flat across model size; TP=2 doubles aggregate with no contention on this pod.",
+      "qwen7b_tp1_gb_s": 12.56,
+      "qwen32b_tp1_gb_s": 14.62,
+      "qwen32b_tp1_restore_s": 4.49,
+      "qwen72b_tp2_agg_gb_s": 28.81,
+      "qwen72b_tp2_per_rank_gb_s": [14.83, 14.47],
+      "qwen72b_tp2_restore_s": 5.05,
+      "qwen72b_tp2_total_gb": 145.42,
+      "headline": "a 72B (145GB) model restores from a thaw file in ~5.0s"
+    },
+    "cascade_ordering": {
+      "note": "Same model (32B), same disk (/root), same verify setting — only the restore path differs. The mmap-first cascade used by restore_model_tp / the TP=1 loader is far slower than O_DIRECT pread for a cold single-GPU restore.",
+      "qwen32b_mmap_gb_s": 2.09,
+      "qwen32b_pread_gb_s": 14.62,
+      "ratio": "7x faster on pread"
+    },
+    "freeze_fast_path": {
+      "note": "verify unset, local NVMe.",
+      "qwen32b_tp1_gb_s": 3.86,
+      "qwen72b_tp2_agg_gb_s": 7.59,
+      "qwen72b_tp2_gb": 145.42,
+      "qwen72b_tp2_elapsed_s": 19.16
+    },
+    "pcie_h2d_prestaged_ram_gb_s": 51.87
   },
-  "freeze_detail": {
-    "qwen72b_tp2": {"gb": 145.42, "elapsed_s": 19.16, "backend": "rust_pipelined", "rank_files": 2}
-  },
 
-  "restore_gb_s": {
-    "qwen7b_tp1_pread_verifyON":  {"gb_s": 0.88, "restore_s": 17.4, "backend": "rust_pipelined", "note": "default one-shot path; CRC on critical path"},
-    "qwen7b_tp1_pread_verifyOFF": {"gb_s": 12.56, "restore_s": 1.2, "backend": "rust_pipelined"},
-    "qwen32b_tp1_mmap_verifyOFF": {"gb_s": 2.09, "restore_s": 33.3, "backend": "rust_pipelined_mmap", "note": "restore_model_tp cascade tries mmap first; cold = page-fault bound"},
-    "qwen32b_tp1_pread_verifyOFF": {"gb_s": 14.62, "restore_s": 4.49, "backend": "rust_pipelined"},
-    "qwen72b_tp2_pread_verifyOFF": {"agg_gb_s": 28.81, "per_rank_gb_s": [14.83, 14.47], "restore_s": 5.05, "total_gb": 145.42, "note": "145GB model restored in ~5s; per-GPU rate matches 32B, TP=2 doubles aggregate, no NVMe contention on this pod"}
-  },
+  "deployment_gotcha": "Do NOT put snapshots on a network/quota volume. On /workspace (RunPod network FS) the same 7B restore measured 0.88 GB/s vs 12.56 GB/s on /root (local NVMe). The slow number was the filesystem, not thaw.",
 
-  "dma_h2d_gb_s_prestaged_ram": {
-    "qwen7b_verifyOFF": 51.87,
-    "note": "PCIe Gen5 H2D from pinned-registered RAM, near line rate"
-  },
+  "shipped_fix": "loader.py TP=1 restore cascade now prefers O_DIRECT pread over mmap-first (TP>1 keeps mmap-first for NVMe contention). Justified by cascade_ordering above + theory + prior ordering.",
 
-  "findings": [
-    "CRC verification (THAW_VERIFY) sits on the freeze/restore critical path single-threaded, capping throughput at ~0.9 GB/s. Disabling it gives 14.3x faster restore (0.88->12.56) and 7.9x faster freeze (0.55->4.34), still bit-consistent. The TP>1 path already sets THAW_VERIFY=0; the TP=1 / one-shot path does not, so default single-GPU users silently eat the tax.",
-    "restore_model_tp's cascade tries the mmap (restore_model_from_ram) path first, which is correct for TP>1 NVMe contention but ~7x slower than O_DIRECT pread for cold single-GPU loads (2.09 vs 14.62 GB/s at 32B). TP=1 should prefer pread.",
-    "On the fast path (pread + verify off), per-GPU restore is a steady ~12-15 GB/s from 7B through 72B; it does not degrade with model size. TP=2 doubles aggregate to 28.8 GB/s. A 72B (145GB) model restores in ~5s.",
-    "The 'Nx vs normal load' multiplier is baseline-dependent (cold-download normal load 133s vs warm 12.7s for 7B); GB/s is the reproducible metric, the multiplier is not."
-  ],
-
-  "implied_fixes": [
-    "Move CRC off the restore/freeze critical path (verify async or truly parallel), or default THAW_VERIFY=0 for one-shot loads as TP>1 already does.",
-    "Make the TP=1 restore cascade prefer the O_DIRECT pread path over mmap-first."
+  "open_questions": [
+    "CRC verify cost on the restore critical path — unmeasured; retest verify on vs off with the snapshot on the same local NVMe.",
+    "mmap-vs-pread ordering is one pod / one NVMe class — re-validate on other storage (slower NVMe, networked) before treating pread-first as universal."
   ]
 }
