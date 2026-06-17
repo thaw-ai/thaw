@@ -1,0 +1,51 @@
+{
+  "experiment": "freeze-restore throughput audit + CRC/cascade bottleneck isolation",
+  "date": "2026-06-17",
+  "hardware": {
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "gpu_count": 2,
+    "cloud": "RunPod secure (US-NE-1)",
+    "torch": "2.11.0+cu130",
+    "vllm": "0.23.0",
+    "thaw_native": "0.3.2 (PyPI wheel)",
+    "thaw_python": "repo HEAD + perf/restore-madv-sequential",
+    "driver": "580.126.09"
+  },
+  "models": "Qwen2.5-7B / 32B / 72B Instruct (fp16, ungated)",
+  "notes": "All outputs verified coherent / bit-consistent. Snapshots written to the 500GB container overlay (the /workspace network volume has a 20GB quota). gpu_memory_utilization 0.90-0.92, max_model_len 2048-4096, enforce_eager.",
+
+  "freeze_gb_s": {
+    "qwen7b_tp1_verifyON":  0.55,
+    "qwen7b_tp1_verifyOFF": 4.34,
+    "qwen32b_tp1_verifyOFF": 3.86,
+    "qwen72b_tp2_verifyOFF_aggregate": 7.59
+  },
+  "freeze_detail": {
+    "qwen72b_tp2": {"gb": 145.42, "elapsed_s": 19.16, "backend": "rust_pipelined", "rank_files": 2}
+  },
+
+  "restore_gb_s": {
+    "qwen7b_tp1_pread_verifyON":  {"gb_s": 0.88, "restore_s": 17.4, "backend": "rust_pipelined", "note": "default one-shot path; CRC on critical path"},
+    "qwen7b_tp1_pread_verifyOFF": {"gb_s": 12.56, "restore_s": 1.2, "backend": "rust_pipelined"},
+    "qwen32b_tp1_mmap_verifyOFF": {"gb_s": 2.09, "restore_s": 33.3, "backend": "rust_pipelined_mmap", "note": "restore_model_tp cascade tries mmap first; cold = page-fault bound"},
+    "qwen32b_tp1_pread_verifyOFF": {"gb_s": 14.62, "restore_s": 4.49, "backend": "rust_pipelined"},
+    "qwen72b_tp2_pread_verifyOFF": {"agg_gb_s": 28.81, "per_rank_gb_s": [14.83, 14.47], "restore_s": 5.05, "total_gb": 145.42, "note": "145GB model restored in ~5s; per-GPU rate matches 32B, TP=2 doubles aggregate, no NVMe contention on this pod"}
+  },
+
+  "dma_h2d_gb_s_prestaged_ram": {
+    "qwen7b_verifyOFF": 51.87,
+    "note": "PCIe Gen5 H2D from pinned-registered RAM, near line rate"
+  },
+
+  "findings": [
+    "CRC verification (THAW_VERIFY) sits on the freeze/restore critical path single-threaded, capping throughput at ~0.9 GB/s. Disabling it gives 14.3x faster restore (0.88->12.56) and 7.9x faster freeze (0.55->4.34), still bit-consistent. The TP>1 path already sets THAW_VERIFY=0; the TP=1 / one-shot path does not, so default single-GPU users silently eat the tax.",
+    "restore_model_tp's cascade tries the mmap (restore_model_from_ram) path first, which is correct for TP>1 NVMe contention but ~7x slower than O_DIRECT pread for cold single-GPU loads (2.09 vs 14.62 GB/s at 32B). TP=1 should prefer pread.",
+    "On the fast path (pread + verify off), per-GPU restore is a steady ~12-15 GB/s from 7B through 72B; it does not degrade with model size. TP=2 doubles aggregate to 28.8 GB/s. A 72B (145GB) model restores in ~5s.",
+    "The 'Nx vs normal load' multiplier is baseline-dependent (cold-download normal load 133s vs warm 12.7s for 7B); GB/s is the reproducible metric, the multiplier is not."
+  ],
+
+  "implied_fixes": [
+    "Move CRC off the restore/freeze critical path (verify async or truly parallel), or default THAW_VERIFY=0 for one-shot loads as TP>1 already does.",
+    "Make the TP=1 restore cascade prefer the O_DIRECT pread path over mmap-first."
+  ]
+}
