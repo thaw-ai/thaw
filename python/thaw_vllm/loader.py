@@ -100,25 +100,40 @@ class ThawModelLoader(BaseModelLoader):
                 f"--tensor-parallel {tp_size}"
             )
 
-        # Try RAM path first (pre-stage file into memory, then DMA — avoids
-        # slow pread-to-pinned-memory kernel path, ~6x faster on most systems).
-        # Fall back to file-based pipelined, then pure Python. Every fallback
-        # is logged; THAW_STRICT=1 re-raises instead of degrading silently.
-        try:
-            stats = restore_model_from_ram(model, snapshot_path)
-        except Exception as e_ram:
-            _fallback_warning("ThawModelLoader.restore_model_from_ram", e_ram,
-                              dst="restore_model_pipelined")
-            if _strict_mode():
-                raise
+        # Restore-path ordering is TP-dependent.
+        #
+        # Single-GPU (tp_size == 1): O_DIRECT pread is the fast path. Measured
+        # 14.6 vs 2.1 GB/s mmap for a cold 32B restore on H100 + local NVMe
+        # (site/receipts/2026-06-17_h100x2_restore_audit.json), consistent with
+        # theory (one sequential O_DIRECT stream beats per-4K-page mmap faults)
+        # and with the original pre-2026-04 ordering. One pod, one NVMe class so
+        # far — re-validate on other storage before treating as universal.
+        #
+        # Multi-GPU (tp_size > 1): keep the mmap (RAM) path first. Two ranks
+        # issuing concurrent O_DIRECT preads contend on one NVMe controller; the
+        # shared page cache lets the ranks read in parallel instead.
+        if tp_size > 1:
+            order = [restore_model_from_ram, restore_model_pipelined, restore_model]
+        else:
+            order = [restore_model_pipelined, restore_model_from_ram, restore_model]
+
+        # Walk the cascade; every fallback is logged. THAW_STRICT=1 re-raises
+        # instead of degrading silently.
+        stats = None
+        last_exc: Exception | None = None
+        for i, fn in enumerate(order):
             try:
-                stats = restore_model_pipelined(model, snapshot_path)
-            except Exception as e_pipe:
-                _fallback_warning("ThawModelLoader.restore_model_pipelined", e_pipe,
-                                  dst="restore_model (pure python)")
+                stats = fn(model, snapshot_path)
+                break
+            except Exception as exc:
+                last_exc = exc
+                if i + 1 < len(order):
+                    _fallback_warning(f"ThawModelLoader.{fn.__name__}", exc,
+                                      dst=order[i + 1].__name__)
                 if _strict_mode():
                     raise
-                stats = restore_model(model, snapshot_path)
+        if stats is None:
+            raise last_exc  # type: ignore[misc]
 
         size_gb = stats['total_bytes'] / 1e9
         rank_info = f" (rank {tp_rank}/{tp_size})" if tp_size > 1 else ""

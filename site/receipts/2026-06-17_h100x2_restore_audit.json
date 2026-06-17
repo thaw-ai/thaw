@@ -1,0 +1,54 @@
+{
+  "experiment": "freeze/restore throughput audit — fast-path scaling + cascade ordering",
+  "date": "2026-06-17",
+  "hardware": {
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "gpu_count": 2,
+    "cloud": "RunPod secure (US-NE-1)",
+    "torch": "2.11.0+cu130",
+    "vllm": "0.23.0",
+    "thaw_native": "0.3.2 (PyPI wheel)",
+    "thaw_python": "repo HEAD + perf/restore-madv-sequential",
+    "local_nvme_throughput_mb_s": 13701
+  },
+  "models": "Qwen2.5-7B / 32B / 72B Instruct (fp16, ungated)",
+
+  "_correction_note": "An earlier version of this receipt claimed a ~14x 'CRC verify' restore win and ~8x freeze win. That was WRONG: the slow runs wrote/read the snapshot on /workspace (a RunPod network FS with a 20GB quota), the fast runs used /root (local NVMe). Two variables changed at once. The freeze half is provably NOT CRC — freeze never reads THAW_VERIFY (only restore-verify does, pipeline.rs:400/484; freeze CRC at accumulate_freeze_crcs is unconditional). The restore half is confounded with storage. CRC's real cost is UNMEASURED and needs a clean retest (verify on vs off, same local disk). Findings below are the clean ones (single variable changed).",
+
+  "clean_findings": {
+    "fast_path_scaling": {
+      "note": "pread path (rust_pipelined), THAW_VERIFY unset, snapshot on local NVMe (/root). Per-GPU restore is flat across model size; TP=2 doubles aggregate with no contention on this pod.",
+      "qwen7b_tp1_gb_s": 12.56,
+      "qwen32b_tp1_gb_s": 14.62,
+      "qwen32b_tp1_restore_s": 4.49,
+      "qwen72b_tp2_agg_gb_s": 28.81,
+      "qwen72b_tp2_per_rank_gb_s": [14.83, 14.47],
+      "qwen72b_tp2_restore_s": 5.05,
+      "qwen72b_tp2_total_gb": 145.42,
+      "headline": "a 72B (145GB) model restores from a thaw file in ~5.0s"
+    },
+    "cascade_ordering": {
+      "note": "Same model (32B), same disk (/root), same verify setting — only the restore path differs. The mmap-first cascade used by restore_model_tp / the TP=1 loader is far slower than O_DIRECT pread for a cold single-GPU restore.",
+      "qwen32b_mmap_gb_s": 2.09,
+      "qwen32b_pread_gb_s": 14.62,
+      "ratio": "7x faster on pread"
+    },
+    "freeze_fast_path": {
+      "note": "verify unset, local NVMe.",
+      "qwen32b_tp1_gb_s": 3.86,
+      "qwen72b_tp2_agg_gb_s": 7.59,
+      "qwen72b_tp2_gb": 145.42,
+      "qwen72b_tp2_elapsed_s": 19.16
+    },
+    "pcie_h2d_prestaged_ram_gb_s": 51.87
+  },
+
+  "deployment_gotcha": "Do NOT put snapshots on a network/quota volume. On /workspace (RunPod network FS) the same 7B restore measured 0.88 GB/s vs 12.56 GB/s on /root (local NVMe). The slow number was the filesystem, not thaw.",
+
+  "shipped_fix": "loader.py TP=1 restore cascade now prefers O_DIRECT pread over mmap-first (TP>1 keeps mmap-first for NVMe contention). Justified by cascade_ordering above + theory + prior ordering.",
+
+  "open_questions": [
+    "CRC verify cost on the restore critical path — unmeasured; retest verify on vs off with the snapshot on the same local NVMe.",
+    "mmap-vs-pread ordering is one pod / one NVMe class — re-validate on other storage (slower NVMe, networked) before treating pread-first as universal."
+  ]
+}
