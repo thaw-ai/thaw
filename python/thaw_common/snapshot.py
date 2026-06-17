@@ -291,6 +291,7 @@ def restore_model_from_ram(
             import ctypes
             import ctypes.util
             MADV_HUGEPAGE = 14
+            MADV_SEQUENTIAL = 2
             MADV_WILLNEED = 3
             # NOTE: we deliberately DO NOT pass MAP_POPULATE. On a 16 GB
             # snapshot that's already in the page cache, MAP_POPULATE
@@ -316,6 +317,17 @@ def restore_model_from_ram(
                 if libc.madvise(addr, file_size, MADV_HUGEPAGE) != 0:
                     _log.debug(
                         "madvise(MADV_HUGEPAGE) unavailable (errno=%d)",
+                        ctypes.get_errno(),
+                    )
+                # SEQUENTIAL: we scan the mapping front-to-back exactly once
+                # (chunked memcpy → DMA). This doubles the kernel's readahead
+                # window and lets it drop pages behind us, so a cold file
+                # streams from NVMe at the device's sequential rate instead of
+                # faulting 4K at a time. Set before WILLNEED so the readahead
+                # WILLNEED kicks off uses the larger sequential window.
+                if libc.madvise(addr, file_size, MADV_SEQUENTIAL) != 0:
+                    _log.debug(
+                        "madvise(MADV_SEQUENTIAL) unavailable (errno=%d)",
                         ctypes.get_errno(),
                     )
                 # WILLNEED tells the kernel to kick off async read-ahead
