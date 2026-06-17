@@ -186,12 +186,13 @@ class AgentfsTest(unittest.TestCase):
         lines = out.splitlines()
         trunk_line = next(line for line in lines if "trunk" in line)
         branch_line = next(line for line in lines if "branch-a" in line)
-        # child is nested one level deeper than its parent
-        trunk_indent = len(trunk_line) - len(trunk_line.lstrip(" "))
-        branch_indent = len(branch_line) - len(branch_line.lstrip(" "))
-        self.assertGreater(branch_indent, trunk_indent)
         # parent rendered before child
         self.assertLess(lines.index(trunk_line), lines.index(branch_line))
+        # trunk is a root: node glyph at column 0, no connector
+        self.assertEqual(trunk_line.index("●"), 0)
+        # branch-a hangs under trunk: a connector is drawn and the glyph is indented
+        self.assertTrue(("├" in branch_line) or ("└" in branch_line))
+        self.assertGreater(branch_line.index("●"), trunk_line.index("●"))
 
 
 if __name__ == "__main__":

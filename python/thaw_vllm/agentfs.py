@@ -66,6 +66,46 @@ def _fmt_time(unix: float) -> str:
         return "unknown"
 
 
+def _fmt_age(unix: float) -> str:
+    """Relative age, git-style ('3m ago', '2h ago'). Falls back to 'unknown'."""
+    if not unix:
+        return "unknown"
+    try:
+        delta = datetime.now(timezone.utc).timestamp() - float(unix)
+    except (TypeError, ValueError, OSError):
+        return "unknown"
+    if delta < 1:
+        return "just now"
+    for secs, unit in (
+        (31_536_000, "y"),
+        (2_592_000, "mo"),
+        (86_400, "d"),
+        (3_600, "h"),
+        (60, "m"),
+    ):
+        if delta >= secs:
+            return f"{int(delta // secs)}{unit} ago"
+    return f"{int(delta)}s ago"
+
+
+def _bar(filled: int, total: int, width: int, fill: str = "█", empty: str = "░") -> str:
+    """A fixed-width unicode bar; ``filled``/``total`` of it is solid."""
+    if total <= 0 or width <= 0:
+        return empty * max(width, 0)
+    f = max(0, min(width, round(width * filled / total)))
+    return fill * f + empty * (width - f)
+
+
+def _vis_len(s: str) -> int:
+    """Display width: box-drawing + block glyphs we use are all width-1."""
+    return len(s)
+
+
+def _pad(s: str, width: int) -> str:
+    pad = width - _vis_len(s)
+    return s + " " * pad if pad > 0 else s
+
+
 # ---------------------------------------------------------------------------
 # reading
 # ---------------------------------------------------------------------------
@@ -219,24 +259,46 @@ def diff_handles(path_a: str, path_b: str) -> str:
     def row(label, value):
         lines.append(f"  {label:<12} {value}")
 
+    # shared KV via block-hash set intersection. Prefix-cache block hashes are
+    # chained over token content, so the shared *set* is the common prefix.
+    ha, hb = set(a["block_hashes"]), set(b["block_hashes"])
+    shared = len(ha & hb) if (ha and hb) else 0
+    a_only = len(ha - hb)
+    b_only = len(hb - ha)
+    bsize = a["block_size"] or b["block_size"]
+
+    # visual shared-prefix bar: shared region is solid (same on both sessions),
+    # each side's divergent tail is shaded. Aligned to one blocks-per-char scale.
+    if ha and hb:
+        span = shared + max(a_only, b_only)
+        bar_w = 30
+        scale = bar_w / span if span else 0
+        sc = round(shared * scale)
+        at = round(a_only * scale)
+        bt = round(b_only * scale)
+        bar_a = "█" * sc + "▓" * at
+        bar_b = "█" * sc + "▓" * bt
+        full = max(_vis_len(bar_a), _vis_len(bar_b))
+        lines.append(f"  shared context   (█ shared · ▓ diverged)")
+        lines.append(f"    A  {_pad(bar_a, full)}   {_fmt_int(shared)} shared · +{_fmt_int(a_only)}")
+        lines.append(f"    B  {_pad(bar_b, full)}   {_fmt_int(shared)} shared · +{_fmt_int(b_only)}")
+        if sc < full:
+            caret = " " * sc + "↑"
+            tok = f"  (~{_fmt_int(shared * bsize)} tokens shared)" if bsize else ""
+            lines.append(f"    {' ' * 3}{caret} diverge at block {_fmt_int(shared)}{tok}")
+        lines.append("")
+
     # model
     if a["model_id"] == b["model_id"]:
         row("model", f"same  ({a['model_id']})")
     else:
         row("model", f"DIFFER  A={a['model_id']}  B={b['model_id']}")
 
-    # shared KV via block-hash set intersection
-    ha, hb = set(a["block_hashes"]), set(b["block_hashes"])
     if ha and hb:
-        shared = len(ha & hb)
         smaller = min(len(ha), len(hb))
-        bsize = a["block_size"] or b["block_size"]
         tok = f"  (~{_fmt_int(shared * bsize)} tokens)" if bsize else ""
         row("shared kv", f"{_fmt_int(shared)}/{_fmt_int(smaller)} blocks identical{tok}")
-        row(
-            "unique",
-            f"A +{_fmt_int(len(ha - hb))} blocks · B +{_fmt_int(len(hb - ha))} blocks",
-        )
+        row("unique", f"A +{_fmt_int(a_only)} blocks · B +{_fmt_int(b_only)} blocks")
     else:
         row("shared kv", "unavailable (one or both handles carry no KV metadata)")
 
@@ -338,22 +400,46 @@ def log_handles(root: str) -> str:
             roots.append(h)
     roots.sort(key=lambda h: h["created_at"] or 0)
 
-    lines = [f"thaw log  {root}"]
+    n = len(handles)
+    plural = "session" if n == 1 else "sessions"
 
-    def render(h, depth):
+    def _model_short(m) -> str:
+        return m.rsplit("/", 1)[-1] if isinstance(m, str) else str(m)
+
+    models = {h["model_id"] for h in handles}
+    one_model = _model_short(next(iter(models))) if len(models) == 1 else None
+
+    header = f"thaw log  {root}  ({n} {plural}"
+    header += f", {one_model})" if one_model else ")"
+    lines = [header, ""]
+
+    def render(h, graph_prefix: str, connector: str, child_prefix: str) -> None:
         short = (h["handle_id"] or "")[:8] or "--------"
         name = h["label"] or h["name"]
-        indent = "  " + "  " * depth
-        lines.append(
-            f"{indent}* {name}  ({short})  {h['model_id']}  "
-            f"~{_fmt_int(h['prefix_tokens'])} tok  {_fmt_time(h['created_at'])}"
-        )
+        graph = f"{graph_prefix}{connector}● {name}"
+        meta = f"{short}"
+        if not one_model:
+            meta += f"  {_model_short(h['model_id'])}"
+        meta += f"  ~{_fmt_int(h['prefix_tokens'])} tok"
+        if h["num_kv_blocks"]:
+            meta += f"  {_fmt_int(h['num_kv_blocks'])} blk"
+        meta += f"  {_fmt_age(h['created_at'])}"
+        lines.append(f"{_pad(graph, 42)}  {meta}")
+
         kids = sorted(
             children.get(h["handle_id"], []), key=lambda c: c["created_at"] or 0
         )
-        for k in kids:
-            render(k, depth + 1)
+        for i, k in enumerate(kids):
+            last = i == len(kids) - 1
+            render(
+                k,
+                child_prefix,
+                "└─ " if last else "├─ ",
+                child_prefix + ("   " if last else "│  "),
+            )
 
-    for r in roots:
-        render(r, 0)
+    for i, r in enumerate(roots):
+        if i:
+            lines.append("│")  # separate distinct lineages
+        render(r, "", "", "")
     return "\n".join(lines)
