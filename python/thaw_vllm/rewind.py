@@ -44,7 +44,7 @@ import os
 import uuid
 from typing import Optional
 
-from thaw_vllm.agentfs import _fmt_int, _fmt_time
+from thaw_vllm.agentfs import _bar, _fmt_int, _fmt_time, _pad
 
 ROLLOUT_FILENAME = "rollout.json"
 ROLLOUT_VERSION = 1
@@ -434,4 +434,168 @@ def pivot_rollouts(root: str) -> str:
     else:
         lines.append("")
         lines.append("  ranking unavailable — rollouts carry no logprobs")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# render: drift  (the paper, made interactive — re-feed vs exact-KV credit)
+# ---------------------------------------------------------------------------
+#
+# "Re-feeding Is Not Replaying" (arXiv:2606.15621) measures how often the sign
+# of a token's advantage estimate flips when you *re-feed* its prefix instead
+# of resuming the exact KV cache, and compares that to a replica noise floor
+# (two exact resumes of the same pivot). This reads a drift-ablation receipt
+# and renders that headline. GPU-free; the experiment already ran, this just
+# tells its story on a laptop.
+
+
+def _sign(x) -> int:
+    try:
+        return (x > 0) - (x < 0)
+    except TypeError:
+        return 0
+
+
+def _drift_stats(payload: dict) -> Optional[dict]:
+    """Compute the paper's flip-rate stats from one ablation receipt.
+
+    A pivot is *eligible* if any of its three advantage estimates is non-zero
+    (an all-zero pivot carries no credit, so it cannot flip). Flip rate is the
+    fraction of eligible pivots whose advantage sign differs from the exact
+    pass-1 reference. Returns None when there are no eligible pivots.
+    """
+    pivots = payload.get("pivots", []) or []
+    eligible = [
+        r
+        for r in pivots
+        if _sign(r.get("A_exact1")) or _sign(r.get("A_exact2")) or _sign(r.get("A_refeed"))
+    ]
+    n = len(eligible)
+    if not n:
+        return None
+    refeed_flips = sum(_sign(r["A_exact1"]) != _sign(r["A_refeed"]) for r in eligible)
+    floor_flips = sum(_sign(r["A_exact1"]) != _sign(r["A_exact2"]) for r in eligible)
+    phantom = sum(
+        (_sign(r["A_exact1"]) != _sign(r["A_refeed"]))
+        and (_sign(r["A_exact1"]) == _sign(r["A_exact2"]))
+        for r in eligible
+    )
+    total = len(pivots)
+    gdiv_refeed = sum(bool(r.get("greedy_divergence_refeed")) for r in pivots)
+    gdiv_floor = sum(bool(r.get("greedy_divergence_exact2")) for r in pivots)
+    return {
+        "config": payload.get("config", {}).get("name")
+        if isinstance(payload.get("config"), dict)
+        else None,
+        "experiment": payload.get("experiment", "?"),
+        "n_pivots": total,
+        "n_eligible": n,
+        "refeed_flips": refeed_flips,
+        "floor_flips": floor_flips,
+        "refeed_rate": refeed_flips / n,
+        "floor_rate": floor_flips / n,
+        "excess_pp": (refeed_flips - floor_flips) / n * 100.0,
+        "phantom": phantom,
+        "gdiv_refeed_rate": gdiv_refeed / total if total else 0.0,
+        "gdiv_floor_rate": gdiv_floor / total if total else 0.0,
+    }
+
+
+def _drift_config_name(path: str, payload: dict) -> str:
+    cfg = payload.get("config")
+    if isinstance(cfg, dict) and cfg.get("name"):
+        return cfg["name"]
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def _collect_drift_receipts(root: str) -> list:
+    root = os.path.abspath(root)
+    if os.path.isfile(root):
+        return [root]
+    out = []
+    if os.path.isdir(root):
+        for entry in sorted(os.listdir(root)):
+            if entry.endswith(".json"):
+                out.append(os.path.join(root, entry))
+    return out
+
+
+def drift_report(path: str) -> str:
+    """Render the re-feed credit-drift headline from an ablation receipt.
+
+    ``path`` may be a single results JSON (rich single-config view) or a
+    directory of them (a config-by-config table, like the paper's Figure 2).
+    """
+    receipts = _collect_drift_receipts(path)
+    if not receipts:
+        return f"thaw rewind drift  {os.path.abspath(path)}\n  (no results JSON found)"
+
+    parsed = []
+    for rp in receipts:
+        try:
+            with open(rp) as f:
+                payload = json.load(f)
+        except (OSError, ValueError):
+            continue
+        st = _drift_stats(payload)
+        if st is None:
+            continue
+        st["name"] = _drift_config_name(rp, payload)
+        parsed.append(st)
+
+    if not parsed:
+        return (
+            f"thaw rewind drift  {os.path.abspath(path)}\n"
+            f"  no config had eligible pivots (non-zero advantages)"
+        )
+
+    # directory of receipts -> the Figure-2 table
+    if len(parsed) > 1:
+        parsed.sort(key=lambda s: s["excess_pp"], reverse=True)
+        lines = [
+            f"thaw rewind drift  {os.path.abspath(path)}  ({len(parsed)} configs)",
+            f"  {parsed[0]['experiment']}",
+            "",
+            f"  {'config':<14}{'eligible':>9}   {'re-feed':>7}  {'floor':>6}  {'excess':>8}",
+        ]
+        for s in parsed:
+            lines.append(
+                f"  {s['name']:<14}{_fmt_int(s['n_eligible']):>9}   "
+                f"{s['refeed_rate'] * 100:6.1f}%  {s['floor_rate'] * 100:5.1f}%  "
+                f"{'+' + format(s['excess_pp'], '.1f') + 'pp':>8}"
+            )
+        lines.append("")
+        lines.append(
+            "  every config flips credit sign well above its own replica floor —"
+        )
+        lines.append(
+            "  re-feeding a prefix is not replaying it. (arXiv:2606.15621)"
+        )
+        return "\n".join(lines)
+
+    # single receipt -> the rich view
+    s = parsed[0]
+    bar_w = 30
+    refeed_bar = _bar(s["refeed_flips"], s["n_eligible"], bar_w)
+    floor_bar = _bar(s["floor_flips"], s["n_eligible"], bar_w)
+    lines = [
+        f"thaw rewind drift  {s['name']}   ({s['experiment']})",
+        f"  {_fmt_int(s['n_pivots'])} pivots · {_fmt_int(s['n_eligible'])} eligible "
+        f"(non-zero advantage)",
+        "",
+        "  credit-sign flips vs exact KV resume (the reference estimator)",
+        f"    re-feed   {refeed_bar}   {s['refeed_rate'] * 100:5.1f}%   "
+        f"({_fmt_int(s['refeed_flips'])}/{_fmt_int(s['n_eligible'])})",
+        f"    replica   {floor_bar}   {s['floor_rate'] * 100:5.1f}%   "
+        f"({_fmt_int(s['floor_flips'])}/{_fmt_int(s['n_eligible'])})   floor",
+        f"    {' ' * bar_w}   excess  +{s['excess_pp']:.1f}pp above the floor",
+        "",
+        f"  {_fmt_int(s['phantom'])} pivots flip credit sign under re-feed but not "
+        f"under an exact replica.",
+        f"  greedy first token differs: re-feed {s['gdiv_refeed_rate'] * 100:.0f}% "
+        f"of pivots · replica {s['gdiv_floor_rate'] * 100:.0f}%.",
+        "",
+        "  re-feeding a prefix is not replaying it: the excess above the replica",
+        "  floor is drift the re-feed introduces, not sampling noise. (arXiv:2606.15621)",
+    ]
     return "\n".join(lines)

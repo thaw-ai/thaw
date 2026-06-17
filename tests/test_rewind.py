@@ -161,5 +161,77 @@ class RewindTest(unittest.TestCase):
         self.assertIn("not captured", rewind.inspect_rollout(d))
 
 
+def _pivot(a1, a2, ar, gd_e=False, gd_r=False):
+    return {
+        "A_exact1": a1,
+        "A_exact2": a2,
+        "A_refeed": ar,
+        "greedy_divergence_exact2": gd_e,
+        "greedy_divergence_refeed": gd_r,
+    }
+
+
+class DriftReportTest(unittest.TestCase):
+    """thaw rewind drift — the paper's flip-rate math from an ablation receipt."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="drift_test_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _receipt(self, name, pivots, experiment="exp"):
+        import json
+
+        p = os.path.join(self.tmp, name)
+        with open(p, "w") as f:
+            json.dump({"experiment": experiment, "pivots": pivots}, f)
+        return p
+
+    def test_stats_flip_rates_and_floor(self):
+        # 4 eligible pivots. re-feed flips sign on 2; replica floor flips on 1.
+        # one all-zero pivot is ineligible (cannot flip).
+        pivots = [
+            _pivot(1.0, 1.0, -1.0, gd_r=True),   # refeed flip, not floor -> phantom
+            _pivot(1.0, -1.0, -1.0),             # both flip
+            _pivot(1.0, 1.0, 1.0),               # no flip
+            _pivot(-1.0, -1.0, -1.0),            # no flip
+            _pivot(0.0, 0.0, 0.0),               # ineligible
+        ]
+        st = rewind._drift_stats({"experiment": "e", "pivots": pivots})
+        self.assertEqual(st["n_pivots"], 5)
+        self.assertEqual(st["n_eligible"], 4)
+        self.assertEqual(st["refeed_flips"], 2)
+        self.assertEqual(st["floor_flips"], 1)
+        self.assertEqual(st["phantom"], 1)
+        self.assertAlmostEqual(st["excess_pp"], 25.0)
+
+    def test_single_receipt_renders_headline(self):
+        p = self._receipt("primary.json", [
+            _pivot(1.0, 1.0, -1.0),
+            _pivot(1.0, 1.0, 1.0),
+        ])
+        out = rewind.drift_report(p)
+        self.assertIn("re-feed", out)
+        self.assertIn("replica", out)
+        self.assertIn("floor", out)
+        self.assertIn("arXiv:2606.15621", out)
+
+    def test_directory_renders_table(self):
+        self._receipt("a.json", [_pivot(1.0, 1.0, -1.0), _pivot(1.0, 1.0, 1.0)])
+        self._receipt("b.json", [_pivot(1.0, -1.0, -1.0), _pivot(1.0, 1.0, 1.0)])
+        out = rewind.drift_report(self.tmp)
+        self.assertIn("configs", out)
+        self.assertIn("excess", out)
+        # sorted by excess descending: config 'a' (re-feed flips, floor doesn't)
+        # has higher excess than 'b' (both flip), so 'a' appears first.
+        self.assertLess(out.index("\n  a "), out.index("\n  b "))
+
+    def test_no_eligible_pivots(self):
+        p = self._receipt("empty.json", [_pivot(0.0, 0.0, 0.0)])
+        self.assertIsNone(rewind._drift_stats({"pivots": [_pivot(0.0, 0.0, 0.0)]}))
+        self.assertIn("no config", rewind.drift_report(p))
+
+
 if __name__ == "__main__":
     unittest.main()
