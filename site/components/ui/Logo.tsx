@@ -18,7 +18,7 @@ export function Logo() {
         width={30}
         height={30}
         priority
-        className="size-[30px] shrink-0 transition-transform duration-700 ease-out group-hover:rotate-[40deg]"
+        className="size-[30px] shrink-0"
       />
       <span className="display text-[17px] tracking-[-0.02em] lowercase">
         thaw

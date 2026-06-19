@@ -33,19 +33,36 @@ export function Primitive() {
         <div className="border-t border-rule">
           {verbs.map((v, i) => (
             <Reveal key={v.cmd} as="div" delay={i * 0.04}>
-              <div className="relative grid grid-cols-1 sm:grid-cols-[180px_1fr_auto] sm:items-center gap-1 sm:gap-6 py-5 pl-6 md:pl-8 border-b border-rule hover:bg-bg-2/40 transition-colors">
-                {v.tick && <span className="absolute left-0 top-[18%] bottom-[18%] w-[2px] rounded-full bg-uv" aria-hidden />}
-                <code className="font-mono text-[15px] text-ink">
-                  <span className="text-ink-faint">thaw </span>
-                  {v.cmd}
+              <div
+                className={`group relative grid grid-cols-1 sm:grid-cols-[185px_1fr_auto] sm:items-center gap-1 sm:gap-6 py-5 px-4 md:px-5 border-b border-rule transition-colors duration-300 ${
+                  v.tick
+                    ? "bg-[var(--uv-glow)] hover:bg-[rgba(111,179,217,0.10)]"
+                    : "hover:bg-bg-2/40"
+                }`}
+              >
+                <code className="flex items-center gap-2.5 font-mono text-[15px]">
+                  <span
+                    aria-hidden
+                    className={`size-1.5 shrink-0 rounded-full transition-colors ${
+                      v.tick
+                        ? "bg-uv"
+                        : "bg-ink-ghost group-hover:bg-ink-faint"
+                    }`}
+                  />
+                  <span>
+                    <span className="text-ink-faint">thaw </span>
+                    <span className={v.tick ? "text-uv-bright" : "text-ink"}>{v.cmd}</span>
+                  </span>
                 </code>
                 <span className="text-ink-dim text-[14.5px] leading-snug">{v.gloss}</span>
                 <span
-                  className={`font-mono text-[11px] uppercase tracking-[0.08em] ${
-                    v.env === "laptop" ? "text-uv-deep" : "text-ink-ghost"
+                  className={`justify-self-start sm:justify-self-end inline-flex items-center rounded-full border px-2.5 py-0.5 font-mono text-[10.5px] uppercase tracking-[0.1em] transition-colors ${
+                    v.env === "laptop"
+                      ? "border-uv-deep/40 text-uv-deep"
+                      : "border-rule text-ink-faint"
                   }`}
                 >
-                  {v.env === "laptop" ? "laptop" : "gpu"}
+                  {v.env === "laptop" ? "no gpu" : "gpu"}
                 </span>
               </div>
             </Reveal>

@@ -56,6 +56,16 @@
   --signal-bright: #86efac;
 
   --accent: var(--uv);
+
+  /* — Motion. Exponential ease-outs; no bounce. Shared across components. — */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* — Heading scale. Three deliberate tiers so the page has volume, not one
+       flat size repeated down the scroll. — */
+  --h-loud:  clamp(2.5rem, 4.6vw, 3.6rem);   /* signature feature sections */
+  --h-mid:   clamp(2rem, 3.2vw, 2.75rem);    /* standard section heading   */
+  --h-peak:  clamp(2.5rem, 5.4vw, 4.25rem);  /* the thesis / closing line  */
 }
 
 html {
@@ -328,6 +338,30 @@ body {
 
 .float-y { animation: float-y 6s ease-in-out infinite; }
 .drift   { animation: drift 18s ease-in-out infinite; }
+
+/* ----------------------------------------------------------------------------
+ * Reveal — scroll-driven fade-up. Visible by default (no JS / reduced-motion /
+ * crawlers / pre-hydration all see content); the rise is a pure-CSS progressive
+ * enhancement via a view() timeline. No IntersectionObserver, no client JS.
+ * ---------------------------------------------------------------------------- */
+@keyframes reveal-rise {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.reveal { opacity: 1; }
+
+@media (prefers-reduced-motion: no-preference) {
+  @supports (animation-timeline: view()) {
+    .reveal {
+      opacity: 0;
+      animation: reveal-rise both linear;
+      animation-timeline: view();
+      animation-range: entry 4% entry 36%;
+      will-change: opacity, transform;
+    }
+  }
+}
 
 ::selection {
   background: var(--uv);
