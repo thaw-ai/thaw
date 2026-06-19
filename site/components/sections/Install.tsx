@@ -1,14 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { motion, useReducedMotion } from "framer-motion";
+import { Reveal } from "@/components/ui/Reveal";
 
-const ease = [0.22, 1, 0.36, 1] as const;
 const SNIPPET = `pip install thaw-vllm thaw-native
 thaw inspect base.thaw`;
 
 export function Install() {
-  const reduce = useReducedMotion();
   const [copied, setCopied] = useState(false);
 
   const copy = async () => {
@@ -24,24 +22,16 @@ export function Install() {
   return (
     <section id="install" className="px-6 md:px-8 py-20 md:py-28 border-t border-rule">
       <div className="max-w-[760px] mx-auto">
-        <motion.h2
-          initial={reduce ? { opacity: 0 } : { opacity: 0, y: 12 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true, amount: 0.4 }}
-          transition={{ duration: 0.4, ease }}
-          className="display text-ink max-w-[22ch]"
-          style={{ fontSize: "clamp(2rem, 3.2vw, 2.75rem)", lineHeight: 1.08, letterSpacing: "-0.025em", fontWeight: 600 }}
-        >
-          Install and inspect a snapshot in two lines.
-        </motion.h2>
+        <Reveal>
+          <h2
+            className="display text-ink max-w-[22ch]"
+            style={{ fontSize: "var(--h-mid)", lineHeight: 1.08, letterSpacing: "-0.025em", fontWeight: 600 }}
+          >
+            Install and inspect a snapshot in two lines.
+          </h2>
+        </Reveal>
 
-        <motion.div
-          initial={reduce ? { opacity: 0 } : { opacity: 0, y: 16 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true, amount: 0.3 }}
-          transition={{ duration: 0.45, ease, delay: 0.08 }}
-          className="mt-10 terminal overflow-hidden"
-        >
+        <Reveal className="mt-10 terminal overflow-hidden">
           <div className="flex items-center justify-between h-9 px-4 border-b border-rule">
             <span className="font-mono text-[12px] text-ink-dim">bash</span>
             <button
@@ -63,7 +53,7 @@ export function Install() {
               <span className="text-ink-faint"># no GPU required</span>
             </div>
           </pre>
-        </motion.div>
+        </Reveal>
 
         <p className="mt-5 text-ink-dim text-[15px] leading-[1.6]">
           Pre-built wheels on PyPI. CUDA 12+ for restore; inspect and diff run

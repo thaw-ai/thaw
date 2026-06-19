@@ -2,13 +2,15 @@
 
 import { motion, useReducedMotion } from "framer-motion";
 import { CopyChip } from "@/components/ui/CopyChip";
+import { HeroBackdrop } from "@/components/sections/HeroBackdrop";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
 export function Hero() {
   return (
     <section className="relative px-6 md:px-8 pt-32 md:pt-40 pb-24 md:pb-28">
-      <div className="max-w-[1200px] mx-auto flex flex-col items-center text-center">
+      <HeroBackdrop />
+      <div className="relative z-10 max-w-[1200px] mx-auto flex flex-col items-center text-center">
         {/* version pill — eyebrow #1 of 2 on the page */}
         <motion.div
           initial={{ opacity: 0, y: 10 }}

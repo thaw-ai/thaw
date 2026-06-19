@@ -19,17 +19,17 @@ export function Agents() {
   return (
     <section id="agents" className="px-6 md:px-8 py-20 md:py-28 border-t border-rule">
       <div className="max-w-[1200px] mx-auto">
-        <div className="text-center max-w-[640px] mx-auto">
+        <div className="text-center max-w-[720px] mx-auto">
           <Reveal>
             <h2
-              className="display text-ink"
-              style={{ fontSize: "clamp(2rem, 3.2vw, 2.75rem)", lineHeight: 1.08, letterSpacing: "-0.025em", fontWeight: 600 }}
+              className="display text-ink text-balance"
+              style={{ fontSize: "var(--h-loud)", lineHeight: 1.02, letterSpacing: "-0.03em", fontWeight: 600 }}
             >
               Fork a session like you fork a repo.
             </h2>
           </Reveal>
           <Reveal delay={0.06}>
-            <p className="mt-5 text-ink-dim text-[18px] leading-[1.55]">
+            <p className="mt-6 mx-auto max-w-[52ch] text-ink-dim text-[18px] leading-[1.55] text-pretty">
               One running session becomes N divergent children that skip prefill
               and diverge from the fork point. Branch a reasoning trace, keep the
               winner, throw away the rest.
@@ -38,7 +38,18 @@ export function Agents() {
         </div>
 
         <Reveal delay={0.12}>
-          <div className="mt-14 md:mt-20 terminal px-4 md:px-10 py-8">
+          <div className="mt-14 md:mt-20 terminal overflow-hidden">
+            <div className="relative flex items-center h-9 px-4 border-b border-rule">
+              <div className="flex items-center gap-2">
+                <span className="size-[11px] rounded-full bg-ink-ghost" />
+                <span className="size-[11px] rounded-full bg-ink-ghost" />
+                <span className="size-[11px] rounded-full bg-ink-ghost" />
+              </div>
+              <div className="absolute inset-x-0 text-center font-mono text-[12px] text-ink-dim pointer-events-none">
+                thaw branch a0f3e1 --fanout 4
+              </div>
+            </div>
+            <div className="px-4 md:px-10 py-8">
             <svg viewBox="0 0 760 268" className="w-full h-auto" role="img" aria-label="One base session forking into four divergent children">
               {/* connectors — draw in on view */}
               {children.map((c, i) => (
@@ -126,6 +137,7 @@ export function Agents() {
                 </motion.g>
               ))}
             </svg>
+            </div>
           </div>
         </Reveal>
       </div>

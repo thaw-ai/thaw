@@ -1,35 +1,27 @@
-"use client";
-
-import { motion, useReducedMotion } from "framer-motion";
 import type { ReactNode } from "react";
 
 /**
- * The page's one motion primitive: a 12px fade-up on first view, fired once.
- * No parallax, no scroll-jacking, no re-trigger on scroll-back. Honors
- * prefers-reduced-motion (collapses to a 200ms opacity fade).
+ * The page's one motion primitive: a fade-up as the element scrolls into view.
+ *
+ * Implemented as a pure-CSS scroll-driven animation (`animation-timeline: view()`),
+ * NOT an IntersectionObserver/JS gate. That matters: the content is visible by
+ * default (no JS, reduced-motion, crawlers, pre-hydration) and the reveal is a
+ * progressive enhancement layered on top — never a visibility switch. Ships no
+ * client JS. See `.reveal` in globals.css.
+ *
+ * `delay` is accepted for call-site compatibility; vertically-stacked items
+ * cascade naturally from scroll order, so it intentionally does not drive a
+ * time offset (time delays are ignored under a `view()` timeline).
  */
 export function Reveal({
   children,
-  delay = 0,
-  className,
-  as = "div",
+  className = "",
+  as: Tag = "div",
 }: {
   children: ReactNode;
   delay?: number;
   className?: string;
   as?: "div" | "li" | "tr";
 }) {
-  const reduce = useReducedMotion();
-  const Comp = motion[as];
-  return (
-    <Comp
-      initial={reduce ? { opacity: 0 } : { opacity: 0, y: 12 }}
-      whileInView={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
-      viewport={{ once: true, amount: 0.3 }}
-      transition={{ duration: reduce ? 0.2 : 0.24, ease: "easeOut", delay }}
-      className={className}
-    >
-      {children}
-    </Comp>
-  );
+  return <Tag className={`reveal ${className}`.trim()}>{children}</Tag>;
 }
