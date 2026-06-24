@@ -12,6 +12,7 @@ Two layers of coverage:
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -37,10 +38,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 from thaw_common.cloud import (
     is_remote,
     resolve_snapshot_path,
+    resolve_snapshots,
     upload_snapshot,
+    upload_snapshots,
+    reset_s3_client_cache,
     _cache_path,
     _parse_s3,
+    _s3_client,
 )
+import thaw_common.cloud as cloud
 
 
 def _mock_s3_with_payload(payload: bytes) -> MagicMock:
@@ -291,6 +297,16 @@ class TestS3RoundTripMoto(unittest.TestCase):
     error mapping are validated for real.
     """
 
+    def setUp(self):
+        # Each method runs under its own @mock_aws backend. Drop any cached
+        # S3 client between methods so a client built under one method's mock
+        # context can't leak into the next (defense-in-depth for the shared
+        # client cache; keeps these green regardless of test ordering).
+        reset_s3_client_cache()
+
+    def tearDown(self):
+        reset_s3_client_cache()
+
     @mock_aws
     def test_round_trip_small(self):
         bucket = "thaw-test-bucket"
@@ -388,6 +404,295 @@ class TestPoolRegisterRemote(unittest.TestCase):
         pool = EnginePool()
         with self.assertRaises(FileNotFoundError):
             pool.register("bad", "/definitely/not/a/real/path.thaw")
+
+
+class TestSharedClientCache(unittest.TestCase):
+    """The S3 client is built once and reused, keyed by (pid, pool_size).
+
+    These tests stub _build_s3_client so they need neither boto3 credentials
+    nor a network — they assert the CACHING contract, not boto3 itself.
+    """
+
+    def setUp(self):
+        reset_s3_client_cache()
+
+    def tearDown(self):
+        reset_s3_client_cache()
+
+    def test_client_is_reused_across_calls(self):
+        builds = {"n": 0}
+
+        def fake_build(pool_size):
+            builds["n"] += 1
+            return MagicMock(name=f"client-{builds['n']}")
+
+        with patch.object(cloud, "_build_s3_client", side_effect=fake_build):
+            c1 = _s3_client()
+            c2 = _s3_client()
+            c3 = _s3_client()
+
+        self.assertIs(c1, c2)
+        self.assertIs(c2, c3)
+        self.assertEqual(builds["n"], 1, "client should be built exactly once")
+
+    def test_reset_forces_rebuild(self):
+        with patch.object(
+            cloud, "_build_s3_client", side_effect=lambda p: MagicMock()
+        ) as build:
+            _s3_client()
+            _s3_client()
+            self.assertEqual(build.call_count, 1)
+            reset_s3_client_cache()
+            _s3_client()
+            self.assertEqual(build.call_count, 2)
+
+    def test_distinct_pool_size_distinct_client(self):
+        with patch.object(
+            cloud, "_build_s3_client", side_effect=lambda p: MagicMock()
+        ) as build:
+            _s3_client(concurrency=32)   # pool 36
+            _s3_client(concurrency=32)   # cache hit
+            _s3_client(concurrency=128)  # pool 132 -> distinct key
+            self.assertEqual(build.call_count, 2)
+
+    def test_pool_size_matches_concurrency(self):
+        seen = {}
+
+        def fake_build(pool_size):
+            seen["pool"] = pool_size
+            return MagicMock()
+
+        with patch.object(cloud, "_build_s3_client", side_effect=fake_build):
+            _s3_client(concurrency=32)
+        # Same pool math as the original per-call implementation: conc + 4, min 16.
+        self.assertEqual(seen["pool"], 36)
+
+    def test_fork_rebuilds_client(self):
+        """A different pid must yield a different client (botocore isn't fork-safe)."""
+        with patch.object(
+            cloud, "_build_s3_client", side_effect=lambda p: MagicMock()
+        ) as build:
+            with patch.object(cloud.os, "getpid", return_value=1000):
+                _s3_client()
+                _s3_client()
+            self.assertEqual(build.call_count, 1)
+            # Simulate being in a forked child: pid changes -> rebuild.
+            with patch.object(cloud.os, "getpid", return_value=2000):
+                _s3_client()
+            self.assertEqual(build.call_count, 2)
+
+
+class TestResolveSnapshotsBatch(unittest.TestCase):
+    """Bounded-concurrency batch download orchestration.
+
+    Patches the single-file resolve_snapshot_path so these tests exercise the
+    fan-out/ordering/error-propagation logic without boto3 or POSIX pwrite.
+    """
+
+    def test_empty_list(self):
+        self.assertEqual(resolve_snapshots([]), [])
+
+    def test_all_local_passthrough_no_threads(self):
+        # Local paths must pass through untouched and must NOT call the S3 path.
+        with patch.object(cloud, "resolve_snapshot_path") as rsp:
+            out = resolve_snapshots(["/a.thaw", "", None, "./b.thaw"])
+        self.assertEqual(out, ["/a.thaw", "", None, "./b.thaw"])
+        rsp.assert_not_called()
+
+    def test_order_preserved_under_concurrency(self):
+        # Make earlier items take LONGER so completion order != input order;
+        # the result list must still match input order.
+        def fake_resolve(uri, cache_dir=None, force=False):
+            idx = int(uri.rsplit("/", 1)[1].split(".")[0])
+            time.sleep(0.05 * (5 - idx))  # item 0 sleeps longest
+            return f"/cache/{idx}"
+
+        uris = [f"s3://b/{i}.thaw" for i in range(5)]
+        with patch.object(cloud, "resolve_snapshot_path", side_effect=fake_resolve):
+            out = resolve_snapshots(uris, max_files=5)
+        self.assertEqual(out, [f"/cache/{i}" for i in range(5)])
+
+    def test_runs_concurrently(self):
+        # 6 items each sleeping 0.2s: sequential would be >1.0s, 6-way ~0.2s.
+        def slow_resolve(uri, cache_dir=None, force=False):
+            time.sleep(0.2)
+            return uri.replace("s3://b/", "/cache/")
+
+        uris = [f"s3://b/{i}.thaw" for i in range(6)]
+        with patch.object(cloud, "resolve_snapshot_path", side_effect=slow_resolve):
+            t0 = time.monotonic()
+            resolve_snapshots(uris, max_files=6)
+            elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.8, f"expected concurrent (~0.2s), took {elapsed:.2f}s")
+
+    def test_respects_max_files_bound(self):
+        # With max_files=2, 4 items of 0.2s each => 2 waves => ~0.4s, not ~0.2s.
+        def slow_resolve(uri, cache_dir=None, force=False):
+            time.sleep(0.2)
+            return uri
+        uris = [f"s3://b/{i}.thaw" for i in range(4)]
+        with patch.object(cloud, "resolve_snapshot_path", side_effect=slow_resolve):
+            t0 = time.monotonic()
+            resolve_snapshots(uris, max_files=2)
+            elapsed = time.monotonic() - t0
+        self.assertGreaterEqual(elapsed, 0.35, f"max_files=2 should serialize into waves, took {elapsed:.2f}s")
+
+    def test_mixed_local_and_remote(self):
+        def fake_resolve(uri, cache_dir=None, force=False):
+            return "/cache/" + uri.rsplit("/", 1)[1]
+        items = ["/local/a.thaw", "s3://b/x.thaw", "/local/c.thaw", "s3://b/y.thaw"]
+        with patch.object(cloud, "resolve_snapshot_path", side_effect=fake_resolve):
+            out = resolve_snapshots(items)
+        self.assertEqual(
+            out, ["/local/a.thaw", "/cache/x.thaw", "/local/c.thaw", "/cache/y.thaw"]
+        )
+
+    def test_first_error_propagates(self):
+        def fake_resolve(uri, cache_dir=None, force=False):
+            if uri.endswith("2.thaw"):
+                raise FileNotFoundError("thaw S3 download failed: object not found at " + uri)
+            time.sleep(0.05)
+            return "/cache/ok"
+        uris = [f"s3://b/{i}.thaw" for i in range(4)]
+        with patch.object(cloud, "resolve_snapshot_path", side_effect=fake_resolve):
+            with self.assertRaises(FileNotFoundError):
+                resolve_snapshots(uris, max_files=4)
+
+    def test_passes_cache_dir_and_force(self):
+        seen = []
+        def fake_resolve(uri, cache_dir=None, force=False):
+            seen.append((cache_dir, force))
+            return "/cache/x"
+        with patch.object(cloud, "resolve_snapshot_path", side_effect=fake_resolve):
+            resolve_snapshots(["s3://b/x.thaw"], cache_dir="/custom", force=True)
+        self.assertEqual(seen, [("/custom", True)])
+
+    def test_duplicate_uris_downloaded_once(self):
+        # Duplicate URIs must download exactly once (they share one cache file;
+        # racing two .part writes/renames would corrupt it) and every slot must
+        # receive the same resolved path, in order.
+        calls = []
+        def fake_resolve(uri, cache_dir=None, force=False):
+            calls.append(uri)
+            return "/cache/" + uri.rsplit("/", 1)[1]
+        uris = [
+            "s3://b/dup.thaw",
+            "s3://b/other.thaw",
+            "s3://b/dup.thaw",
+            "s3://b/dup.thaw",
+        ]
+        with patch.object(cloud, "resolve_snapshot_path", side_effect=fake_resolve):
+            out = resolve_snapshots(uris, max_files=8)
+        self.assertEqual(out, [
+            "/cache/dup.thaw", "/cache/other.thaw",
+            "/cache/dup.thaw", "/cache/dup.thaw",
+        ])
+        self.assertEqual(sorted(calls), ["s3://b/dup.thaw", "s3://b/other.thaw"])
+        self.assertEqual(calls.count("s3://b/dup.thaw"), 1)
+
+
+class TestUploadSnapshotsBatch(unittest.TestCase):
+    def test_empty_noop(self):
+        # Must not raise and must not touch the S3 path.
+        with patch.object(cloud, "upload_snapshot") as up:
+            upload_snapshots([])
+        up.assert_not_called()
+
+    def test_all_uploaded(self):
+        calls = []
+        with patch.object(cloud, "upload_snapshot", side_effect=lambda lp, uri: calls.append((lp, uri))):
+            upload_snapshots([("/a", "s3://b/a"), ("/c", "s3://b/c")])
+        self.assertEqual(sorted(calls), [("/a", "s3://b/a"), ("/c", "s3://b/c")])
+
+    def test_runs_concurrently(self):
+        def slow_upload(lp, uri):
+            time.sleep(0.2)
+        pairs = [(f"/f{i}", f"s3://b/{i}") for i in range(6)]
+        with patch.object(cloud, "upload_snapshot", side_effect=slow_upload):
+            t0 = time.monotonic()
+            upload_snapshots(pairs, max_files=6)
+            elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.8, f"expected concurrent (~0.2s), took {elapsed:.2f}s")
+
+    def test_first_error_propagates(self):
+        def maybe_fail(lp, uri):
+            if uri.endswith("bad"):
+                raise PermissionError("access denied")
+        pairs = [("/a", "s3://b/ok"), ("/b", "s3://b/bad"), ("/c", "s3://b/ok2")]
+        with patch.object(cloud, "upload_snapshot", side_effect=maybe_fail):
+            with self.assertRaises(PermissionError):
+                upload_snapshots(pairs, max_files=3)
+
+
+@unittest.skipUnless(HAVE_MOTO, "moto not installed")
+@unittest.skipUnless(hasattr(os, "pwrite"), "ranged download path requires POSIX os.pwrite")
+class TestBatchRoundTripMoto(unittest.TestCase):
+    """End-to-end batch round trip against moto. POSIX-only: the download
+    write path uses os.pwrite. Runs in CI (Ubuntu); skipped on Windows."""
+
+    @mock_aws
+    def test_resolve_and_upload_many(self):
+        reset_s3_client_cache()
+        bucket = "thaw-batch-bucket"
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=bucket)
+
+        payloads = {f"obj{i}.thaw": os.urandom(2048 + i) for i in range(6)}
+        srcs = []
+        try:
+            pairs = []
+            for name, data in payloads.items():
+                fd, p = tempfile.mkstemp(suffix=".thaw")
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                srcs.append(p)
+                pairs.append((p, f"s3://{bucket}/{name}"))
+
+            # Batch upload, then batch download, verify bit-identical + order.
+            upload_snapshots(pairs)
+            with tempfile.TemporaryDirectory() as cache_dir:
+                uris = [f"s3://{bucket}/{n}" for n in payloads]
+                locals_ = resolve_snapshots(uris, cache_dir=cache_dir)
+                self.assertEqual(len(locals_), len(uris))
+                for (name, data), local in zip(payloads.items(), locals_):
+                    with open(local, "rb") as f:
+                        self.assertEqual(f.read(), data, f"mismatch for {name}")
+        finally:
+            for p in srcs:
+                if os.path.exists(p):
+                    os.unlink(p)
+
+    @mock_aws
+    def test_batch_surfaces_missing_object(self):
+        reset_s3_client_cache()
+        bucket = "thaw-batch-bucket2"
+        boto3.client("s3", region_name="us-east-1").create_bucket(Bucket=bucket)
+        with tempfile.TemporaryDirectory() as cache_dir:
+            uris = [f"s3://{bucket}/missing-{i}.thaw" for i in range(3)]
+            with self.assertRaises(FileNotFoundError):
+                resolve_snapshots(uris, cache_dir=cache_dir)
+
+    @mock_aws
+    def test_duplicate_uris_no_race(self):
+        # Real-path regression for the duplicate-URI race: without dedup, two
+        # threads resolving the same URI race the same .part rename (torn cache
+        # on POSIX, FileExistsError on Windows). With dedup it downloads once
+        # and every slot gets the same byte-identical file.
+        reset_s3_client_cache()
+        bucket = "thaw-dup-bucket"
+        key = "shared.thaw"
+        payload = os.urandom(8192)
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=bucket)
+        s3.put_object(Bucket=bucket, Key=key, Body=payload)
+
+        uri = f"s3://{bucket}/{key}"
+        with tempfile.TemporaryDirectory() as cache_dir:
+            out = resolve_snapshots([uri] * 5, cache_dir=cache_dir, max_files=8)
+            self.assertEqual(len(out), 5)
+            self.assertEqual(len(set(out)), 1)  # all slots -> same cache file
+            with open(out[0], "rb") as f:
+                self.assertEqual(f.read(), payload)
 
 
 if __name__ == "__main__":

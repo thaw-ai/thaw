@@ -1,0 +1,114 @@
+{
+  "schema": "thaw.bench.s3_batch.v1",
+  "generated": "2026-06-24T11:50:39-0500",
+  "python": "3.13.5",
+  "part_a_client_reuse": {
+    "ops": 200,
+    "build_per_op_ms": 2.7593,
+    "cached_per_op_ms": 0.0121,
+    "build_total_ms": 551.86,
+    "cached_total_ms": 2.43,
+    "construction_ms_saved_total": 549.43,
+    "note": "Construction overhead only. On real S3 each rebuilt client also pays a fresh TCP+TLS handshake on its first request; reuse keeps keep-alive connections warm across operations."
+  },
+  "part_b_batch_concurrency": [
+    {
+      "n_objects": 32,
+      "latency_ms": 40.0,
+      "sequential_wall_s": 1.2931,
+      "batch": [
+        {
+          "file_concurrency": 1,
+          "wall_s": 1.2959,
+          "speedup_vs_sequential": 1.0
+        },
+        {
+          "file_concurrency": 8,
+          "wall_s": 0.1666,
+          "speedup_vs_sequential": 7.76
+        },
+        {
+          "file_concurrency": 16,
+          "wall_s": 0.0861,
+          "speedup_vs_sequential": 15.02
+        },
+        {
+          "file_concurrency": 32,
+          "wall_s": 0.044,
+          "speedup_vs_sequential": 29.41
+        }
+      ]
+    },
+    {
+      "n_objects": 128,
+      "latency_ms": 40.0,
+      "sequential_wall_s": 5.1629,
+      "batch": [
+        {
+          "file_concurrency": 1,
+          "wall_s": 5.1708,
+          "speedup_vs_sequential": 1.0
+        },
+        {
+          "file_concurrency": 8,
+          "wall_s": 0.6494,
+          "speedup_vs_sequential": 7.95
+        },
+        {
+          "file_concurrency": 16,
+          "wall_s": 0.33,
+          "speedup_vs_sequential": 15.65
+        },
+        {
+          "file_concurrency": 32,
+          "wall_s": 0.1693,
+          "speedup_vs_sequential": 30.49
+        }
+      ]
+    },
+    {
+      "n_objects": 512,
+      "latency_ms": 40.0,
+      "sequential_wall_s": 20.6571,
+      "batch": [
+        {
+          "file_concurrency": 1,
+          "wall_s": 20.6739,
+          "speedup_vs_sequential": 1.0
+        },
+        {
+          "file_concurrency": 8,
+          "wall_s": 2.5874,
+          "speedup_vs_sequential": 7.98
+        },
+        {
+          "file_concurrency": 16,
+          "wall_s": 1.294,
+          "speedup_vs_sequential": 15.96
+        },
+        {
+          "file_concurrency": 32,
+          "wall_s": 0.6502,
+          "speedup_vs_sequential": 31.77
+        }
+      ]
+    }
+  ],
+  "params": {
+    "objects": [
+      32,
+      128,
+      512
+    ],
+    "file_concurrency": [
+      1,
+      8,
+      16,
+      32
+    ],
+    "latency_ms": 40.0,
+    "reuse_ops": 200,
+    "repeats": 5,
+    "json_out": "C:\\Users\\kkapu\\OneDrive\\Desktop\\thaw\\site\\receipts\\2026-06-24_s3_batch.json"
+  }
+}
