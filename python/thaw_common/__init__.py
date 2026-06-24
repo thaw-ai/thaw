@@ -19,7 +19,9 @@ from thaw_common.util import rank_snapshot_path
 from thaw_common.cloud import (
     is_remote,
     resolve_snapshot_path,
+    resolve_snapshots,
     upload_snapshot,
+    upload_snapshots,
 )
 from thaw_common.telemetry import (
     fallback_warning,
@@ -61,5 +63,7 @@ __all__ = [
     "rank_snapshot_path",
     "is_remote",
     "resolve_snapshot_path",
+    "resolve_snapshots",
     "upload_snapshot",
+    "upload_snapshots",
 ]

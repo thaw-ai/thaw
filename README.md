@@ -458,7 +458,17 @@ llm = thaw_vllm.load("meta-llama/Meta-Llama-3-8B",
                      "s3://my-bucket/llama-3-8b.thaw")
 ```
 
-First call downloads to `~/.cache/thaw/snapshots/` (override with `THAW_CACHE_DIR`); subsequent calls hit the local cache. For TP, per-rank files live at `s3://bucket/weights.thaw` and `s3://bucket/weights.rank1.thaw` — thaw derives the per-rank URIs automatically. AWS credentials come from the standard boto3 chain (env vars, `~/.aws/credentials`, IAM role).
+First call downloads to `~/.cache/thaw/snapshots/` (override with `THAW_CACHE_DIR`); subsequent calls hit the local cache. For TP, per-rank files live at `s3://bucket/weights.thaw` and `s3://bucket/weights.rank1.thaw` — thaw derives the per-rank URIs automatically. AWS credentials come from the standard boto3 chain (env vars, `~/.aws/credentials`, IAM role). The boto3 client is built once per process and reused, so repeated transfers keep credentials resolved and connections warm.
+
+For a corpus of many objects (RAG shards, sharded snapshots), fetch or ship them concurrently — each distinct S3 key has its own ~135 MB/s budget, so N keys in parallel give ~N×135 MB/s:
+
+```python
+from thaw_common.cloud import resolve_snapshots, upload_snapshots
+local_paths = resolve_snapshots(["s3://b/a.thaw", "s3://b/b.thaw", ...])  # parallel download, order preserved
+upload_snapshots([(local, "s3://b/a.thaw"), ...])                          # parallel upload
+```
+
+Cross-file parallelism is bounded and tunable via `THAW_S3_FILE_CONCURRENCY` (default 8); per-file ranged-GET concurrency stays `THAW_S3_CONCURRENCY` (default 32).
 
 **SGLang** — same API, class-passthrough loader (install with `pip install thaw-vllm[sglang]`):
 
