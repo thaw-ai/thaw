@@ -1,0 +1,45 @@
+{
+  "experiment": "re-feed vs true-KV replay as an inference verifier (head-to-head)",
+  "thesis": "Replay-based verifiers (DiFR 2511.20621, TOPLOC 2501.16007, SVIP, VeriLLM) reconstruct state by re-feeding the transcript; the committed signature is the decode-time logprob. Re-feed (bulk prefill) does not reproduce decode-time, so the verifier drifts from the commitment at low-margin tokens. A thaw verifier replays from the true decode-time KV (.thawkv) and matches the commitment by construction (~0 error).",
+  "date": "2026-06-25",
+  "hardware": "1x NVIDIA H100 80GB HBM3 (RunPod SECURE, US-MO-1)",
+  "engine": "vLLM 0.23.0, torch 2.8.0+cu128",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "config": {
+    "n_prompts": 24,
+    "max_tokens": 256,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "enable_prefix_caching": false,
+    "margin_nats": 0.3,
+    "note": "prefix caching OFF so re-feed is a clean fresh prefill (the verifier condition), never a silent reuse of live decode-time KV"
+  },
+  "n_tokens": 4652,
+  "n_low_margin": 111,
+  "drift_nats": {
+    "median": 0.0,
+    "p90": 0.0031,
+    "mean": 0.0042,
+    "reading": "most tokens have ~zero re-feed drift; it concentrates at low-margin (decision) tokens"
+  },
+  "false_reject_sweep": [
+    {"tau_nats": 0.01, "refeed_false_reject_rate": 0.0688, "true_kv_rate": 0.0},
+    {"tau_nats": 0.02, "refeed_false_reject_rate": 0.0522, "true_kv_rate": 0.0},
+    {"tau_nats": 0.05, "refeed_false_reject_rate": 0.029, "true_kv_rate": 0.0},
+    {"tau_nats": 0.1, "refeed_false_reject_rate": 0.0123, "true_kv_rate": 0.0},
+    {"tau_nats": 0.2, "refeed_false_reject_rate": 0.0006, "true_kv_rate": 0.0},
+    {"tau_nats": 0.5, "refeed_false_reject_rate": 0.0, "true_kv_rate": 0.0}
+  ],
+  "forgery_masking": {
+    "all": 0.0047,
+    "low_margin_lt_0.3": 0.1982,
+    "reading": "fraction of tokens where re-feed drift >= the top1-top2 gap, i.e. a single-token swap to the runner-up is smaller than the verifier's own re-feed noise and cannot be detected. true-KV verifier: 0 (drift ~ 0)."
+  },
+  "headline": [
+    "At a tight verification tolerance (tau=0.01 nats), a re-feed verifier falsely rejects 6.9% of genuine tokens; a true-KV (thaw receipt) verifier rejects 0%.",
+    "At low-margin decision tokens, re-feed drift masks a single-token forgery 19.8% of the time (1 in 5) — the swap hides inside the verifier's own noise; a true-KV verifier (drift ~0) catches it.",
+    "Conclusion: replay-from-re-feed verification has both a false-reject cost on genuine output and a forgery-acceptance hole at the tokens that matter; replay-from-true-KV (thaw's .thawkv inference receipt) removes both."
+  ],
+  "scope": "The true-KV arm is sound by construction (decode-time logprob = the commitment; .thawkv restores it bit-identically per thaw's separate receipts). This run measures the re-feed verifier against that ground truth on fresh generations. A head-to-head against a deployed DiFR/TOPLOC implementation, and cross-model generality, are follow-ups.",
+  "reproducer": "benchmarks/verifier_headtohead.py --model Qwen/Qwen2.5-7B-Instruct"
+}
