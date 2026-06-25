@@ -1,0 +1,44 @@
+{
+  "experiment": "verifier head-to-head v2 (re-feed vs true-KV replay) — cross-model, with CIs",
+  "thesis": "Replay-based verifiers (DiFR 2511.20621, TOPLOC 2501.16007, SVIP, VeriLLM) reconstruct a token's signature by re-feeding the transcript; the commitment is the decode-time distribution. Re-feed (bulk prefill) != decode, so the verifier drifts at low-margin tokens. A thaw verifier replays from the true decode-time KV (.thawkv) and matches the commitment by construction (~0 error).",
+  "date": "2026-06-25",
+  "hardware": "1x NVIDIA H100 80GB HBM3 (RunPod SECURE, US-MO-1)",
+  "engine": "vLLM 0.23.0, torch 2.8.0+cu128",
+  "config": {
+    "models": ["Qwen/Qwen2.5-7B-Instruct", "meta-llama/Llama-3.1-8B-Instruct"],
+    "prompts": "150 gsm8k test questions (step-by-step reasoning)",
+    "generation": "greedy (temperature 0), max_tokens 256, prefix caching OFF",
+    "margin_nats": 0.3,
+    "verifier": "argmax membership + logit tolerance; low-margin = top1-top2 gap < 0.3 nats; rates carry Wilson 95% CIs"
+  },
+  "results": {
+    "Qwen2.5-7B-Instruct": {
+      "n_tokens": 26928, "n_low_margin": 732,
+      "drift_nats": {"median": 0.0, "p90": 0.0065, "mean": 0.0039},
+      "logit_false_reject": {"tau_0.01": 0.0862, "tau_0.02": 0.0625, "tau_0.05": 0.0269, "true_kv": 0.0},
+      "argmax_low_margin": {
+        "false_reject_pct": 4.64, "false_reject_ci95": [3.34, 6.42],
+        "forgery_accept_pct": 4.64, "forgery_accept_ci95": [3.34, 6.42], "true_kv": 0.0
+      },
+      "gap_masking_low_margin_pct": 27.6, "gap_masking_ci95": [24.48, 30.94]
+    },
+    "Llama-3.1-8B-Instruct": {
+      "n_tokens": 26456, "n_low_margin": 1204,
+      "drift_nats": {"median": 0.0, "p90": 0.0131, "mean": 0.0044},
+      "logit_false_reject": {"tau_0.01": 0.1148, "tau_0.02": 0.0769, "tau_0.05": 0.0249, "true_kv": 0.0},
+      "argmax_low_margin": {
+        "false_reject_pct": 3.49, "false_reject_ci95": [2.59, 4.68],
+        "forgery_accept_pct": 3.32, "forgery_accept_ci95": [2.45, 4.49], "true_kv": 0.0
+      },
+      "gap_masking_low_margin_pct": 22.8, "gap_masking_ci95": [20.56, 25.3]
+    }
+  },
+  "headline": [
+    "Cross-family and consistent: at low-margin decision tokens, re-feed drift exceeds the top1-top2 gap 27.6% (Qwen, CI 24.5-30.9) / 22.8% (Llama, CI 20.6-25.3) of the time — ~1 in 4 swaps hide inside the verifier's own re-feed noise. True-KV (thaw receipt) verifier: 0.",
+    "A re-feed argmax-verifier would accept a runner-up forgery at 4.6% (Qwen, CI 3.3-6.4) / 3.3% (Llama, CI 2.5-4.5) of low-margin tokens, and wrongly reject genuine output at ~3.5-4.6%. True-KV verifier: 0 in both directions.",
+    "At a tight logit tolerance (tau=0.01 nats), re-feed verification false-rejects 8.6% (Qwen) / 11.5% (Llama) of genuine tokens; true-KV: 0%.",
+    "Conclusion: replay-from-re-feed verification has both a false-reject cost on genuine output and a forgery-acceptance hole at the tokens that matter, in two model families with tight CIs; replay-from-true-KV (thaw's .thawkv inference receipt) removes both."
+  ],
+  "scope": "The true-KV arm is sound by construction (decode-time distribution = the commitment; .thawkv restores it bit-identically per thaw's separate receipts). This run measures the re-feed verifier against that ground truth on fresh greedy generations across two model families. A head-to-head against a deployed DiFR/TOPLOC codebase remains a further step.",
+  "reproducer": "benchmarks/verifier_headtohead.py --models Qwen/Qwen2.5-7B-Instruct,meta-llama/Llama-3.1-8B-Instruct --n-prompts 150"
+}
