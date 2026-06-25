@@ -62,8 +62,9 @@ to see them all. Current ERROR rules:
   `thaw`. Write `import thaw`. (This one cost real fresh-pod debugging hours.)
 - **Personal `@icloud.com` email** in tracked files → the public contact is
   `nils@thaw.sh`.
-- **`matteso1/thaw` URLs** → the repo lives at `thaw-ai/thaw`; the old one is
-  archived and 404s clone scripts.
+- **Archived `matteso1` repo URLs** → the repo lives at `thaw-ai/thaw`; the old
+  one is archived and 404s clone scripts. (This rule's own name is why this line
+  doesn't spell out the full archived path — the linter would flag itself.)
 - **Leftover `breakpoint()` / `pdb.set_trace()`** in shipped Python.
 - **Retracted speedup multipliers** (`17.2x`, `12.6x`, `9.7x`, `5.9x`) in the
   README or `site/` — see [receipt hygiene](#receipt--benchmark-hygiene).
