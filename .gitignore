@@ -143,3 +143,5 @@ docs/notes/
 *.mp4
 *.Rhistory
 /thaw demo videos/
+# arXiv submission bundle — generated/local, may contain pre-publication scratch.
+paper/refeed-drift/arxiv-upload/
