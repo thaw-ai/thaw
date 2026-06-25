@@ -530,6 +530,9 @@ mod tests {
     /// feature build, `true`. This is the contract that downstream
     /// runtime-dispatch code depends on.
     #[test]
+    // These assert on a compile-time constant on purpose: the whole point is
+    // to pin the CUDA_AVAILABLE <-> feature-flag contract per build config.
+    #[allow(clippy::assertions_on_constants)]
     fn cuda_available_matches_feature() {
         #[cfg(feature = "cuda")]
         assert!(CUDA_AVAILABLE);

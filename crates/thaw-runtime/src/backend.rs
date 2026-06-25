@@ -538,7 +538,6 @@ unsafe impl Send for HostRegistration {}
 impl Drop for HostRegistration {
     fn drop(&mut self) {
         if !self.is_real {
-            return;
         }
         #[cfg(feature = "cuda")]
         {
