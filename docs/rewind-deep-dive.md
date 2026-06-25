@@ -59,7 +59,7 @@ Forking the trunk is half of it. The other half is making sense of what came bac
 
 `thaw rewind` answers both, and it runs on a laptop with no GPU, because a rollout is just a file (the generated tokens plus the logprob the model assigned each one).
 
-![thaw rewind: pivot, diff, and inspect RL rollouts on a laptop, no GPU](https://raw.githubusercontent.com/thaw-ai/thaw/main/thaw-rewind.gif)
+![thaw rewind: pivot, diff, and inspect RL rollouts on a laptop, no GPU](https://raw.githubusercontent.com/thaw-ai/thaw/main/assets/thaw-rewind.gif)
 
 Here is a real example: Qwen2.5-7B-Instruct, best-of-8 on one reasoning problem, captured on an A100.
 

@@ -136,3 +136,10 @@ docs/READING.md
 docs/RELEASING.md
 docs/notes/
 .claude/
+# ============================================================================
+# Local scratch / large media — kept out of the repo (use a release or the
+# site's own assets for anything that needs to be public).
+# ============================================================================
+*.mp4
+*.Rhistory
+/thaw demo videos/
