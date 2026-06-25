@@ -313,7 +313,7 @@ fn build_freeze_plan(
             logical_id: request.logical_id,
             file_offset: entry.file_offset(),
             size: entry.size(),
-            device_region: request.device_region.clone(),
+            device_region: request.device_region,
         });
         total_bytes += request.device_region.size;
     }
@@ -622,7 +622,7 @@ where
             bytes_copied: 0,
         });
     }
-    let num_chunks = (payload_len + chunk_size - 1) / chunk_size;
+    let num_chunks = payload_len.div_ceil(chunk_size);
 
     let total_bytes: u64 = plan.iter().map(|p| p.size).sum();
 
@@ -831,7 +831,7 @@ where
         return Ok(FreezeStats::default());
     }
 
-    let num_chunks = ((file_len as usize) + chunk_size - 1) / chunk_size;
+    let num_chunks = (file_len as usize).div_ceil(chunk_size);
 
     let total_bytes: u64 = plan.iter().map(|p| p.size).sum();
 
@@ -1248,7 +1248,7 @@ where
     // Align the start down to the nearest page boundary for O_DIRECT.
     let read_start = payload_start & !0xFFF; // round down to 4096
     let read_len = (payload_end - read_start) as usize;
-    let num_chunks = (read_len + chunk_size - 1) / chunk_size;
+    let num_chunks = read_len.div_ceil(chunk_size);
 
     /// Round `n` up to the next multiple of 4096.
     fn align_up_4k(n: usize) -> usize {
@@ -1603,7 +1603,7 @@ where
 
     let read_start = payload_start & !0xFFF;
     let read_len = (payload_end - read_start) as usize;
-    let num_chunks = (read_len + chunk_size - 1) / chunk_size;
+    let num_chunks = read_len.div_ceil(chunk_size);
 
     let mut bufs = acquire_wc_bufs(backend, chunk_size).map_err(RestoreError::Backend)?;
     let streams = [
@@ -2243,7 +2243,7 @@ mod tests {
 
         for i in 0..20u32 {
             let ptr = DevicePtr(0x1000 + i as u64 * 0x100);
-            let data: Vec<u8> = (0..32).map(|b| (b + i as u8 * 5) & 0xFF).collect();
+            let data: Vec<u8> = (0..32).map(|b| b + i as u8 * 5).collect();
             src.register_region(ptr, data.clone());
             requests.push(FreezeRequest::new(
                 RegionKind::Weights,
@@ -2396,7 +2396,7 @@ mod tests {
 
         for i in 0..20u32 {
             let ptr = DevicePtr(0x1000 + i as u64 * 0x100);
-            let data: Vec<u8> = (0..32).map(|b| (b + i as u8 * 5) & 0xFF).collect();
+            let data: Vec<u8> = (0..32).map(|b| b + i as u8 * 5).collect();
             backend.register_region(ptr, data.clone());
             requests.push(FreezeRequest::new(
                 RegionKind::Weights,
@@ -2417,15 +2417,11 @@ mod tests {
         assert_eq!(stats.regions_frozen, 20);
 
         let parsed = thaw_core::Snapshot::from_prelude_bytes(&file).expect("parse");
-        for i in 0..20 {
+        for (i, exp) in expected.iter().enumerate() {
             let entry = parsed.table().get(i).unwrap();
             let start = entry.file_offset() as usize;
             let end = start + entry.size() as usize;
-            assert_eq!(
-                &file[start..end],
-                expected[i].as_slice(),
-                "region {i} mismatch"
-            );
+            assert_eq!(&file[start..end], exp.as_slice(), "region {i} mismatch");
         }
     }
 

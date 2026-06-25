@@ -202,6 +202,7 @@ impl SnapshotHeader {
     /// callers to pass parameters (version, model id, etc.) in future
     /// versions of this function, and a custom constructor is easier to
     /// evolve than an impl of `Default`.
+    #[allow(clippy::new_without_default)] // intentional: see the note above
     pub fn new() -> Self {
         SnapshotHeader {
             magic: MAGIC,
