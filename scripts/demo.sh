@@ -5,10 +5,10 @@
 #   # (or, from a clone with nothing installed:)
 #   #   export THAW="python -m thaw_vllm.cli"   (run with PYTHONPATH=python)
 #
-#   asciinema rec thaw-demo.cast --overwrite -c "bash scripts/demo.sh"
-#   agg thaw-demo.cast thaw-demo.gif     # https://github.com/asciinema/agg
+#   asciinema rec assets/thaw-demo.cast --overwrite -c "bash scripts/demo.sh"
+#   agg assets/thaw-demo.cast assets/thaw-demo.gif     # https://github.com/asciinema/agg
 #
-# Then drop thaw-demo.gif above the README fold.
+# Then drop assets/thaw-demo.gif above the README fold.
 
 THAW="${THAW:-thaw}"
 prompt() { printf '\033[1;36m$\033[0m %s\n' "$*"; sleep 0.8; }

@@ -17,7 +17,7 @@ An agent's KV cache — its working memory — normally dies with the process. t
 The part most tools miss: **inspecting, diffing, and tracing sessions needs no GPU** — only `checkout` (rehydrating onto a GPU) does. So the everyday loop runs on your laptop.
 
 <p align="center">
-  <img src="thaw-demo.gif" alt="thaw — log, inspect, and diff live agent sessions on a laptop, no GPU" width="820">
+  <img src="assets/thaw-demo.gif" alt="thaw — log, inspect, and diff live agent sessions on a laptop, no GPU" width="820">
 </p>
 
 ### Research
@@ -72,7 +72,7 @@ And it's fast where it counts: a pre-warmed pool forks at **0.88s/round** (≈40
 `thaw rewind` is the rollout-level companion to the session verbs. Capture N sampled continuations from a trunk (with per-token logprobs), then find where they diverge and which one the model was most confident in — on a laptop, no GPU.
 
 <p align="center">
-  <img src="thaw-rewind.gif" alt="thaw rewind: diff 8 best-of-N reasoning rollouts from Qwen2.5-7B on a laptop, no GPU" width="760">
+  <img src="assets/thaw-rewind.gif" alt="thaw rewind: diff 8 best-of-N reasoning rollouts from Qwen2.5-7B on a laptop, no GPU" width="760">
 </p>
 
 | verb | what it does | needs a GPU? |
@@ -143,7 +143,7 @@ ForkPool amortizes setup cost across repeated forks. Each primitive behind it is
 | Llama-3.1-8B, 1× H100 SXM, TP=1 | **3.4s** | **11.1s** | 16 GB, 195 regions | 45.38 GiB | [`sleep_mode_8b_tp1.json`](site/receipts/2026-04-22_rfc/sleep_mode_8b_tp1.json) |
 | Llama-3.1-70B, 2× H100 SXM, TP=2 | **16.1s** | **53.6s** | 141 GB, 966 regions | 72.67 GiB/rank (145 GiB total) | [`sleep_mode_70b_tp2.json`](site/receipts/2026-04-22_rfc/sleep_mode_70b_tp2.json) |
 
-**Slot-warm hot-swap** (`thaw serve` with a persisted pinned mmap, H100 SXM Llama-3-8B): one-time `cudaHostRegister` pin ~6s, then **0.29s / 55 GB/s** per reload (86% of PCIe Gen5 line rate). Reproducer: [`bench_slot_warm.py`](bench_slot_warm.py), correctness: [`bench_slot_warm_correctness.py`](bench_slot_warm_correctness.py). Extrapolates to ~2.5s hot-swap for a 70B at 140 GB.
+**Slot-warm hot-swap** (`thaw serve` with a persisted pinned mmap, H100 SXM Llama-3-8B): one-time `cudaHostRegister` pin ~6s, then **0.29s / 55 GB/s** per reload (86% of PCIe Gen5 line rate). Reproducer: [`bench_slot_warm.py`](benchmarks/bench_slot_warm.py), correctness: [`bench_slot_warm_correctness.py`](benchmarks/bench_slot_warm_correctness.py). Extrapolates to ~2.5s hot-swap for a 70B at 140 GB.
 
 Every other "fast model loading" tool restores weights only. thaw restores the full state of a live inference session — weights + KV blocks + prefix-hash table + scheduler state — and that's what makes fork work.
 
@@ -247,6 +247,12 @@ llm.generate(["hello"])                      # bit-identical tokens
 ```
 
 ## Architecture
+
+<p align="center">
+  <img src="docs/architecture-map.png" alt="thaw architecture — Python integration (vLLM + torch, needs a GPU) over the Rust core (the byte mover) writing .thaw/.thawkv files to NVMe/S3, which the laptop surface (no GPU) reads to log, diff, inspect, and rewind" width="900">
+</p>
+
+<sub>The split that matters: the GPU path (Python + Rust) <b>writes</b> the file; the laptop surface <b>reads</b> it. <code>log</code>, <code>diff</code>, <code>inspect</code>, and <code>rewind</code> never touch a GPU.</sub>
 
 ```
 thaw/
@@ -552,7 +558,7 @@ Lots of work in adjacent spaces. None of them fork a live session at the GPU-sta
 
 1. **Fork as a primitive.** Nobody else snapshots the combined weights + KV cache + prefix-hash table + scheduler state of a live inference engine and restores it into a fresh process. This is what makes agent branching, RL rollout deduplication, and session migration actually work. Everything below exists to make this primitive fast enough to be useful.
 2. **KV cache snapshot with prefix-hash reconstruction.** The moat under the moat. LMCache / Dynamo tier KV blocks for their own cache; they don't let you transport a cache between engines. thaw does.
-3. **Saturates commodity hardware.** Slot-warm hot-swap hits 55 GB/s on a single H100 SXM (no GDS, no RAID, no special drivers — reproducer: [`bench_slot_warm.py`](bench_slot_warm.py)). The speed is table stakes for the fork primitive to be viable.
+3. **Saturates commodity hardware.** Slot-warm hot-swap hits 55 GB/s on a single H100 SXM (no GDS, no RAID, no special drivers — reproducer: [`bench_slot_warm.py`](benchmarks/bench_slot_warm.py)). The speed is table stakes for the fork primitive to be viable.
 4. **Works with vLLM and SGLang.** Two engines, one `.thaw` file. `load_format="thaw"` for vLLM, class-passthrough loader for SGLang.
 
 **How thaw is not LMCache / Tensormesh.** LMCache (and Tensormesh, which commercializes it) is a *server-side cache-tiering proxy* that sits in front of your engine, watches incoming requests, and serves prefix cache hits from GPU/RAM/NVMe tiers. It's passive: requests come in, matches happen or don't. thaw is an *imperative primitive* your code calls at a specific pivot — `fork(llm) → handle` returns an atomic, portable reference to that session (weights + KV + scheduler state + prefix-hash table) that any other process can hydrate. LMCache can't give you a handle you hand to an RL worker; it's not the API shape. HuggingFace's 2026 async-RL survey documented this gap explicitly: *"no current async library supports [KV pivot resampling] out of the box."* Different product, different buyer — their raise is validation, not overlap.
