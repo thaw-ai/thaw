@@ -61,7 +61,7 @@ if [ -d thaw ]; then
     cd thaw && git pull
 else
     if [ -n "${GITHUB_PAT:-}" ]; then
-        git clone "https://${GITHUB_PAT}@github.com/matteso1/thaw.git"
+        git clone "https://${GITHUB_PAT}@github.com/thaw-ai/thaw.git"
     else
         git clone https://github.com/thaw-ai/thaw.git
     fi

@@ -10,7 +10,7 @@
 # Usage on a fresh RunPod/Lambda pod:
 #   export HF_TOKEN=hf_xxxxx
 #   export GITHUB_PAT=ghp_xxxxx
-#   curl -sSL https://raw.githubusercontent.com/matteso1/thaw/main/demos/run_quick_test.sh | bash -s -- --setup
+#   curl -sSL https://raw.githubusercontent.com/thaw-ai/thaw/main/demos/run_quick_test.sh | bash -s -- --setup
 
 set -euo pipefail
 
@@ -37,7 +37,7 @@ if $SETUP; then
     # Clone repo
     if [ ! -d /workspace/thaw ]; then
         if [ -n "${GITHUB_PAT:-}" ]; then
-            git clone "https://${GITHUB_PAT}@github.com/matteso1/thaw.git" /workspace/thaw
+            git clone "https://${GITHUB_PAT}@github.com/thaw-ai/thaw.git" /workspace/thaw
         else
             git clone https://github.com/thaw-ai/thaw.git /workspace/thaw
         fi

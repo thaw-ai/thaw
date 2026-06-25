@@ -12,7 +12,7 @@
 # pattern, and measures wall-clock time for each path.
 #
 # Required env:
-#   GH_PAT      GitHub PAT with repo access to matteso1/thaw
+#   GH_PAT      GitHub PAT with repo access to thaw-ai/thaw
 #
 # Optional env:
 #   SIZE_MB     default 16384  (16 GiB — approx Llama-3-8B weights)
@@ -22,7 +22,7 @@
 #
 # Usage on vllm/vllm-openai:latest pod:
 #   export GH_PAT=...
-#   git clone https://$GH_PAT@github.com/matteso1/thaw.git /workspace/thaw
+#   git clone https://$GH_PAT@github.com/thaw-ai/thaw.git /workspace/thaw
 #   bash /workspace/thaw/scripts/pod-bench-freeze.sh
 #
 # If the checkout already exists, the script will `git fetch + reset --hard`
@@ -63,7 +63,7 @@ fi
 banner "[1/3] Clone + update thaw"
 mkdir -p "$(dirname "$THAW_DIR")"
 if [ ! -d "$THAW_DIR/.git" ]; then
-  git clone "https://$GH_PAT@github.com/matteso1/thaw.git" "$THAW_DIR"
+  git clone "https://$GH_PAT@github.com/thaw-ai/thaw.git" "$THAW_DIR"
 else
   cd "$THAW_DIR"
   git fetch --quiet origin main
