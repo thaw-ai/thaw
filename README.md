@@ -9,6 +9,7 @@
 [![Tests](https://github.com/thaw-ai/thaw/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/thaw-ai/thaw/actions/workflows/test.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Downloads](https://static.pepy.tech/badge/thaw-vllm)](https://pepy.tech/project/thaw-vllm)
+[![arXiv](https://img.shields.io/badge/arXiv-2606.15621-b31b1b.svg)](https://arxiv.org/abs/2606.15621)
 
 **git for live LLM agent sessions.**
 
@@ -22,7 +23,7 @@ The part most tools miss: **inspecting, diffing, and tracing sessions needs no G
 
 ### Research
 
-**Re-feeding Is Not Replaying: Measuring Replay Noise in Counterfactual Token-Credit Estimation** (sole author, June 2026) - [PDF](https://nilsmatteson.com/refeed-drift.pdf) | [source + data](paper/refeed-drift/)
+**Re-feeding Is Not Replaying: Measuring Replay Noise in Counterfactual Token-Credit Estimation** (sole author, June 2026) - [arXiv](https://arxiv.org/abs/2606.15621) | [PDF](https://nilsmatteson.com/refeed-drift.pdf) | [source + data](paper/refeed-drift/)
 
 Counterfactual token-credit methods rebuild model state by re-feeding the transcript as a fresh prompt; this paper measures what that costs on stock vLLM with a three-pass design (exact KV resume, replica noise floor, re-feed). Re-feeding moves credit estimates at low-margin decision tokens 14-28pp above the replica floor, threshold-based critical-token selection is materially affected, and vLLM's batch-invariant kernels eliminate the effect bit-exactly. Total compute: under $10. Every per-pivot record, run log, and the analysis script that emits each number are in [`benchmarks/`](benchmarks/) and [`paper/refeed-drift/`](paper/refeed-drift/).
 
