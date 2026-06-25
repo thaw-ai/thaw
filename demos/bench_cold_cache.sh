@@ -8,7 +8,7 @@
 # Usage (fresh pod, one line):
 #   export GH_PAT=ghp_xxx HF_TOKEN=hf_xxx
 #   curl -sSL -H "Authorization: token $GH_PAT" \
-#     https://raw.githubusercontent.com/matteso1/thaw/main/demos/bench_cold_cache.sh \
+#     https://raw.githubusercontent.com/thaw-ai/thaw/main/demos/bench_cold_cache.sh \
 #     | GH_PAT=$GH_PAT HF_TOKEN=$HF_TOKEN bash
 #
 # Or after the repo is cloned:
@@ -76,11 +76,11 @@ if [ "$SKIP_SETUP" != "1" ]; then
         log "  thaw/ already exists — pulling latest"
         cd thaw && git pull
     else
-        git clone "https://${GH_PAT}@github.com/matteso1/thaw.git"
+        git clone "https://${GH_PAT}@github.com/thaw-ai/thaw.git"
         cd thaw
     fi
     # Scrub PAT from remote so it doesn't linger in git config on the pod
-    git remote set-url origin "https://github.com/matteso1/thaw.git"
+    git remote set-url origin "https://github.com/thaw-ai/thaw.git"
 
     log "=== Installing vLLM + maturin ==="
     pip install -q vllm "maturin[patchelf]" huggingface_hub 2>&1 | tail -3 | tee -a "$MAIN_LOG"

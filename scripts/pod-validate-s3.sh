@@ -20,7 +20,7 @@
 # Usage (pod template: vllm-latest → vllm/vllm-openai:latest):
 #   export GH_PAT=... AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 #   export AWS_DEFAULT_REGION=us-east-2 THAW_BUCKET=thaw-test-nils-2026
-#   git clone https://$GH_PAT@github.com/matteso1/thaw.git /workspace/thaw
+#   git clone https://$GH_PAT@github.com/thaw-ai/thaw.git /workspace/thaw
 #   bash /workspace/thaw/scripts/pod-validate-s3.sh
 #
 # The script fetches + hard-resets origin/main itself, so to re-run with
@@ -69,7 +69,7 @@ fi
 banner "[2/3] Clone + install thaw (Python, --no-deps)"
 mkdir -p "$(dirname "$THAW_DIR")"
 if [ ! -d "$THAW_DIR/.git" ]; then
-  git clone "https://$GH_PAT@github.com/matteso1/thaw.git" "$THAW_DIR"
+  git clone "https://$GH_PAT@github.com/thaw-ai/thaw.git" "$THAW_DIR"
 else
   cd "$THAW_DIR"
   git fetch --quiet origin main

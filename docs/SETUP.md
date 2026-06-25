@@ -91,7 +91,7 @@ Colab doesn't persist state across sessions, so you re-run setup each time. Budg
 
 ```python
 # Cell 1: clone the repo
-!git clone https://github.com/matteso1/thaw.git
+!git clone https://github.com/thaw-ai/thaw.git
 %cd thaw
 
 # Cell 2: install Rust (cached across sessions if you use a persistent disk,

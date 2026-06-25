@@ -17,7 +17,7 @@
 # overlay the git checkout for the Python code.
 #
 # Required env:
-#   GH_PAT               GitHub PAT with repo scope (matteso1/thaw)
+#   GH_PAT               GitHub PAT with repo scope (thaw-ai/thaw)
 #
 # Optional env:
 #   HF_TOKEN             HF token for gated Llama weights
@@ -29,7 +29,7 @@
 # Usage (pod: vllm/vllm-openai:latest):
 #   export GH_PAT=...
 #   export HF_TOKEN=...                # for gated Llama
-#   git clone https://$GH_PAT@github.com/matteso1/thaw.git /workspace/thaw
+#   git clone https://$GH_PAT@github.com/thaw-ai/thaw.git /workspace/thaw
 #   bash /workspace/thaw/scripts/pod-validate-kv.sh
 #
 # Re-run to pull latest code: same command. Script fetch+resets origin/main.
@@ -93,7 +93,7 @@ fi
 banner "[2/4] Clone + install thaw (Python, --no-deps)"
 mkdir -p "$(dirname "$THAW_DIR")"
 if [ ! -d "$THAW_DIR/.git" ]; then
-  git clone "https://$GH_PAT@github.com/matteso1/thaw.git" "$THAW_DIR"
+  git clone "https://$GH_PAT@github.com/thaw-ai/thaw.git" "$THAW_DIR"
 else
   cd "$THAW_DIR"
   git fetch --quiet origin main

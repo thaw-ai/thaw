@@ -10,6 +10,69 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: lint (clippy, ruff, thaw-lint)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      # fetch-depth: 0 so the changed-files ruff step can diff against the
+      # PR base (or the previous commit on a push).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff
+
+      # ruff runs on CHANGED Python only. The legacy tree has known debt
+      # (tracked in the ratchet plan in CONTRIBUTING.md); gating the whole
+      # tree on it would block every PR. Scoping to the diff means new and
+      # touched code must be clean without forcing a one-shot tree cleanup
+      # that would collide with in-flight PRs. --select F,E9 = real bugs
+      # (undefined names, unused imports, syntax), not style.
+      - name: ruff (real-bug rules) on changed Python
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$BASE" ]; then BASE="${{ github.event.before }}"; fi
+          if ! git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+            BASE="$(git rev-parse HEAD^ 2>/dev/null || true)"
+          fi
+          if [ -n "$BASE" ]; then
+            FILES="$(git diff --name-only --diff-filter=ACMR "$BASE" HEAD -- '*.py' || true)"
+          else
+            FILES="$(git ls-files '*.py')"
+          fi
+          if [ -z "$FILES" ]; then
+            echo "No changed Python files — skipping ruff."
+            exit 0
+          fi
+          echo "Linting changed Python files:"
+          echo "$FILES"
+          echo "$FILES" | xargs ruff check --select F,E9
+
+      # thaw-lint runs on the WHOLE tree: every rule is a regression guard on
+      # something currently clean (or a non-blocking WARN), so it stays green.
+      - name: thaw-lint (project footguns)
+        run: python tools/thaw_lint.py
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # clippy runs tree-wide with -D warnings: the workspace is clean today,
+      # so this is a regression guard. thaw-py is excluded (it needs the
+      # PyO3/CUDA surface that only builds in the wheel workflow).
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --exclude thaw-py --all-targets -- -D warnings
+
   rust:
     name: cargo test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

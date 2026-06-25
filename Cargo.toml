@@ -36,7 +36,7 @@ version = "0.3.2"
 edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
-repository = "https://github.com/matteso1/thaw"
+repository = "https://github.com/thaw-ai/thaw"
 authors = ["Nils Matteson <nils@thaw.sh>"]
 
 # Release profile tuning. `opt-level = 3` is the Rust default for release,

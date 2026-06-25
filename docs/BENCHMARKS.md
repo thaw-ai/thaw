@@ -231,7 +231,7 @@ For why whole-flow speedup numbers depend heavily on whether HF download is in t
 
 ```bash
 # On any CUDA 12+ machine with enough VRAM for the model:
-git clone https://github.com/matteso1/thaw.git && cd thaw
+git clone https://github.com/thaw-ai/thaw.git && cd thaw
 pip install "maturin[patchelf]" vllm
 cd crates/thaw-py && maturin develop --release --features cuda && cd ../..
 
