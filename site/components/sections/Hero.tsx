@@ -2,14 +2,16 @@
 
 import { motion, useReducedMotion } from "framer-motion";
 import { CopyChip } from "@/components/ui/CopyChip";
-import { HeroBackdrop } from "@/components/sections/HeroBackdrop";
 
 const ease = [0.22, 1, 0.36, 1] as const;
 
 export function Hero() {
   return (
-    <section className="relative px-6 md:px-8 pt-32 md:pt-40 pb-24 md:pb-28">
-      <HeroBackdrop />
+    <section className="relative px-6 md:px-8 pt-32 md:pt-40 pb-24 md:pb-28 overflow-hidden">
+      {/* The ground is the data structure itself: a faint field of KV blocks,
+          one shared prefix run lit, a handful of divergent blocks in frost.
+          Pure CSS/SVG — renders identically everywhere, costs nothing. */}
+      <BlockField />
       <div className="relative z-10 max-w-[1200px] mx-auto flex flex-col items-center text-center">
         {/* version pill — eyebrow #1 of 2 on the page */}
         <motion.div
@@ -32,12 +34,10 @@ export function Hero() {
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.7, ease, delay: 0.05 }}
-          className="display mt-7 text-ink text-balance max-w-[18ch]"
+          className="display mt-7 text-ink text-balance max-w-[21ch]"
           style={{
-            fontSize: "clamp(2.75rem, 5.5vw, 4.5rem)",
-            lineHeight: 1.04,
-            letterSpacing: "-0.03em",
-            fontWeight: 600,
+            fontSize: "clamp(3rem, 6.4vw, 5.25rem)",
+            lineHeight: 1.02,
           }}
         >
           Snapshot, branch, and diff a running LLM session.
@@ -152,16 +152,14 @@ function DiffTerminal() {
 
   return (
     <div className="terminal overflow-hidden text-left">
-      {/* title bar */}
-      <div className="relative flex items-center h-9 px-4 border-b border-rule">
-        <div className="flex items-center gap-2">
-          <span className="size-[11px] rounded-full bg-ink-ghost" />
-          <span className="size-[11px] rounded-full bg-ink-ghost" />
-          <span className="size-[11px] rounded-full bg-ink-ghost" />
-        </div>
-        <div className="absolute inset-x-0 text-center font-mono text-[12px] text-ink-dim pointer-events-none">
-          thaw diff base.thaw reviewer-security.thaw
-        </div>
+      {/* title bar — a file tab, not a fake macOS window */}
+      <div className="flex items-center justify-between h-9 px-4 border-b border-rule">
+        <span className="font-mono text-[12px] text-ink-dim">
+          base.thaw ⇄ reviewer-security.thaw
+        </span>
+        <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-ink-faint">
+          diff
+        </span>
       </div>
 
       {/* body */}
@@ -227,4 +225,70 @@ function Sign({
 }
 function Spacer() {
   return <div className="h-[1.7em]" aria-hidden />;
+}
+
+/* ── BlockField — the hero ground. ─────────────────────────────────────────────
+ * A deterministic grid of KV-cache blocks: most sit near-invisible, one
+ * contiguous run (the shared prefix) is lifted a step, and a few blocks past
+ * the divergence point glow frost. It is the product's data structure used as
+ * texture. Static SVG; no JS, no video, no three.js.
+ * ── */
+
+const FIELD = { cols: 24, rows: 7, w: 34, h: 14, gapX: 10, gapY: 12 };
+
+function blockTone(col: number, row: number): string {
+  // shared prefix: a lit run on the center row
+  if (row === 3 && col >= 3 && col <= 14) return "rgba(244,246,248,0.13)";
+  // divergent blocks: frost, sparse, after the fork point
+  const diverge =
+    (row === 2 && (col === 16 || col === 19)) ||
+    (row === 4 && (col === 17 || col === 21)) ||
+    (row === 3 && col === 16);
+  if (diverge) return "rgba(111,179,217,0.38)";
+  // everything else: barely there
+  return "rgba(244,246,248,0.045)";
+}
+
+function BlockField() {
+  const { cols, rows, w, h, gapX, gapY } = FIELD;
+  const width = cols * (w + gapX) - gapX;
+  const height = rows * (h + gapY) - gapY;
+
+  const blocks: React.ReactNode[] = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      blocks.push(
+        <rect
+          key={`${r}-${c}`}
+          x={c * (w + gapX)}
+          y={r * (h + gapY)}
+          width={w}
+          height={h}
+          rx={3}
+          fill={blockTone(c, r)}
+        />,
+      );
+    }
+  }
+
+  return (
+    <div
+      aria-hidden
+      className="pointer-events-none absolute inset-x-0 top-0 z-0 flex justify-center"
+      style={{
+        maskImage:
+          "radial-gradient(ellipse 70% 90% at 50% 0%, #000 30%, transparent 78%)",
+        WebkitMaskImage:
+          "radial-gradient(ellipse 70% 90% at 50% 0%, #000 30%, transparent 78%)",
+      }}
+    >
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="w-[min(1240px,120vw)] max-w-none mt-14"
+        style={{ height: "auto" }}
+      >
+        {blocks}
+      </svg>
+    </div>
+  );
 }

@@ -17,7 +17,7 @@ export function Primitive() {
           <Reveal>
             <h2
               className="display text-ink"
-              style={{ fontSize: "clamp(2rem, 3.2vw, 2.75rem)", lineHeight: 1.08, letterSpacing: "-0.025em", fontWeight: 600 }}
+              style={{ fontSize: "var(--h-mid)", lineHeight: 1.08 }}
             >
               Six verbs. One file.
             </h2>

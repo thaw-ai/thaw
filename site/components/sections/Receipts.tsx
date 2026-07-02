@@ -53,7 +53,7 @@ export function Receipts() {
         <Reveal delay={0.06}>
           <h2
             className="mt-4 display text-ink max-w-[18ch]"
-            style={{ fontSize: "var(--h-mid)", lineHeight: 1.08, letterSpacing: "-0.025em", fontWeight: 600 }}
+            style={{ fontSize: "var(--h-mid)", lineHeight: 1.08 }}
           >
             The numbers, with the hardware attached.
           </h2>

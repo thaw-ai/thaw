@@ -2,8 +2,8 @@ import { Reveal } from "@/components/ui/Reveal";
 
 export function Vision() {
   return (
-    <section id="vision" className="relative px-6 md:px-8 py-36 md:py-56 border-t border-rule overflow-hidden">
-      {/* a single chrome whisper — the brand metal, pulled almost to black */}
+    <section id="vision" className="relative px-6 md:px-8 py-24 md:py-36 border-t border-rule overflow-hidden">
+      {/* a single frost whisper, pulled almost to black */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0 flex items-center justify-center"
@@ -15,8 +15,8 @@ export function Vision() {
       <div className="relative max-w-[1200px] mx-auto text-center">
         <Reveal>
           <p
-            className="display text-ink mx-auto max-w-[16ch] text-balance"
-            style={{ fontSize: "var(--h-peak)", lineHeight: 1.04, letterSpacing: "-0.035em", fontWeight: 600 }}
+            className="display italic text-ink mx-auto max-w-[18ch] text-balance"
+            style={{ fontSize: "var(--h-peak)", lineHeight: 1.06 }}
           >
             A session is a value. Treat it like one.
           </p>
