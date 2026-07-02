@@ -25,7 +25,7 @@ export function Install() {
         <Reveal>
           <h2
             className="display text-ink max-w-[22ch]"
-            style={{ fontSize: "var(--h-mid)", lineHeight: 1.08, letterSpacing: "-0.025em", fontWeight: 600 }}
+            style={{ fontSize: "var(--h-mid)", lineHeight: 1.08 }}
           >
             Install and inspect a snapshot in two lines.
           </h2>

@@ -62,10 +62,11 @@
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
 
   /* — Heading scale. Three deliberate tiers so the page has volume, not one
-       flat size repeated down the scroll. — */
-  --h-loud:  clamp(2.5rem, 4.6vw, 3.6rem);   /* signature feature sections */
-  --h-mid:   clamp(2rem, 3.2vw, 2.75rem);    /* standard section heading   */
-  --h-peak:  clamp(2.5rem, 5.4vw, 4.25rem);  /* the thesis / closing line  */
+       flat size repeated down the scroll. Serif runs optically smaller than
+       the old grotesque, so each tier sits ~10% larger. — */
+  --h-loud:  clamp(2.75rem, 5vw, 4rem);      /* signature feature sections */
+  --h-mid:   clamp(2.25rem, 3.6vw, 3rem);    /* standard section heading   */
+  --h-peak:  clamp(2.75rem, 6vw, 4.75rem);   /* the thesis / closing line  */
 }
 
 html {
@@ -121,24 +122,24 @@ body {
   --color-accent: var(--uv);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-  --font-display: var(--font-geist-sans);
+  --font-display: var(--font-instrument-serif);
 }
 
 /* ----------------------------------------------------------------------------
- * Display headlines. Geist heavy weights + tight tracking. The big move:
- * headlines now look architectural, not soft.
+ * Display headlines. Instrument Serif against the mono data everywhere else:
+ * the register of a typeset technical journal, not a SaaS landing page. One
+ * weight (400); the serif carries the character, so tracking stays natural.
  * ---------------------------------------------------------------------------- */
 .display {
-  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
-  font-weight: 600;
-  letter-spacing: -0.03em;
-  line-height: 1.04;
-  font-feature-settings: "ss01", "cv11", "tnum";
+  font-family: var(--font-instrument-serif), ui-serif, Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  line-height: 1.05;
 }
 
 .display-tight {
-  letter-spacing: -0.055em;
-  line-height: 0.9;
+  letter-spacing: -0.02em;
+  line-height: 0.95;
 }
 
 /* Chrome gradient — slightly more contrast, cooler bottom, no purple bias. */
@@ -345,27 +346,25 @@ body {
  * enhancement via a view() timeline. No IntersectionObserver, no client JS.
  * ---------------------------------------------------------------------------- */
 @keyframes reveal-rise {
-  from { opacity: 0; transform: translateY(16px); }
-  to   { opacity: 1; transform: none; }
+  from { transform: translateY(18px); }
+  to   { transform: none; }
 }
 
 .reveal { opacity: 1; }
 
+/* Motion, never visibility: the rise animates transform only, so content is
+   fully visible in every regime -- full-page screenshots, print, fast anchor
+   jumps, partial scroll restoration. Fading below-fold content to opacity 0
+   was the one way this page could ever look broken. */
 @media (prefers-reduced-motion: no-preference) {
   @supports (animation-timeline: view()) {
     .reveal {
-      opacity: 0;
       animation: reveal-rise both linear;
       animation-timeline: view();
-      animation-range: entry 4% entry 36%;
-      will-change: opacity, transform;
+      animation-range: entry 4% entry 32%;
+      will-change: transform;
     }
   }
-}
-
-::selection {
-  background: var(--uv);
-  color: var(--bg);
 }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
